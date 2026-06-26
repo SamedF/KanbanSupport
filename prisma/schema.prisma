@@ -1,0 +1,98 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model User {
+  id           Int      @id @default(autoincrement())
+  username     String   @unique
+  passwordHash String
+  role         String   @default("admin")
+  isActive     Boolean  @default(true)
+  displayName  String?
+  email        String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  comments     TicketComment[]
+  events       TicketEvent[]
+}
+
+model Ticket {
+  id              Int       @id @default(autoincrement())
+  externalId      String?   @unique
+  subject         String
+  senderName      String?
+  senderEmail     String?
+  companyName     String?
+  status          String    @default("New")
+  priority        String    @default("Normal")
+  category        String?
+  assignedAgent   String?
+  source          String    @default("email")
+  emailMessageId  String?
+  hubspotTicketId String?
+  jiraTicketKey   String?
+  body            String?
+  emailRaw        Json?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  resolvedAt      DateTime?
+
+  comments        TicketComment[]
+  events          TicketEvent[]
+
+  @@index([senderEmail])
+  @@index([status])
+  @@index([createdAt])
+}
+
+model TicketComment {
+  id         Int      @id @default(autoincrement())
+  ticketId   Int
+  userId     Int?
+  comment    String
+  isInternal Boolean  @default(true)
+  createdAt  DateTime @default(now())
+
+  ticket     Ticket   @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  user       User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+}
+
+model TicketEvent {
+  id        Int      @id @default(autoincrement())
+  ticketId  Int
+  userId    Int?
+  eventType String
+  oldValue  String?
+  newValue  String?
+  metadata  Json?
+  createdAt DateTime @default(now())
+
+  ticket    Ticket   @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  user      User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+}
+
+model OAuthToken {
+  id           Int      @id @default(autoincrement())
+  provider     String   @unique
+  accessToken  String?
+  refreshToken String?
+  expiresAt    DateTime?
+  metadata     Json?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}
+
+model SyncLog {
+  id        Int      @id @default(autoincrement())
+  provider  String
+  syncType   String
+  status    String
+  message   String?
+  metadata  Json?
+  createdAt DateTime @default(now())
+}
