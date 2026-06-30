@@ -1,0 +1,33 @@
+# Dependencies
+node_modules/
+vendor/
+
+# Environment & secrets — NEVER commit these
+.env
+.env.*
+*.local
+*.key
+*.pem
+*.p12
+secrets*
+credentials*
+
+# Build output
+dist/
+build/
+out/
+.next/
+
+# Logs
+*.log
+logs/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor / IDE
+.idea/
+.vscode/
+*.swp
+*.swo
