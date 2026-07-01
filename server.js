@@ -579,9 +579,7 @@ async function safeWriteState(state) {
   const currentVersion = Number(currentMeta.clientVersion || 0);
   const incomingSavedAt = Number(incomingMeta.clientSavedAt || 0);
   const currentSavedAt = Number(currentMeta.clientSavedAt || 0);
-
-  if (incomingVersion < currentVersion) return { saved: false, reason: 'stale_version' };
-  if (incomingVersion === currentVersion && incomingSavedAt < currentSavedAt) return { saved: false, reason: 'stale_timestamp' };
+  const isStale = incomingVersion < currentVersion || (incomingVersion === currentVersion && incomingSavedAt < currentSavedAt);
 
   // Merge ticket stages with per-ticket timestamps so stale snapshots cannot roll
   // back a stage that was moved more recently.
@@ -605,6 +603,41 @@ async function safeWriteState(state) {
   });
   nextState.ticketState = mergedStages;
   nextState.ticketStageTouchedAt = mergedTouched;
+
+  // Ticket numbers must never regress: a browser tab/session that hasn't caught
+  // up with numbers assigned elsewhere would otherwise reassign a lower number
+  // (or a duplicate) to a ticket that already has a higher one recorded.
+  const currentNumbers = (currentState.ticketNumbers && typeof currentState.ticketNumbers === 'object') ? currentState.ticketNumbers : {};
+  const incomingNumbers = (nextState.ticketNumbers && typeof nextState.ticketNumbers === 'object') ? nextState.ticketNumbers : {};
+  const mergedNumbers = { ...currentNumbers };
+  Object.entries(incomingNumbers).forEach(([ticketId, num]) => {
+    const n = Number(num || 0);
+    if (n > Number(mergedNumbers[ticketId] || 0)) mergedNumbers[ticketId] = n;
+  });
+  const mergedCounter = Math.max(
+    Number(currentState.ticketNumberCounter || 0),
+    Number(nextState.ticketNumberCounter || 0),
+    ...Object.values(mergedNumbers).map(n => Number(n) || 0),
+    0
+  );
+  nextState.ticketNumbers = mergedNumbers;
+  nextState.ticketNumberCounter = mergedCounter;
+
+  // Union tickets by id so a session that hasn't polled/merged every ticket yet
+  // can never make tickets known to other sessions vanish from the saved board.
+  const currentTickets = Array.isArray(currentState.allTickets) ? currentState.allTickets : [];
+  const incomingTickets = Array.isArray(nextState.allTickets) ? nextState.allTickets : [];
+  const unionedTickets = new Map(currentTickets.filter(t => t && t.id).map(t => [String(t.id), t]));
+  incomingTickets.forEach((t) => {
+    if (!t || !t.id) return;
+    const key = String(t.id);
+    unionedTickets.set(key, { ...(unionedTickets.get(key) || {}), ...t });
+  });
+  nextState.allTickets = [...unionedTickets.values()];
+
+  const seenIdSet = new Set(Array.isArray(currentState.seenIds) ? currentState.seenIds : []);
+  (Array.isArray(nextState.seenIds) ? nextState.seenIds : []).forEach(id => seenIdSet.add(id));
+  nextState.seenIds = [...seenIdSet];
 
   const previousTeamsMeta = (currentMeta.teamsResolvedNotified && typeof currentMeta.teamsResolvedNotified === 'object') ? currentMeta.teamsResolvedNotified : {};
   const previousTeamsPending = (currentMeta.teamsResolvedPending && typeof currentMeta.teamsResolvedPending === 'object') ? currentMeta.teamsResolvedPending : {};
@@ -655,12 +688,18 @@ async function safeWriteState(state) {
 
   const now = Date.now();
   const enrichedMeta = {
-    ...incomingMeta,
+    ...(isStale ? currentMeta : incomingMeta),
     serverSavedAt: now,
     teamsResolvedNotified,
     teamsResolvedPending
   };
-  const finalState = { ...nextState, _meta: enrichedMeta };
+  // A stale snapshot (e.g. from a lagging tab) must not blindly overwrite
+  // fields it didn't correctly merge - keep the current state as the base and
+  // only layer in the fields we've safely reconciled above by id/timestamp.
+  const reconciledFields = ['ticketState', 'ticketStageTouchedAt', 'ticketNumbers', 'ticketNumberCounter', 'allTickets', 'seenIds'];
+  const finalState = isStale
+    ? { ...currentState, ...Object.fromEntries(reconciledFields.map(key => [key, nextState[key]])), _meta: enrichedMeta }
+    : { ...nextState, _meta: enrichedMeta };
 
   fs.mkdirSync(path.dirname(DATA_PATH), { recursive: true });
   fs.writeFileSync(DATA_PATH, JSON.stringify(finalState, null, 2), 'utf8');
@@ -680,7 +719,7 @@ async function safeWriteState(state) {
     });
   }
 
-  return { saved: true, backupCreated, resolvedTeamsAlertsQueued: pendingResolvedTeamsAlerts.length };
+  return { saved: true, partial: isStale, backupCreated, resolvedTeamsAlertsQueued: pendingResolvedTeamsAlerts.length, state: finalState };
 }
 async function hydrateStateFromDatabase(baseState = {}) {
   const state = (baseState && typeof baseState === 'object') ? JSON.parse(JSON.stringify(baseState)) : {};
@@ -2691,14 +2730,15 @@ app.post('/api/state', requireAuth, async (req, res) => {
   const result = await safeWriteState(state);
   let ticketDb = { count: 0 };
   try {
-    ticketDb = await upsertBoardTicketsToDatabase(state, req);
+    ticketDb = await upsertBoardTicketsToDatabase(result.state || state, req);
   } catch (error) {
     console.error('Ticket database sync failed:', error);
     await prisma.syncLog.create({
       data: { provider: 'kanban', syncType: 'board_state_to_ticket_db', status: 'error', message: error.message || String(error) }
     }).catch(() => null);
   }
-  res.json({ ok: !!result.saved, ...result, ticketDb });
+  const { state: _fullState, ...resultSummary } = result;
+  res.json({ ok: !!result.saved, ...resultSummary, ticketDb });
 });
 
 app.post('/api/hubspot/companies/:companyId/custom-property', requireAuth, async (req, res) => {
