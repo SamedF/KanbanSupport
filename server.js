@@ -741,8 +741,14 @@ async function hydrateStateFromDatabase(baseState = {}) {
 
     ticketsById.set(externalId, mergedTicket);
     seenIds.add(externalId);
-    state.ticketState[externalId] = normalizeDbStatusForBoard(ticket.status);
-    state.ticketStageTouchedAt[externalId] = new Date(ticket.updatedAt || ticket.createdAt || Date.now()).getTime();
+    const dbTouchedAt = new Date(ticket.updatedAt || ticket.createdAt || Date.now()).getTime();
+    const currentTouchedAt = Number(state.ticketStageTouchedAt[externalId] || 0);
+    if (dbTouchedAt >= currentTouchedAt || !state.ticketState[externalId]) {
+      state.ticketState[externalId] = normalizeDbStatusForBoard(ticket.status);
+      state.ticketStageTouchedAt[externalId] = dbTouchedAt;
+    } else {
+      state.ticketStageTouchedAt[externalId] = currentTouchedAt;
+    }
     if (ticket.priority) state.ticketPriority[externalId] = ticket.priority;
     if (ticket.category) state.ticketCategory[externalId] = ticket.category;
     if (ticket.assignedAgent) state.ticketAssignee[externalId] = ticket.assignedAgent;

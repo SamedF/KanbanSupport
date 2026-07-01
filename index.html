@@ -3053,8 +3053,14 @@ function mergeDatabaseTickets(dbTickets){
     byId.set(id,{...(current||{}),id,email:nextEmail,priority:row.priority||current?.priority||'Normal'});
     ensureTicketNumber(id);
     seen[id]=true;
-    ticketState[id]=normalizeDbStatusForBoard(row.status||ticketState[id]||'new');
-    ticketStageTouchedAt[id]=Date.parse(row.updatedAt||row.createdAt||'')||Date.now();
+    const dbTouchedAt=Date.parse(row.updatedAt||row.createdAt||'')||Date.now();
+    const currentTouchedAt=Number(ticketStageTouchedAt[id]||0);
+    if(dbTouchedAt>=currentTouchedAt||!ticketState[id]){
+      ticketState[id]=normalizeDbStatusForBoard(row.status||ticketState[id]||'new');
+      ticketStageTouchedAt[id]=dbTouchedAt;
+    }else{
+      ticketStageTouchedAt[id]=currentTouchedAt;
+    }
     if(row.priority)ticketPriority[id]=row.priority;
     if(row.category)ticketCategory[id]=row.category;
     if(row.assignedAgent)ticketAssignee[id]=row.assignedAgent;
