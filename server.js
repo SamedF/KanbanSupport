@@ -28,6 +28,7 @@ const M365_TENANT_ID = process.env.M365_TENANT_ID || '';
 const M365_CLIENT_ID = process.env.M365_CLIENT_ID || '';
 const M365_CLIENT_SECRET = process.env.M365_CLIENT_SECRET || '';
 const M365_REDIRECT_URI = process.env.M365_REDIRECT_URI || `http://localhost:${PORT}/auth/microsoft/callback`;
+const M365_SCOPES = String(process.env.M365_SCOPES || 'offline_access openid profile email User.Read User.ReadBasic.All Mail.Read Mail.Read.Shared Chat.Create Chat.ReadWrite').trim();
 const SUPPORT_MAILBOX = String(process.env.SUPPORT_MAILBOX || 'helpdesk@quinta.im').trim().toLowerCase();
 const HUBSPOT_TOKEN = process.env.HUBSPOT_PRIVATE_APP_TOKEN || process.env.HUBSPOT_ACCESS_TOKEN || '';
 const HAS_STATIC_HUBSPOT_TOKEN = !!HUBSPOT_TOKEN && HUBSPOT_TOKEN.startsWith('pat-');
@@ -67,6 +68,20 @@ const JIRA_EMAIL = process.env.JIRA_EMAIL || process.env.JIRA_USER_EMAIL || '';
 const JIRA_API_TOKEN = process.env.JIRA_API_TOKEN || '';
 const JIRA_PROJECT_KEY = process.env.JIRA_PROJECT_KEY || '';
 const JIRA_ISSUE_TYPE = process.env.JIRA_ISSUE_TYPE || 'Task';
+const TEAMS_EMAIL_DOMAIN = String(process.env.TEAMS_EMAIL_DOMAIN || 'quinta.im').trim().toLowerCase();
+const TEAMS_FALLBACK_EMAIL_DOMAIN = String(process.env.TEAMS_FALLBACK_EMAIL_DOMAIN || 'quicktext.im').trim().toLowerCase();
+const CS_TEAMS_EMAIL_OVERRIDES = (() => {
+  const raw = String(process.env.CS_TEAMS_EMAIL_OVERRIDES || '').trim();
+  if (!raw) return {};
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+    return Object.fromEntries(Object.entries(parsed).map(([k, v]) => [String(k || '').trim().toUpperCase(), String(v || '').trim().toLowerCase()]).filter(([k, v]) => k && v));
+  } catch (_) {
+    return {};
+  }
+})();
+
 const APP_BUILD_VERSION = (
   process.env.RENDER_GIT_COMMIT ||
   process.env.RAILWAY_GIT_COMMIT_SHA ||
@@ -550,7 +565,7 @@ function writeBackupSnapshot(state) {
     try { fs.unlinkSync(file.fullPath); } catch (_) {}
   });
 }
-function safeWriteState(state) {
+async function safeWriteState(state) {
   const nextState = (state && typeof state === 'object') ? state : {};
   const currentState = safeReadState();
   const currentMeta = currentState._meta || {};
@@ -586,24 +601,81 @@ function safeWriteState(state) {
   nextState.ticketState = mergedStages;
   nextState.ticketStageTouchedAt = mergedTouched;
 
+  const previousTeamsMeta = (currentMeta.teamsResolvedNotified && typeof currentMeta.teamsResolvedNotified === 'object') ? currentMeta.teamsResolvedNotified : {};
+  const previousTeamsPending = (currentMeta.teamsResolvedPending && typeof currentMeta.teamsResolvedPending === 'object') ? currentMeta.teamsResolvedPending : {};
+  const teamsResolvedNotified = { ...previousTeamsMeta };
+  const teamsResolvedPending = { ...previousTeamsPending };
+  const ticketsById = new Map(
+    (Array.isArray(nextState.allTickets) ? nextState.allTickets : [])
+      .filter(ticket => ticket && ticket.id)
+      .map(ticket => [String(ticket.id), ticket])
+  );
+  stageIds.forEach((ticketId) => {
+    const nextStage = normalizeBoardStatusForDb(mergedStages[ticketId] || 'new');
+    const prevStage = normalizeBoardStatusForDb(currentStages[ticketId] || 'new');
+    const category = String((nextState.ticketCategory && nextState.ticketCategory[ticketId]) || '').trim().toLowerCase();
+    if (nextStage !== 'Resolved' || category === 'spam') {
+      delete teamsResolvedNotified[ticketId];
+      delete teamsResolvedPending[ticketId];
+      return;
+    }
+    const marker = String(Number(mergedTouched[ticketId] || Date.now()));
+    if (prevStage !== 'Resolved') {
+      teamsResolvedPending[ticketId] = marker;
+      delete teamsResolvedNotified[ticketId];
+      return;
+    }
+    if (teamsResolvedPending[ticketId] && teamsResolvedPending[ticketId] !== marker) {
+      teamsResolvedPending[ticketId] = marker;
+    }
+  });
+
+  const pendingResolvedTeamsAlerts = [];
+  Object.entries(teamsResolvedPending).forEach(([ticketId, marker]) => {
+    if (teamsResolvedNotified[ticketId] === marker) return;
+    const csOwner = String((nextState.ticketCSOwner && nextState.ticketCSOwner[ticketId]) || '').trim().toUpperCase();
+    if (!csOwner) return;
+    const ticket = ticketsById.get(ticketId) || null;
+    pendingResolvedTeamsAlerts.push({
+      ticketId,
+      marker: String(marker),
+      csOwner,
+      ticketNumber: nextState.ticketNumbers && nextState.ticketNumbers[ticketId] ? String(nextState.ticketNumbers[ticketId]) : null,
+      subject: String(ticket?.email?.subject || '(no subject)').trim(),
+      companyName: String((nextState.hsCache && nextState.ticketClientEmail && nextState.ticketClientEmail[ticketId] && nextState.hsCache[nextState.ticketClientEmail[ticketId]]?.companyName) || '').trim() || null,
+      jiraKey: String((nextState.ticketJira && nextState.ticketJira[ticketId]) || '').trim() || null,
+      assignee: String((nextState.ticketAssignee && nextState.ticketAssignee[ticketId]) || '').trim() || null
+    });
+  });
+
   const now = Date.now();
   const enrichedMeta = {
     ...incomingMeta,
-    serverSavedAt: now
+    serverSavedAt: now,
+    teamsResolvedNotified,
+    teamsResolvedPending
   };
   const finalState = { ...nextState, _meta: enrichedMeta };
 
   fs.mkdirSync(path.dirname(DATA_PATH), { recursive: true });
   fs.writeFileSync(DATA_PATH, JSON.stringify(finalState, null, 2), 'utf8');
 
+  let backupCreated = false;
   const lastBackupAt = Number(currentMeta.lastBackupAt || 0);
   if (now - lastBackupAt >= BACKUP_MIN_INTERVAL_MS) {
     const withBackupMeta = { ...finalState, _meta: { ...enrichedMeta, lastBackupAt: now } };
     fs.writeFileSync(DATA_PATH, JSON.stringify(withBackupMeta, null, 2), 'utf8');
     writeBackupSnapshot(withBackupMeta);
-    return { saved: true, backupCreated: true };
+    backupCreated = true;
   }
-  return { saved: true, backupCreated: false };
+
+  if (pendingResolvedTeamsAlerts.length) {
+    void sendResolvedTeamsNotifications(pendingResolvedTeamsAlerts).catch((error) => {
+      console.warn('Resolved Teams notifications failed:', error?.message || error);
+    });
+  }
+
+  return { saved: true, backupCreated, resolvedTeamsAlertsQueued: pendingResolvedTeamsAlerts.length };
 }
 async function hydrateStateFromDatabase(baseState = {}) {
   const state = (baseState && typeof baseState === 'object') ? JSON.parse(JSON.stringify(baseState)) : {};
@@ -689,21 +761,23 @@ async function hydrateStateFromDatabase(baseState = {}) {
   return state;
 }
 
-async function graphDelegatedToken(req) {
+async function resolveStoredM365Tokens(req = null) {
   const storedTokens = await getStoredOAuthTokens('m365');
   const fileTokens = getPersistedM365Tokens();
-  const t = req.session?.m365Tokens || storedTokens || fileTokens;
-  if (!t?.accessToken || !t?.refreshToken) throw new Error('m365_not_connected');
+  const sessionTokens = req?.session?.m365Tokens || null;
+  const tokens = sessionTokens || storedTokens || fileTokens;
+  if (!tokens?.accessToken || !tokens?.refreshToken) throw new Error('m365_not_connected');
   if (!storedTokens && fileTokens?.refreshToken) await setStoredOAuthTokens('m365', fileTokens);
-  if (Date.now() < (t.expiresAt || 0) - 60_000) return t.accessToken;
+  return tokens;
+}
 
+async function refreshStoredM365Tokens(tokens, req = null) {
   const form = new URLSearchParams({
     grant_type: 'refresh_token',
     client_id: M365_CLIENT_ID,
     client_secret: M365_CLIENT_SECRET,
-    refresh_token: t.refreshToken,
-    redirect_uri: M365_REDIRECT_URI,
-    scope: 'offline_access openid profile email Mail.Read Mail.Read.Shared'
+    refresh_token: tokens.refreshToken,
+    redirect_uri: M365_REDIRECT_URI
   });
   const res = await fetch(`https://login.microsoftonline.com/${M365_TENANT_ID}/oauth2/v2.0/token`, {
     method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: form
@@ -712,22 +786,164 @@ async function graphDelegatedToken(req) {
   const json = await res.json();
   const refreshed = {
     accessToken: json.access_token,
-    refreshToken: json.refresh_token || t.refreshToken,
+    refreshToken: json.refresh_token || tokens.refreshToken,
     expiresAt: Date.now() + (json.expires_in || 3600) * 1000
   };
-  req.session.m365Tokens = refreshed;
+  if (req?.session) req.session.m365Tokens = refreshed;
   await setStoredOAuthTokens('m365', refreshed);
   setPersistedM365Tokens(refreshed);
+  return refreshed;
+}
+
+async function graphDelegatedToken(req) {
+  const tokens = await resolveStoredM365Tokens(req);
+  if (Date.now() < (tokens.expiresAt || 0) - 60_000) return tokens.accessToken;
+  const refreshed = await refreshStoredM365Tokens(tokens, req);
   return refreshed.accessToken;
 }
 
-async function graphGet(pathname, token) {
-  const res = await fetch(`https://graph.microsoft.com/v1.0${pathname}`, { headers: { Authorization: `Bearer ${token}` } });
+async function graphDelegatedTokenFromStore() {
+  const tokens = await resolveStoredM365Tokens(null);
+  if (Date.now() < (tokens.expiresAt || 0) - 60_000) return tokens.accessToken;
+  const refreshed = await refreshStoredM365Tokens(tokens, null);
+  return refreshed.accessToken;
+}
+
+async function graphRequest(pathname, token, init = {}) {
+  const headers = { Authorization: `Bearer ${token}`, ...(init.headers || {}) };
+  const res = await fetch(`https://graph.microsoft.com/v1.0${pathname}`, { ...init, headers });
   if (!res.ok) {
     const txt = await res.text();
-    throw new Error(`graph_error_${res.status}:${txt.slice(0, 200)}`);
+    throw new Error(`graph_error_${res.status}:${txt.slice(0, 400)}`);
   }
+  if (res.status === 204) return null;
+  const contentType = String(res.headers.get('content-type') || '').toLowerCase();
+  if (!contentType.includes('application/json')) return null;
   return res.json();
+}
+
+async function graphGet(pathname, token) {
+  return graphRequest(pathname, token);
+}
+
+function escapeHtml(value) {
+  return String(value || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function csTeamsEmails(csOwner) {
+  const trigram = String(csOwner || '').trim().toUpperCase();
+  if (!trigram) return [];
+  const local = trigram.toLowerCase();
+  return [...new Set([
+    String(CS_TEAMS_EMAIL_OVERRIDES[trigram] || '').trim().toLowerCase(),
+    `${local}@${TEAMS_EMAIL_DOMAIN}`,
+    `${local}@${TEAMS_FALLBACK_EMAIL_DOMAIN}`
+  ].filter(Boolean))];
+}
+
+async function graphFindUserByEmail(token, email) {
+  const normalized = String(email || '').trim().toLowerCase();
+  if (!normalized) return null;
+  try {
+    return await graphGet(`/users/${encodeURIComponent(normalized)}?$select=id,displayName,mail,userPrincipalName`, token);
+  } catch (_) {
+    return null;
+  }
+}
+
+async function graphSendTeamsDirectMessage(token, recipientEmail, htmlMessage) {
+  const me = await graphGet('/me?$select=id,displayName,mail,userPrincipalName', token);
+  const recipient = await graphFindUserByEmail(token, recipientEmail);
+  if (!me?.id) throw new Error('m365_sender_not_resolved');
+  if (!recipient?.id) throw new Error(`teams_user_not_found:${recipientEmail}`);
+  const chat = await graphRequest('/chats', token, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      chatType: 'oneOnOne',
+      members: [
+        {
+          '@odata.type': '#microsoft.graph.aadUserConversationMember',
+          roles: ['owner'],
+          'user@odata.bind': `https://graph.microsoft.com/v1.0/users('${me.id}')`
+        },
+        {
+          '@odata.type': '#microsoft.graph.aadUserConversationMember',
+          roles: ['owner'],
+          'user@odata.bind': `https://graph.microsoft.com/v1.0/users('${recipient.id}')`
+        }
+      ]
+    })
+  });
+  if (!chat?.id) throw new Error('teams_chat_create_failed');
+  await graphRequest(`/chats/${encodeURIComponent(chat.id)}/messages`, token, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ body: { contentType: 'html', content: htmlMessage } })
+  });
+  return { chatId: chat.id, recipientId: recipient.id };
+}
+
+function buildResolvedTeamsMessage(item) {
+  const ticketNo = escapeHtml(item.ticketNumber ? `#${item.ticketNumber}` : item.ticketId);
+  const title = escapeHtml(item.subject || '(no subject)');
+  const company = escapeHtml(item.companyName || 'Unknown company');
+  const jira = item.jiraKey ? `<div><strong>Jira:</strong> ${escapeHtml(item.jiraKey)}</div>` : '';
+  const assignee = item.assignee ? `<div><strong>Support agent:</strong> ${escapeHtml(item.assignee)}</div>` : '';
+  return [
+    '<div>',
+    '<div><strong>Support Kanban update</strong></div>',
+    `<div style="margin-top:6px;">Ticket <strong>${ticketNo}</strong> moved to <strong>Resolved</strong>.</div>`,
+    `<div style="margin-top:6px;"><strong>Subject:</strong> ${title}</div>`,
+    `<div><strong>Company:</strong> ${company}</div>`,
+    assignee,
+    jira,
+    '</div>'
+  ].filter(Boolean).join('');
+}
+
+async function markResolvedTeamsNotificationDelivered(ticketId, marker) {
+  try {
+    const state = safeReadState();
+    const meta = (state._meta && typeof state._meta === 'object') ? state._meta : {};
+    const currentMap = (meta.teamsResolvedNotified && typeof meta.teamsResolvedNotified === 'object') ? meta.teamsResolvedNotified : {};
+    const pendingMap = (meta.teamsResolvedPending && typeof meta.teamsResolvedPending === 'object') ? meta.teamsResolvedPending : {};
+    currentMap[String(ticketId)] = String(marker);
+    delete pendingMap[String(ticketId)];
+    state._meta = { ...meta, teamsResolvedNotified: currentMap, teamsResolvedPending: pendingMap, serverSavedAt: Date.now() };
+    fs.writeFileSync(DATA_PATH, JSON.stringify(state, null, 2), 'utf8');
+  } catch (error) {
+    console.warn('Unable to mark Teams notification delivered:', error?.message || error);
+  }
+}
+
+async function sendResolvedTeamsNotifications(items) {
+  if (!Array.isArray(items) || !items.length) return;
+  const token = await graphDelegatedTokenFromStore();
+  for (const item of items) {
+    const recipients = csTeamsEmails(item.csOwner);
+    if (!recipients.length) continue;
+    let delivered = false;
+    let lastError = null;
+    for (const recipientEmail of recipients) {
+      try {
+        await graphSendTeamsDirectMessage(token, recipientEmail, buildResolvedTeamsMessage(item));
+        await markResolvedTeamsNotificationDelivered(item.ticketId, item.marker);
+        delivered = true;
+        break;
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    if (!delivered && lastError) {
+      console.warn(`Resolved Teams notification failed for ${item.ticketId}/${item.csOwner}:`, lastError?.message || lastError);
+    }
+  }
 }
 
 function mapMessage(msg) {
@@ -1329,7 +1545,7 @@ app.get('/auth/microsoft/start', requireAuth, (req, res) => {
   if (!M365_TENANT_ID || !M365_CLIENT_ID || !M365_CLIENT_SECRET) return res.status(500).send('Missing Microsoft env vars.');
   const state = crypto.randomBytes(16).toString('hex');
   req.session.m365State = state;
-  const scope = encodeURIComponent('offline_access openid profile email Mail.Read Mail.Read.Shared');
+  const scope = encodeURIComponent(M365_SCOPES);
   const url = `https://login.microsoftonline.com/${M365_TENANT_ID}/oauth2/v2.0/authorize?client_id=${encodeURIComponent(M365_CLIENT_ID)}&response_type=code&redirect_uri=${encodeURIComponent(M365_REDIRECT_URI)}&response_mode=query&scope=${scope}&state=${state}&prompt=select_account`;
   res.redirect(url);
 });
@@ -1344,7 +1560,7 @@ app.get('/auth/microsoft/callback', requireAuth, async (req, res) => {
       client_secret: M365_CLIENT_SECRET,
       code: String(code),
       redirect_uri: M365_REDIRECT_URI,
-      scope: 'offline_access openid profile email Mail.Read Mail.Read.Shared'
+      scope: M365_SCOPES
     });
     const tokenRes = await fetch(`https://login.microsoftonline.com/${M365_TENANT_ID}/oauth2/v2.0/token`, {
       method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: form
@@ -2422,7 +2638,7 @@ app.get('/api/state', requireAuth, async (req, res) => {
 });
 app.post('/api/state', requireAuth, async (req, res) => {
   const state = req.body || {};
-  const result = safeWriteState(state);
+  const result = await safeWriteState(state);
   let ticketDb = { count: 0 };
   try {
     ticketDb = await upsertBoardTicketsToDatabase(state, req);
