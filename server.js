@@ -1420,6 +1420,16 @@ async function upsertBoardTicketsToDatabase(state, req) {
   const ticketHubspotId = state.ticketHubspotId || {};
   const ticketComments = state.ticketComments || {};
 
+  const externalIds = [...new Set(allTickets.filter(t => t && t.id).map(t => String(t.id)))];
+  // Fetch every existing ticket (and its comments) in one round trip instead of
+  // one findUnique per ticket, so a single stage move doesn't have to pay for
+  // O(all tickets) database round trips - this is what made saves slow enough
+  // to time out as the board grew.
+  const existingTickets = externalIds.length
+    ? await prisma.ticket.findMany({ where: { externalId: { in: externalIds } }, include: { comments: true } })
+    : [];
+  const existingByExternalId = new Map(existingTickets.map(t => [t.externalId, t]));
+
   let count = 0;
 
   for (const item of allTickets) {
@@ -1437,11 +1447,33 @@ async function upsertBoardTicketsToDatabase(state, req) {
     const createdAt = safeDateForDb(email.receivedDateTime || ticketCreatedAt[externalId]) || new Date();
     const body = String(email.bodyPreview || email.preview || email.summary || email.body || email.text || '').trim() || null;
     const companyName = extractCompanyNameFromEmail(senderEmail);
+    const hubspotTicketId = ticketHubspotId[externalId] ? String(ticketHubspotId[externalId]) : null;
+    const jiraTicketKey = ticketJira[externalId] ? String(ticketJira[externalId]) : null;
 
-    const existingTicket = await prisma.ticket.findUnique({
-  where: { externalId }
-});
-    const ticket = await prisma.ticket.upsert({
+    const existingTicket = existingByExternalId.get(externalId) || null;
+    const comments = Array.isArray(ticketComments[externalId]) ? ticketComments[externalId] : [];
+    const existingCommentTexts = new Set((existingTicket?.comments || []).map(c => c.comment));
+    const newComments = comments
+      .map(c => ({ text: String(c?.text || c?.comment || '').trim(), ts: c?.ts || c?.createdAt }))
+      .filter(c => c.text && !existingCommentTexts.has(c.text));
+
+    const fieldsUnchanged = existingTicket
+      && existingTicket.subject === subject
+      && existingTicket.senderEmail === (senderEmail || null)
+      && existingTicket.companyName === companyName
+      && existingTicket.status === status
+      && existingTicket.priority === priority
+      && existingTicket.category === category
+      && existingTicket.assignedAgent === assignedAgent
+      && existingTicket.hubspotTicketId === hubspotTicketId
+      && existingTicket.jiraTicketKey === jiraTicketKey
+      && existingTicket.body === body;
+
+    if (fieldsUnchanged && !newComments.length) continue;
+
+    // If only new comments arrived and every other field already matches, we
+    // already have the ticket id from the batch fetch - no need to upsert.
+    const ticket = (fieldsUnchanged && existingTicket) ? existingTicket : await prisma.ticket.upsert({
       where: { externalId },
       create: {
         externalId,
@@ -1455,8 +1487,8 @@ async function upsertBoardTicketsToDatabase(state, req) {
         assignedAgent,
         source: 'outlook',
         emailMessageId: externalId,
-        hubspotTicketId: ticketHubspotId[externalId] ? String(ticketHubspotId[externalId]) : null,
-        jiraTicketKey: ticketJira[externalId] ? String(ticketJira[externalId]) : null,
+        hubspotTicketId,
+        jiraTicketKey,
         body,
         emailRaw: email,
         createdAt,
@@ -1473,103 +1505,44 @@ async function upsertBoardTicketsToDatabase(state, req) {
         assignedAgent,
         source: 'outlook',
         emailMessageId: externalId,
-        hubspotTicketId: ticketHubspotId[externalId] ? String(ticketHubspotId[externalId]) : null,
-        jiraTicketKey: ticketJira[externalId] ? String(ticketJira[externalId]) : null,
+        hubspotTicketId,
+        jiraTicketKey,
         body,
         emailRaw: email,
         resolvedAt: status === 'Resolved' ? new Date() : null
       }
     });
-    if (!existingTicket) {
-  await createTicketAuditEvent({
-    ticketId: ticket.id,
-    userId: req.session?.userId || null,
-    eventType: 'ticket_created',
-    oldValue: null,
-    newValue: status,
-    metadata: {
-      externalId,
-      subject,
-      senderEmail,
-      source: 'outlook'
-    }
-  });
-} else {
-  await auditTicketChanges({
-    ticketId: ticket.id,
-    userId: req.session?.userId || null,
-    before: existingTicket,
-    after: ticket,
-    fields: [
-      'subject',
-      'senderEmail',
-      'companyName',
-      'status',
-      'priority',
-      'category',
-      'assignedAgent',
-      'hubspotTicketId',
-      'jiraTicketKey',
-      'body'
-    ]
-  });
-}
 
-    const comments = Array.isArray(ticketComments[externalId]) ? ticketComments[externalId] : [];
-    for (const comment of comments) {
-      const text = String(comment?.text || comment?.comment || '').trim();
-      if (!text) continue;
-      const createdAtComment = safeDateForDb(comment?.ts || comment?.createdAt) || new Date();
-      const exists = await prisma.ticketComment.findFirst({
-        where: { ticketId: ticket.id, comment: text }
+    if (!existingTicket) {
+      await createTicketAuditEvent({
+        ticketId: ticket.id,
+        userId: req.session?.userId || null,
+        eventType: 'ticket_created',
+        oldValue: null,
+        newValue: status,
+        metadata: { externalId, subject, senderEmail, source: 'outlook' }
       });
-      if (!exists) {
-        await prisma.ticketComment.create({
-          data: {
-            ticketId: ticket.id,
-            userId: req?.session?.userId || null,
-            comment: text,
-            isInternal: true,
-            createdAt: createdAtComment
-          }
-        });
-      }
+    } else if (!fieldsUnchanged) {
+      await auditTicketChanges({
+        ticketId: ticket.id,
+        userId: req.session?.userId || null,
+        before: existingTicket,
+        after: ticket,
+        fields: ['subject', 'senderEmail', 'companyName', 'status', 'priority', 'category', 'assignedAgent', 'hubspotTicketId', 'jiraTicketKey', 'body']
+      });
     }
 
-    if (!existingTicket) {
-  await createTicketAuditEvent({
-    ticketId: ticket.id,
-    userId: req?.session?.userId || null,
-    eventType: 'ticket_created',
-    oldValue: null,
-    newValue: status,
-    metadata: {
-      externalId,
-      subject,
-      senderEmail,
-      source: 'outlook_board'
+    for (const comment of newComments) {
+      await prisma.ticketComment.create({
+        data: {
+          ticketId: ticket.id,
+          userId: req?.session?.userId || null,
+          comment: comment.text,
+          isInternal: true,
+          createdAt: safeDateForDb(comment.ts) || new Date()
+        }
+      });
     }
-  });
-} else {
-  await auditTicketChanges({
-    ticketId: ticket.id,
-    userId: req?.session?.userId || null,
-    before: existingTicket,
-    after: ticket,
-    fields: [
-      'subject',
-      'senderEmail',
-      'companyName',
-      'status',
-      'priority',
-      'category',
-      'assignedAgent',
-      'hubspotTicketId',
-      'jiraTicketKey',
-      'body'
-    ]
-  });
-}
 
     count += 1;
   }
