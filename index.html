@@ -2820,7 +2820,7 @@ async function apiGetTickets(){
 }
 async function apiSaveState(payload){
   try{
-    const res=await fetch('/api/state',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify(payload)});
+    const res=await fetch('/api/state',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',keepalive:true,body:JSON.stringify(payload)});
     return !!res.ok;
   }catch(_){}
   return false;
@@ -2880,9 +2880,9 @@ function flushStateWithBeacon(){
 function saveState(reason){
   const payload=buildStatePayload(reason);
   saveQueue=saveQueue.then(()=>apiSaveState(payload)).catch(()=>false);
-  void saveQueue;
   const ind=document.getElementById('save-indicator');
   if(ind){ind.style.opacity='1';clearTimeout(_saveTimer);_saveTimer=setTimeout(()=>{ind.style.opacity='0';},2500);}
+  return saveQueue;
 }
 function normalizeTicketStage(v){const s=String(v||'').trim().toLowerCase();if(STAGES.includes(s))return s;if(s==='in_progress'||s==='in-progress')return'inp';if(s==='waiting_on_us'||s==='waiting-on-us')return'wus';if(s==='due_for_test'||s==='due-for-test')return'dft';if(s==='waiting_on_contact'||s==='waiting-on-contact')return'wct';if(s==='resolved'||s==='closed')return'res';return'new';}
 function normalizeDbStatusForBoard(v){const s=String(v||'').trim().toLowerCase();if(s==='in progress')return'inp';if(s==='waiting on us')return'wus';if(s==='due for test')return'dft';if(s==='waiting on contact')return'wct';if(s==='resolved'||s==='closed')return'res';return'new';}
@@ -4324,7 +4324,7 @@ document.getElementById('agent-filter').addEventListener('change',e=>{activeA=e.
 document.getElementById('company-filter').addEventListener('change',e=>{activeCompany=e.target.value;if(viewMode==='kpi')renderKpiView();else renderBoard();});
 document.getElementById('ticket-number-filter').addEventListener('input',e=>{activeTicketNumber=e.target.value||'';renderBoard();});
 document.getElementById('current-user').addEventListener('change',()=>{renderBoard();updateMentionsBadge();});
-document.querySelectorAll('.col-body').forEach(col=>{col.addEventListener('dragover',e=>{e.preventDefault();col.classList.add('drag-over');});col.addEventListener('dragleave',()=>col.classList.remove('drag-over'));col.addEventListener('drop',async e=>{e.preventDefault();col.classList.remove('drag-over');const id=e.dataTransfer.getData('ticketId');if(!id)return;const prevCol=normalizeTicketStage(ticketState[id]||'new');const newCol=normalizeTicketStage(col.dataset.col);if(prevCol===newCol)return;ticketState[id]=newCol;ticketStageTouchedAt[id]=Date.now();saveState('ticket_stage_move');renderActiveView();col.classList.add('just-received');setTimeout(()=>col.classList.remove('just-received'),600);showToast(' Moved to '+COL_NAMES[newCol]+'  saved','move');const rs=await syncTicketStatusToHubspot(id,newCol);if(!rs?.ok&&rs?.reason!=='missing_hubspot_ticket_id'){showToast(`HubSpot status sync failed: ${rs?.error||rs?.reason}`);}});});
+document.querySelectorAll('.col-body').forEach(col=>{col.addEventListener('dragover',e=>{e.preventDefault();col.classList.add('drag-over');});col.addEventListener('dragleave',()=>col.classList.remove('drag-over'));col.addEventListener('drop',async e=>{e.preventDefault();col.classList.remove('drag-over');const id=e.dataTransfer.getData('ticketId');if(!id)return;const prevCol=normalizeTicketStage(ticketState[id]||'new');const newCol=normalizeTicketStage(col.dataset.col);if(prevCol===newCol)return;ticketState[id]=newCol;ticketStageTouchedAt[id]=Date.now();renderActiveView();col.classList.add('just-received');setTimeout(()=>col.classList.remove('just-received'),600);const saved=await saveState('ticket_stage_move');if(saved)showToast(' Moved to '+COL_NAMES[newCol]+'  saved','move');else showToast('Stage updated locally but save is still pending');const rs=await syncTicketStatusToHubspot(id,newCol);if(!rs?.ok&&rs?.reason!=='missing_hubspot_ticket_id'){showToast(`HubSpot status sync failed: ${rs?.error||rs?.reason}`);}});});
 document.querySelectorAll('[data-close]').forEach(b=>{b.addEventListener('click',()=>document.getElementById(b.dataset.close).classList.remove('open'));});
 document.querySelectorAll('.modal-bg').forEach(bg=>{bg.addEventListener('click',e=>{if(e.target===bg)bg.classList.remove('open');});});
 
