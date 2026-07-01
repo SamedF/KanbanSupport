@@ -70,6 +70,11 @@ const JIRA_PROJECT_KEY = process.env.JIRA_PROJECT_KEY || '';
 const JIRA_ISSUE_TYPE = process.env.JIRA_ISSUE_TYPE || 'Task';
 const TEAMS_EMAIL_DOMAIN = String(process.env.TEAMS_EMAIL_DOMAIN || 'quinta.im').trim().toLowerCase();
 const TEAMS_FALLBACK_EMAIL_DOMAIN = String(process.env.TEAMS_FALLBACK_EMAIL_DOMAIN || 'quicktext.im').trim().toLowerCase();
+const POWER_AUTOMATE_RESOLVED_WEBHOOK_URL = String(
+  process.env.POWER_AUTOMATE_RESOLVED_WEBHOOK_URL ||
+  'https://default4935953b2a5348c5a7058375353406.fe.environment.api.powerplatform.com:443/powerautomate/automations/direct/workflows/82dd97cb52864fb7ba392d2c0ff8af03/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=ugz4djfxnx2cVHj6utkxm6WMAy1VIjWRjy4uAwCeC-Y'
+).trim();
+const RESOLVED_ALERT_COPY_EMAIL = String(process.env.RESOLVED_ALERT_COPY_EMAIL || 'ahk@quinta.im').trim().toLowerCase();
 const CS_TEAMS_EMAIL_OVERRIDES = (() => {
   const raw = String(process.env.CS_TEAMS_EMAIL_OVERRIDES || '').trim();
   if (!raw) return {};
@@ -826,6 +831,21 @@ async function graphGet(pathname, token) {
   return graphRequest(pathname, token);
 }
 
+async function postJson(url, payload) {
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+  if (!response.ok) {
+    const text = await response.text().catch(() => '');
+    throw new Error(`webhook_error_${response.status}:${text.slice(0, 400)}`);
+  }
+  const contentType = String(response.headers.get('content-type') || '').toLowerCase();
+  if (!contentType.includes('application/json')) return null;
+  return response.json().catch(() => null);
+}
+
 function escapeHtml(value) {
   return String(value || '')
     .replace(/&/g, '&amp;')
@@ -922,28 +942,52 @@ async function markResolvedTeamsNotificationDelivered(ticketId, marker) {
   }
 }
 
-async function sendResolvedTeamsNotifications(items) {
-  if (!Array.isArray(items) || !items.length) return;
-  const token = await graphDelegatedTokenFromStore();
+function buildResolvedPowerAutomatePayload(item) {
+  const ticketNumber = String(item.ticketNumber || item.ticketId || '').trim();
+  const subject = String(item.subject || '(no subject)').trim();
+  const companyName = String(item.companyName || 'Unknown company').trim();
+  const jiraKey = String(item.jiraKey || '').trim();
+  const jiraUrl = jiraKey && JIRA_BASE_URL ? `${normalizeJiraBaseUrl(JIRA_BASE_URL)}/browse/${encodeURIComponent(jiraKey)}` : '';
+  const supportAgent = String(item.assignee || '').trim().toUpperCase();
+  const csOwner = String(item.csOwner || '').trim().toUpperCase();
+  const messageParts = [
+    `Ticket #${ticketNumber} moved to Resolved.`,
+    `Subject: ${subject}`,
+    `Company: ${companyName}`,
+    csOwner ? `CS: ${csOwner}` : '',
+    supportAgent ? `Support: ${supportAgent}` : '',
+    jiraKey ? `Jira: ${jiraKey}` : ''
+  ].filter(Boolean);
+  return {
+    ticketId: String(item.ticketId || '').trim(),
+    ticketNumber,
+    subject,
+    companyName,
+    csOwner,
+    supportAgent,
+    jiraKey,
+    jiraUrl,
+    status: 'Resolved',
+    message: messageParts.join('\n'),
+    copyEmail: RESOLVED_ALERT_COPY_EMAIL
+  };
+}
+
+async function sendResolvedWebhookNotifications(items) {
+  if (!Array.isArray(items) || !items.length || !POWER_AUTOMATE_RESOLVED_WEBHOOK_URL) return;
   for (const item of items) {
-    const recipients = csTeamsEmails(item.csOwner);
-    if (!recipients.length) continue;
-    let delivered = false;
-    let lastError = null;
-    for (const recipientEmail of recipients) {
-      try {
-        await graphSendTeamsDirectMessage(token, recipientEmail, buildResolvedTeamsMessage(item));
-        await markResolvedTeamsNotificationDelivered(item.ticketId, item.marker);
-        delivered = true;
-        break;
-      } catch (error) {
-        lastError = error;
-      }
-    }
-    if (!delivered && lastError) {
-      console.warn(`Resolved Teams notification failed for ${item.ticketId}/${item.csOwner}:`, lastError?.message || lastError);
+    try {
+      await postJson(POWER_AUTOMATE_RESOLVED_WEBHOOK_URL, buildResolvedPowerAutomatePayload(item));
+      await markResolvedTeamsNotificationDelivered(item.ticketId, item.marker);
+    } catch (error) {
+      console.warn(`Resolved notification webhook failed for ${item.ticketId}/${item.csOwner}:`, error?.message || error);
     }
   }
+}
+
+async function sendResolvedTeamsNotifications(items) {
+  if (!Array.isArray(items) || !items.length) return;
+  await sendResolvedWebhookNotifications(items);
 }
 
 function mapMessage(msg) {
