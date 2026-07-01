@@ -3,6 +3,8 @@ const prisma = require('./prismaClient');
 const express = require('express');
 const helmet = require('helmet');
 const session = require('express-session');
+const pgSession = require('connect-pg-simple')(session);
+const { Pool } = require('pg');
 const rateLimit = require('express-rate-limit');
 const bcrypt = require('bcryptjs');
 const fs = require('fs');
@@ -105,7 +107,13 @@ if (IS_PRODUCTION && SESSION_SECRET === 'change-this-session-secret') {
 
 app.use(helmet({ contentSecurityPolicy: false }));
 app.use(express.json({ limit: '2mb' }));
+// The default express-session MemoryStore keeps every session in the Node
+// process's own memory for as long as the process runs and never survives a
+// restart - on a memory-constrained host that grows without bound. Persist
+// sessions in Postgres instead, using the same database as everything else.
+const sessionPool = new Pool({ connectionString: process.env.DATABASE_URL });
 app.use(session({
+  store: new pgSession({ pool: sessionPool, tableName: 'session', createTableIfMissing: true }),
   name: 'kanban.sid',
   secret: SESSION_SECRET,
   resave: false,
