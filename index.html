@@ -2820,7 +2820,7 @@ async function apiGetTickets(){
 }
 async function apiSaveState(payload){
   try{
-    const res=await fetch('/api/state',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',keepalive:true,body:JSON.stringify(payload)});
+    const res=await fetch('/api/state',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify(payload)});
     return !!res.ok;
   }catch(_){}
   return false;
