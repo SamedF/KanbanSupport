@@ -1003,6 +1003,10 @@ function buildResolvedPowerAutomatePayload(item) {
   const jiraUrl = jiraKey && JIRA_BASE_URL ? `${normalizeJiraBaseUrl(JIRA_BASE_URL)}/browse/${encodeURIComponent(jiraKey)}` : '';
   const supportAgent = String(item.assignee || '').trim().toUpperCase();
   const csOwner = String(item.csOwner || '').trim().toUpperCase();
+  // The Power Automate flow's "Post message in a chat or channel" action needs
+  // a real email/UPN to resolve the recipient in Graph - the CS trigram alone
+  // (e.g. "MBH") is not one, so send the resolved address alongside it.
+  const recipientEmail = csTeamsEmails(csOwner)[0] || '';
   const messageParts = [
     `Ticket #${ticketNumber} moved to Resolved.`,
     `Subject: ${subject}`,
@@ -1017,6 +1021,7 @@ function buildResolvedPowerAutomatePayload(item) {
     subject,
     companyName,
     csOwner,
+    recipientEmail,
     supportAgent,
     jiraKey,
     jiraUrl,
