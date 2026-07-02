@@ -647,44 +647,35 @@ async function safeWriteState(state) {
   (Array.isArray(nextState.seenIds) ? nextState.seenIds : []).forEach(id => seenIdSet.add(id));
   nextState.seenIds = [...seenIdSet];
 
+  // Whether a ticket has already had its "Resolved" Teams DM sent - a plain
+  // boolean, reset only when the ticket leaves Resolved. Using the ticket's
+  // touched-at timestamp as an idempotency key (as this used to) was fragile:
+  // that timestamp can legitimately drift for reasons unrelated to the
+  // resolve event itself (e.g. a later comment bumping the DB row), which
+  // made an already-notified ticket look "not yet notified" again and
+  // re-sent the DM for a ticket that had been sitting in Resolved for a while.
   const previousTeamsMeta = (currentMeta.teamsResolvedNotified && typeof currentMeta.teamsResolvedNotified === 'object') ? currentMeta.teamsResolvedNotified : {};
-  const previousTeamsPending = (currentMeta.teamsResolvedPending && typeof currentMeta.teamsResolvedPending === 'object') ? currentMeta.teamsResolvedPending : {};
   const teamsResolvedNotified = { ...previousTeamsMeta };
-  const teamsResolvedPending = { ...previousTeamsPending };
   const ticketsById = new Map(
     (Array.isArray(nextState.allTickets) ? nextState.allTickets : [])
       .filter(ticket => ticket && ticket.id)
       .map(ticket => [String(ticket.id), ticket])
   );
+  const pendingResolvedTeamsAlerts = [];
   stageIds.forEach((ticketId) => {
     const nextStage = normalizeBoardStatusForDb(mergedStages[ticketId] || 'new');
     const prevStage = normalizeBoardStatusForDb(currentStages[ticketId] || 'new');
     const category = String((nextState.ticketCategory && nextState.ticketCategory[ticketId]) || '').trim().toLowerCase();
     if (nextStage !== 'Resolved' || category === 'spam') {
       delete teamsResolvedNotified[ticketId];
-      delete teamsResolvedPending[ticketId];
       return;
     }
-    const marker = String(Number(mergedTouched[ticketId] || Date.now()));
-    if (prevStage !== 'Resolved') {
-      teamsResolvedPending[ticketId] = marker;
-      delete teamsResolvedNotified[ticketId];
-      return;
-    }
-    if (teamsResolvedPending[ticketId] && teamsResolvedPending[ticketId] !== marker) {
-      teamsResolvedPending[ticketId] = marker;
-    }
-  });
-
-  const pendingResolvedTeamsAlerts = [];
-  Object.entries(teamsResolvedPending).forEach(([ticketId, marker]) => {
-    if (teamsResolvedNotified[ticketId] === marker) return;
+    if (prevStage === 'Resolved' || teamsResolvedNotified[ticketId]) return; // already resolved and/or already notified - nothing new happened
     const csOwner = String((nextState.ticketCSOwner && nextState.ticketCSOwner[ticketId]) || '').trim().toUpperCase();
     if (!csOwner) return;
     const ticket = ticketsById.get(ticketId) || null;
     pendingResolvedTeamsAlerts.push({
       ticketId,
-      marker: String(marker),
       csOwner,
       ticketNumber: nextState.ticketNumbers && nextState.ticketNumbers[ticketId] ? String(nextState.ticketNumbers[ticketId]) : null,
       subject: String(ticket?.email?.subject || '(no subject)').trim(),
@@ -696,15 +687,14 @@ async function safeWriteState(state) {
     // that lands while the webhook call is still in flight (very likely -
     // every drag/comment/poll triggers a save) would otherwise re-read this
     // same "not yet notified" state from disk and queue a second send.
-    teamsResolvedNotified[ticketId] = marker;
+    teamsResolvedNotified[ticketId] = true;
   });
 
   const now = Date.now();
   const enrichedMeta = {
     ...(isStale ? currentMeta : incomingMeta),
     serverSavedAt: now,
-    teamsResolvedNotified,
-    teamsResolvedPending
+    teamsResolvedNotified
   };
   // A stale snapshot (e.g. from a lagging tab) must not blindly overwrite
   // fields it didn't correctly merge - keep the current state as the base and
