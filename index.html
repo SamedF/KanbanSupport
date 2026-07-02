@@ -4324,10 +4324,14 @@ document.getElementById('agent-filter').addEventListener('change',e=>{activeA=e.
 document.getElementById('company-filter').addEventListener('change',e=>{activeCompany=e.target.value;if(viewMode==='kpi')renderKpiView();else renderBoard();});
 document.getElementById('ticket-number-filter').addEventListener('input',e=>{activeTicketNumber=e.target.value||'';renderBoard();});
 // Some browsers restore a text input's previously typed value on reload or
-// back/forward-cache navigation even with autocomplete off - force the
-// search box back to empty (matching activeTicketNumber's own default) so a
-// leftover query from a prior visit never silently filters the board.
-window.addEventListener('pageshow',()=>{const el=document.getElementById('ticket-number-filter');if(el&&el.value&&!activeTicketNumber)el.value='';});
+// back/forward-cache navigation even with autocomplete off, and can apply
+// that restoration asynchronously after the page has already finished
+// loading - force the search box back to empty (matching activeTicketNumber's
+// own default) at several points so a leftover query from a prior visit
+// never silently filters the board.
+function clearStaleTicketSearchInput(){const el=document.getElementById('ticket-number-filter');if(el&&el.value&&!activeTicketNumber)el.value='';}
+window.addEventListener('pageshow',clearStaleTicketSearchInput);
+window.addEventListener('load',()=>{clearStaleTicketSearchInput();setTimeout(clearStaleTicketSearchInput,300);setTimeout(clearStaleTicketSearchInput,1500);});
 document.getElementById('current-user').addEventListener('change',()=>{renderBoard();updateMentionsBadge();});
 document.querySelectorAll('.col-body').forEach(col=>{col.addEventListener('dragover',e=>{e.preventDefault();col.classList.add('drag-over');});col.addEventListener('dragleave',()=>col.classList.remove('drag-over'));col.addEventListener('drop',async e=>{e.preventDefault();col.classList.remove('drag-over');const id=e.dataTransfer.getData('ticketId');if(!id)return;const prevCol=normalizeTicketStage(ticketState[id]||'new');const newCol=normalizeTicketStage(col.dataset.col);if(prevCol===newCol)return;ticketState[id]=newCol;ticketStageTouchedAt[id]=Date.now();renderActiveView();col.classList.add('just-received');setTimeout(()=>col.classList.remove('just-received'),600);const saved=await saveState('ticket_stage_move');if(saved)showToast(' Moved to '+COL_NAMES[newCol]+'  saved','move');else showToast('Stage updated locally but save is still pending');const rs=await syncTicketStatusToHubspot(id,newCol);if(!rs?.ok&&rs?.reason!=='missing_hubspot_ticket_id'){showToast(`HubSpot status sync failed: ${rs?.error||rs?.reason}`);}});});
 document.querySelectorAll('[data-close]').forEach(b=>{b.addEventListener('click',()=>document.getElementById(b.dataset.close).classList.remove('open'));});
