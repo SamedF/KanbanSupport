@@ -819,6 +819,20 @@ header {
   animation: slideIn .35s cubic-bezier(.22, 1, .36, 1);
 }
 
+.card.new-reply-glow {
+  animation: newReplyGlow 1.6s ease-in-out infinite;
+}
+
+@keyframes newReplyGlow {
+  0%, 100% {
+    box-shadow: 0 0 0 0 rgba(79, 70, 229, .55), var(--shadow-xs);
+  }
+
+  50% {
+    box-shadow: 0 0 0 6px rgba(79, 70, 229, 0), var(--shadow-xs);
+  }
+}
+
 @keyframes slideIn {
   from {
     opacity: 0;
@@ -2701,13 +2715,14 @@ const SUPPORT_BOX_ALIASES=[SUPPORT_BOX,'helpdesk@quicktext.im'];
 function isQuintaSender(s){if(!s)return false;const d=(s.split('@')[1]||'').toLowerCase();return d.includes('quinta');}
 function isInternalEmailAddress(value){const addr=String(value||'').trim().toLowerCase();if(!addr)return false;if(SUPPORT_BOX_ALIASES.includes(addr))return true;const domain=addr.split('@')[1]||'';return INTERNAL_EMAIL_DOMAINS.includes(domain);}
 function getClientEmail(emailObj){const sender=(emailObj?.sender||'').toLowerCase();if(!isInternalEmailAddress(sender))return sender||null;const recipients=Array.isArray(emailObj?.recipients)?emailObj.recipients:[];const client=recipients.find(r=>{if(!r||typeof r!=='string')return false;const rl=r.toLowerCase();if(SUPPORT_BOX_ALIASES.includes(rl))return false;if(isInternalEmailAddress(rl))return false;if(NO_REPLY_PATTERNS.some(p=>rl.includes(p)))return false;return true;});return client?client.toLowerCase():null;}
+function csAgentFromSenderEmail(sender){const addr=String(sender||'').trim().toLowerCase();if(!addr.includes('@'))return'';const domain=addr.split('@')[1]||'';if(!INTERNAL_EMAIL_DOMAINS.includes(domain))return'';const local=addr.split('@')[0].toUpperCase();return CS_AGENTS.includes(local)?local:'';}
 function normalizeEmailList(values){return (Array.isArray(values)?values:[]).map(v=>String(v||'').trim().toLowerCase()).filter(Boolean);}
 function isAutomatic(e){if(!e||!e.sender)return true;const sl=e.sender.toLowerCase();if(sl===SUPPORT_BOX)return true;if(BLOCKED_EMAILS.has(sl))return true;const domain=(sl.split('@')[1]||'');if(BLOCKED_DOMAINS.has(domain))return true;if(NO_REPLY_PATTERNS.some(p=>sl.includes(p)))return true;if(!e.subject&&!e.summary)return true;const tl=((e.subject||'')+' '+(e.summary||'')).toLowerCase();if(NO_REPLY_SUBJECTS.some(p=>tl.includes(p)))return true;if(/\b(newsletter|webinar|digest|event reminder)\b/.test(tl))return true;if(/(microsoft teams meeting|join microsoft teams meeting|meeting invitation|accepted:|declined:|tentative:)/.test(tl))return true;return false;}
 function normalizeThreadSubject(subject){return String(subject||'').toLowerCase().replace(/^\s*((re|fw|fwd)\s*:\s*)+/gi,'').replace(/\s+/g,' ').trim();}
 function isReplyLikeSubject(subject){return /^\s*(re|fw|fwd)\s*:/i.test(String(subject||''));}
 function buildTicketThreadKeys(ticket,{allowSubjectFallback=true}={}){if(!ticket||!ticket.id)return[];const email=ticket.email||{};const keys=[];const conversationId=String(email.conversationId||'').trim();if(conversationId)keys.push(`conv:${conversationId}`);if(!allowSubjectFallback)return [...new Set(keys)];const sender=String(email.sender||'').trim().toLowerCase();const recipients=normalizeEmailList(email.recipients);const normalizedSubject=normalizeThreadSubject(email.subject||'');const clientEmail=(ticketClientEmail[ticket.id]||getClientEmail(email)||'').toLowerCase();const allowFallback=!conversationId&&isReplyLikeSubject(email.subject||'');if(clientEmail&&normalizedSubject&&allowFallback)keys.push(`client-subject:${clientEmail}::${normalizedSubject}`);if(sender&&normalizedSubject&&allowFallback)keys.push(`sender-subject:${sender}::${normalizedSubject}`);if(normalizedSubject&&recipients.length&&allowFallback){recipients.slice().sort().forEach(recipient=>{if(recipient&&!SUPPORT_BOX_ALIASES.includes(recipient))keys.push(`recipient-subject:${recipient}::${normalizedSubject}`);});}return [...new Set(keys)];}
 function findExistingTicketForEmail(emailObj){const probe={id:'__probe__',email:emailObj};const strictKeys=buildTicketThreadKeys(probe,{allowSubjectFallback:false});if(strictKeys.length){for(const ticket of allTickets){const existingStrictKeys=buildTicketThreadKeys(ticket,{allowSubjectFallback:false});if(existingStrictKeys.some(key=>strictKeys.includes(key)))return ticket;}}const fallbackKeys=buildTicketThreadKeys(probe,{allowSubjectFallback:true});if(!fallbackKeys.length)return null;for(const ticket of allTickets){const existingKeys=buildTicketThreadKeys(ticket,{allowSubjectFallback:true});if(existingKeys.some(key=>fallbackKeys.includes(key)))return ticket;}return null;}
-function mergeEmailIntoExistingTicket(ticket,emailObj,subtypeId){if(!ticket||!ticket.id||!emailObj)return false;ticket.email={...ticket.email,...emailObj};const ce=getClientEmail(emailObj);if(ce)ticketClientEmail[ticket.id]=ce;const st=SUBTYPE_BY_ID[subtypeId]||null;if(!ticketSubtype[ticket.id]&&st)ticketSubtype[ticket.id]=st.id;if(!ticketPriority[ticket.id]&&st)ticketPriority[ticket.id]=st.priority;return true;}
+function mergeEmailIntoExistingTicket(ticket,emailObj,subtypeId){if(!ticket||!ticket.id||!emailObj)return false;ticket.email={...ticket.email,...emailObj};const ce=getClientEmail(emailObj);if(ce)ticketClientEmail[ticket.id]=ce;const csFromSender=csAgentFromSenderEmail(emailObj.sender);if(csFromSender&&!ticketCSOwner[ticket.id])ticketCSOwner[ticket.id]=csFromSender;const st=SUBTYPE_BY_ID[subtypeId]||null;if(!ticketSubtype[ticket.id]&&st)ticketSubtype[ticket.id]=st.id;if(!ticketPriority[ticket.id]&&st)ticketPriority[ticket.id]=st.priority;ticketHasNewReply[ticket.id]=true;return true;}
 
 //  State 
 const seen={};
@@ -2721,6 +2736,7 @@ let ticketNumberCounter=0;
 let ticketJira={};   // ticketId  Jira key (e.g. 'QT-1234') | null
 let ticketHubspotId={}; // ticketId -> HubSpot ticket ID
 let ticketStageTouchedAt={}; // ticketId -> last stage-change timestamp (ms)
+let ticketHasNewReply={}; // ticketId -> true while an unread reply is glowing on the card
 let spamSenders=new Set();
 let hsCache={},domainCompanyCache={},readMentions=new Set(),readJiraAlerts=new Set();
 let jiraAlerts=[],jiraStatusSnapshot={};
@@ -2863,7 +2879,7 @@ function buildStatePayload(reason){
   const snapshot={
     allTickets,
     seenIds:Object.keys(seen),
-    ticketState,ticketStageTouchedAt,ticketPriority,ticketCategory,ticketSubtype,ticketAssignee,ticketAssignmentMode,manualSupportOverride,ticketCSOwner,ticketComments,ticketClientEmail,ticketCreatedAt,ticketNumbers,ticketNumberCounter,ticketJira,ticketHubspotId,
+    ticketState,ticketStageTouchedAt,ticketHasNewReply,ticketPriority,ticketCategory,ticketSubtype,ticketAssignee,ticketAssignmentMode,manualSupportOverride,ticketCSOwner,ticketComments,ticketClientEmail,ticketCreatedAt,ticketNumbers,ticketNumberCounter,ticketJira,ticketHubspotId,
     spamSenders:[...spamSenders],hsCache,domainCompanyCache,readMentions:[...readMentions],jiraAlerts,readJiraAlerts:[...readJiraAlerts],jiraStatusSnapshot,companyCustomProps,companyProfiles,companiesViewType,companyNetworkCache,companyFilters,coOwnerMappings,actionHistory,
     _meta:{clientSavedAt:now,clientVersion:stateVersion}
   };
@@ -3093,6 +3109,7 @@ async function loadState(){
   }
   if(s.ticketState){Object.entries(s.ticketState).forEach(([k,v])=>{ticketState[k]=normalizeTicketStage(v);});}
   if(s.ticketStageTouchedAt&&typeof s.ticketStageTouchedAt==='object')Object.assign(ticketStageTouchedAt,s.ticketStageTouchedAt);
+  if(s.ticketHasNewReply&&typeof s.ticketHasNewReply==='object')Object.assign(ticketHasNewReply,s.ticketHasNewReply);
   if(s.ticketPriority)Object.assign(ticketPriority,s.ticketPriority);
   if(s.ticketCategory)Object.assign(ticketCategory,s.ticketCategory);if(s.ticketSubtype)Object.assign(ticketSubtype,s.ticketSubtype);
   if(s.ticketAssignee)Object.assign(ticketAssignee,s.ticketAssignee);
@@ -4171,6 +4188,7 @@ async function buildAgentUI(){
 const nextAgent=cur=>{const i=SUPPORT_AGENTS.indexOf(cur);return SUPPORT_AGENTS[i>=0?(i+1)%SUPPORT_AGENTS.length:0];};
 const nextPriority=cur=>PRIORITIES[(PRIORITIES.indexOf(cur)+1)%PRIORITIES.length];
 
+function clearNewReplyGlow(id){if(!ticketHasNewReply[id])return;delete ticketHasNewReply[id];saveState('new_reply_seen');renderBoard();}
 function makeCard(ticket,isNew=false){
   const{email,id}=ticket;
   ensureTicketNumber(id);
@@ -4248,8 +4266,9 @@ function makeCard(ticket,isNew=false){
         ?`<button class="btn-out" data-hs-retry="${id}" style="font-size:10px;padding:2px 7px;" title="Retry HubSpot sync">Retry HubSpot</button>`
         :`<span class="btn-out" style="font-size:10px;padding:2px 7px;opacity:.75;cursor:default;">Queued for HubSpot sync</span>`));
 
+  const hasNewReply=!!ticketHasNewReply[id];
   const div=document.createElement('div');
-  div.className=`card p-${priority}${isNew?' is-new':''}${isTagged?' tagged':''}`;
+  div.className=`card p-${priority}${isNew?' is-new':''}${isTagged?' tagged':''}${hasNewReply?' new-reply-glow':''}`;
   div.draggable=true;div.dataset.id=id;
   div.innerHTML=`
     <div class="card-top-meta">
@@ -4283,10 +4302,10 @@ function makeCard(ticket,isNew=false){
   div.querySelector('[data-jira-open]').addEventListener('click',ev=>{ev.preventDefault();ev.stopPropagation();if(jiraKey&&JIRA_URL){window.open(`${JIRA_URL}${encodeURIComponent(jiraKey)}`,'_blank');return;}openJiraModal(id);});
   div.querySelector('[data-hs-open]')?.addEventListener('click',ev=>{ev.preventDefault();ev.stopPropagation();const hsId=ticketHubspotId[id];if(!hsId){showToast('Ticket not synced to HubSpot yet');return;}window.open(`https://app.hubspot.com/contacts/25445053/record/0-5/${encodeURIComponent(hsId)}`,'_blank');});
   div.querySelector('[data-hs-retry]')?.addEventListener('click',async ev=>{ev.preventDefault();ev.stopPropagation();const rs=await syncTicketToHubspot(ticket);if(rs?.ok&&ticketHubspotId[id]){window.open(`https://app.hubspot.com/contacts/25445053/record/0-5/${encodeURIComponent(ticketHubspotId[id])}`,'_blank');showToast('Ticket synced to HubSpot','ok');}else{const reason=rs?.reason||'unknown';if(reason==='missing_company_mapping')showToast('Cannot sync yet: this ticket has no mapped HubSpot company.');else if(reason==='missing_client_email')showToast('Cannot sync yet: no client email found for this ticket.');else if(reason==='api_error')showToast(`HubSpot sync failed: ${rs?.error||'api error'}`);else if(reason==='network_error')showToast(`HubSpot sync network error: ${rs?.error||'unknown'}`);else showToast('Unable to sync this ticket yet.');}renderBoard();});
-  div.querySelector('[data-oe]').addEventListener('click',ev=>{ev.stopPropagation();openEmailModal(ticket);});
-  div.querySelector('[data-inline-toggle]')?.addEventListener('click',ev=>{ev.stopPropagation();inlineCommentOpen[id]=!inlineOpen;if(inlineCommentOpen[id]){markAlertFeedReadForTicket(id,currentUser());}renderBoard();});
-  div.querySelector('[data-inline-bell]')?.addEventListener('click',ev=>{ev.stopPropagation();inlineCommentOpen[id]=true;markAlertFeedReadForTicket(id,currentUser());renderBoard();});
-  div.querySelector('[data-inline-modal]')?.addEventListener('click',ev=>{ev.stopPropagation();openComModal(ticket);});
+  div.querySelector('[data-oe]').addEventListener('click',ev=>{ev.stopPropagation();clearNewReplyGlow(id);openEmailModal(ticket);});
+  div.querySelector('[data-inline-toggle]')?.addEventListener('click',ev=>{ev.stopPropagation();inlineCommentOpen[id]=!inlineOpen;if(inlineCommentOpen[id]){markAlertFeedReadForTicket(id,currentUser());clearNewReplyGlow(id);}renderBoard();});
+  div.querySelector('[data-inline-bell]')?.addEventListener('click',ev=>{ev.stopPropagation();inlineCommentOpen[id]=true;markAlertFeedReadForTicket(id,currentUser());clearNewReplyGlow(id);renderBoard();});
+  div.querySelector('[data-inline-modal]')?.addEventListener('click',ev=>{ev.stopPropagation();clearNewReplyGlow(id);openComModal(ticket);});
   div.querySelector('[data-inline-text]')?.addEventListener('input',ev=>{inlineCommentDrafts[id]=ev.target.value;});
   div.querySelectorAll('[data-inline-tag]').forEach(btn=>btn.addEventListener('click',ev=>{ev.stopPropagation();toggleInlineTag(id,btn.dataset.inlineTag);renderBoard();}));
   div.querySelector('[data-inline-post]')?.addEventListener('click',ev=>{ev.stopPropagation();const text=String(inlineCommentDrafts[id]||'').trim();if(!text)return;const tags=inlineSelectedTags(id);if(!postTicketComment(id,text,tags))return;inlineCommentDrafts[id]='';inlineTagDrafts[id]=[];inlineCommentOpen[id]=true;renderBoard();});
@@ -4488,8 +4507,8 @@ let selectedCompanyCtx=null;
 function openCompanyPropModal(gr){selectedCompanyCtx=gr;document.getElementById('company-prop-title').textContent=`${gr.companyName}  Custom Properties`;const existing=companyCustomProps[gr.companyId]||{};document.getElementById('company-prop-existing').innerHTML=Object.keys(existing).length?Object.entries(existing).map(([k,v])=>`<div style="padding:4px 0;border-bottom:1px dashed #ddd;"><strong>${esc(k)}</strong>: ${esc(v)}</div>`).join(''):'<em>No custom properties saved yet.</em>';document.getElementById('cp-name').value='';document.getElementById('cp-label').value='';document.getElementById('cp-value').value='';document.getElementById('cp-create-def').checked=false;document.getElementById('cp-msg').textContent='';document.getElementById('company-prop-modal').classList.add('open');}
 document.getElementById('cp-save-btn').addEventListener('click',async()=>{if(!selectedCompanyCtx)return;const name=document.getElementById('cp-name').value.trim();const label=document.getElementById('cp-label').value.trim()||name;const value=document.getElementById('cp-value').value.trim();const createDefinition=document.getElementById('cp-create-def').checked;if(!name||!value){document.getElementById('cp-msg').textContent='Name and value are required.';return;}if(!companyCustomProps[selectedCompanyCtx.companyId])companyCustomProps[selectedCompanyCtx.companyId]={};companyCustomProps[selectedCompanyCtx.companyId][name]=value;saveState('company_custom_property_local');renderCompaniesView();document.getElementById('cp-msg').textContent='Saved locally. Syncing to HubSpot';try{const res=await fetch(`/api/hubspot/companies/${encodeURIComponent(selectedCompanyCtx.companyId)}/custom-property`,{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({name,label,value,createDefinition})});const out=await res.json().catch(()=>({}));if(!res.ok){document.getElementById('cp-msg').textContent=out?.error?`HubSpot sync failed: ${out.error}`:'HubSpot sync failed (read-only scopes or permission).';return;}document.getElementById('cp-msg').textContent='Saved in HubSpot and locally.';showToast('Company custom property saved','ok');}catch(_){document.getElementById('cp-msg').textContent='HubSpot sync failed (network/error). Saved locally.';}});
 
-function addTickets(emails){let n=0;let merged=0;emails.filter(e=>e.id&&!seen[e.id]&&!isAutomatic(e)).forEach(e=>{seen[e.id]=true;ensureTicketNumber(e.id);const subtype=classifySubtype(e);const existingTicket=findExistingTicketForEmail(e);if(existingTicket){if(mergeEmailIntoExistingTicket(existingTicket,e,subtype))merged++;return;}const st=SUBTYPE_BY_ID[subtype]||null;const t={id:e.id,email:e,priority:st?.priority||classifyPriority(e)};const ce=getClientEmail(e);if(ce)ticketClientEmail[e.id]=ce;if(!ticketCreatedAt[e.id])ticketCreatedAt[e.id]=e.receivedDateTime||new Date().toISOString();if(!ticketState[e.id])ticketState[e.id]='new';else ticketState[e.id]=normalizeTicketStage(ticketState[e.id]);const effectiveEmail=ce||e.sender?.toLowerCase();if(effectiveEmail&&spamSenders.has(effectiveEmail)){ticketCategory[e.id]='Spam';}else if(!ticketCategory[e.id]){ticketCategory[e.id]=st?.type||classifyCategory(e);}if(!ticketSubtype[e.id]&&st)ticketSubtype[e.id]=st.id;if(st)ticketPriority[e.id]=st.priority;if(!ticketAssignee[e.id]&&ticketCategory[e.id]!=='Spam'){ensureSupportAssignmentForTicket(e.id,e);}allTickets.push(t);n++;});if(n>0||merged>0){allTickets.sort((a,b)=>new Date(b?.email?.receivedDateTime||0)-new Date(a?.email?.receivedDateTime||0));applyCompanyCSAssignments();syncUnsyncedTicketsToHubspot();}return{created:n,merged};}
-async function poll(){if(!hasCowork){startCountdown();return;}const res=await fetchMailboxWindow(buildPollAfterDateTime());const outcome=addTickets(extractEmails(res));document.getElementById('last-poll').textContent='Checked: '+new Date().toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'});if(outcome.created>0||outcome.merged>0){saveState(outcome.merged>0?'mailbox_poll_thread_merge':'mailbox_poll_new_messages');const parts=[];if(outcome.created>0)parts.push(`${outcome.created} new ticket${outcome.created>1?'s':''}`);if(outcome.merged>0)parts.push(`${outcome.merged} reply${outcome.merged>1?'ies':'y'} merged into existing ticket${outcome.merged>1?'s':''}`);showToast(parts.join('  '));renderActiveView();enrichWithHubSpot();}startCountdown();}
+function addTickets(emails){let n=0;let merged=0;emails.filter(e=>e.id&&!seen[e.id]&&!isAutomatic(e)).forEach(e=>{seen[e.id]=true;ensureTicketNumber(e.id);const subtype=classifySubtype(e);const existingTicket=findExistingTicketForEmail(e);if(existingTicket){if(mergeEmailIntoExistingTicket(existingTicket,e,subtype))merged++;return;}const st=SUBTYPE_BY_ID[subtype]||null;const t={id:e.id,email:e,priority:st?.priority||classifyPriority(e)};const ce=getClientEmail(e);if(ce)ticketClientEmail[e.id]=ce;const csFromSender=csAgentFromSenderEmail(e.sender);if(csFromSender&&!ticketCSOwner[e.id])ticketCSOwner[e.id]=csFromSender;if(!ticketCreatedAt[e.id])ticketCreatedAt[e.id]=e.receivedDateTime||new Date().toISOString();if(!ticketState[e.id])ticketState[e.id]='new';else ticketState[e.id]=normalizeTicketStage(ticketState[e.id]);const effectiveEmail=ce||e.sender?.toLowerCase();if(effectiveEmail&&spamSenders.has(effectiveEmail)){ticketCategory[e.id]='Spam';}else if(!ticketCategory[e.id]){ticketCategory[e.id]=st?.type||classifyCategory(e);}if(!ticketSubtype[e.id]&&st)ticketSubtype[e.id]=st.id;if(st)ticketPriority[e.id]=st.priority;if(!ticketAssignee[e.id]&&ticketCategory[e.id]!=='Spam'){ensureSupportAssignmentForTicket(e.id,e);}allTickets.push(t);n++;});if(n>0||merged>0){allTickets.sort((a,b)=>new Date(b?.email?.receivedDateTime||0)-new Date(a?.email?.receivedDateTime||0));applyCompanyCSAssignments();syncUnsyncedTicketsToHubspot();}return{created:n,merged};}
+async function poll(){if(!hasCowork){startCountdown();return;}const res=await fetchMailboxWindow(buildPollAfterDateTime());const outcome=addTickets(extractEmails(res));document.getElementById('last-poll').textContent='Checked: '+new Date().toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'});if(outcome.created>0||outcome.merged>0){saveState(outcome.merged>0?'mailbox_poll_thread_merge':'mailbox_poll_new_messages');const parts=[];if(outcome.merged>0)parts.push('New message'+(outcome.merged>1?'s':''));if(outcome.created>0)parts.push(`${outcome.created} new ticket${outcome.created>1?'s':''}`);if(outcome.merged>0)parts.push(`${outcome.merged} reply${outcome.merged>1?'ies':'y'} merged into existing ticket${outcome.merged>1?'s':''}`);showToast(parts.join('  '));renderActiveView();enrichWithHubSpot();}startCountdown();}
 
 (async()=>{
   await buildAgentUI();

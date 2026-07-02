@@ -692,6 +692,11 @@ async function safeWriteState(state) {
       jiraKey: String((nextState.ticketJira && nextState.ticketJira[ticketId]) || '').trim() || null,
       assignee: String((nextState.ticketAssignee && nextState.ticketAssignee[ticketId]) || '').trim() || null
     });
+    // Mark as notified synchronously, before the webhook even fires. Any save
+    // that lands while the webhook call is still in flight (very likely -
+    // every drag/comment/poll triggers a save) would otherwise re-read this
+    // same "not yet notified" state from disk and queue a second send.
+    teamsResolvedNotified[ticketId] = marker;
   });
 
   const now = Date.now();
@@ -980,21 +985,6 @@ function buildResolvedTeamsMessage(item) {
   ].filter(Boolean).join('');
 }
 
-async function markResolvedTeamsNotificationDelivered(ticketId, marker) {
-  try {
-    const state = safeReadState();
-    const meta = (state._meta && typeof state._meta === 'object') ? state._meta : {};
-    const currentMap = (meta.teamsResolvedNotified && typeof meta.teamsResolvedNotified === 'object') ? meta.teamsResolvedNotified : {};
-    const pendingMap = (meta.teamsResolvedPending && typeof meta.teamsResolvedPending === 'object') ? meta.teamsResolvedPending : {};
-    currentMap[String(ticketId)] = String(marker);
-    delete pendingMap[String(ticketId)];
-    state._meta = { ...meta, teamsResolvedNotified: currentMap, teamsResolvedPending: pendingMap, serverSavedAt: Date.now() };
-    fs.writeFileSync(DATA_PATH, JSON.stringify(state, null, 2), 'utf8');
-  } catch (error) {
-    console.warn('Unable to mark Teams notification delivered:', error?.message || error);
-  }
-}
-
 function buildResolvedPowerAutomatePayload(item) {
   const ticketNumber = String(item.ticketNumber || item.ticketId || '').trim();
   const subject = String(item.subject || '(no subject)').trim();
@@ -1036,7 +1026,6 @@ async function sendResolvedWebhookNotifications(items) {
   for (const item of items) {
     try {
       await postJson(POWER_AUTOMATE_RESOLVED_WEBHOOK_URL, buildResolvedPowerAutomatePayload(item));
-      await markResolvedTeamsNotificationDelivered(item.ticketId, item.marker);
     } catch (error) {
       console.warn(`Resolved notification webhook failed for ${item.ticketId}/${item.csOwner}:`, error?.message || error);
     }
