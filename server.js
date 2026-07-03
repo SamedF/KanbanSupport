@@ -3708,6 +3708,10 @@ app.post('/api/mcp-proxy', requireAuth, async (req, res) => {
   }
 });
 
+app.get(['/qt-seize', '/qt-seize/'], requireAuth, (req, res) => {
+  res.type('html').sendFile(path.join(__dirname, 'public', 'qt-seize', 'index.html'));
+});
+app.use('/qt-seize', requireAuth, express.static(path.join(__dirname, 'public', 'qt-seize')));
 app.use('/assets', requireAuth, express.static(path.join(__dirname, 'public')));
 app.get('/', (req, res) => isAuthed(req) ? res.type('html').sendFile(path.join(__dirname, 'index.html')) : res.redirect('/login'));
 
