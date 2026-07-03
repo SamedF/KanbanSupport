@@ -99,7 +99,7 @@
   </div>
 
   <script>
-    const state = { users: [], selectedUserId: null, avatarDataUrl: null, avatarRemoved: false, isSaving: false, profilePanelMode: 'view' };
+    const state = { users: [], currentUser: null, selectedUserId: null, avatarDataUrl: null, avatarRemoved: false, isSaving: false, profilePanelMode: 'view' };
     const elements = {
       usersList: document.getElementById('usersList'),
       searchInput: document.getElementById('searchInput'),
@@ -131,6 +131,22 @@
 
     function getSelectedUser() {
       return state.users.find(user => user.id === state.selectedUserId) || null;
+    }
+
+    function isOwner(user) {
+      return user?.role === 'owner';
+    }
+
+    function currentUserIsOwner() {
+      return state.currentUser?.role === 'owner';
+    }
+
+    function currentUserIsSelectedUser(user) {
+      return state.currentUser?.id === user?.id;
+    }
+
+    function roleOptionsHtml(includeOwner = true) {
+      return `${includeOwner ? '<option value="owner">Owner</option>' : ''}<option value="admin">Admin</option><option value="agent">Agent</option><option value="viewer">Viewer</option>`;
     }
 
     function renderUsers() {
@@ -171,7 +187,11 @@
         name.textContent = user.displayName || user.username;
         const role = document.createElement('span');
         role.className = 'role';
-        role.textContent = user.role;
+        role.textContent = user.role === 'owner' ? 'Owner' : user.role;
+        if (user.role === 'owner') {
+          role.style.background = '#fef3c7';
+          role.style.color = '#92400e';
+        }
         nameRow.append(name, role);
 
         const subtitle = document.createElement('div');
@@ -204,7 +224,7 @@
           <div class="form-group"><label for="newDisplayName">Display name</label><input id="newDisplayName" type="text" autocomplete="name" /></div>
           <div class="form-group"><label for="newEmail">Email</label><input id="newEmail" type="email" autocomplete="email" /></div>
           <div class="form-row">
-            <div class="form-group"><label for="newRole">Role</label><select id="newRole"><option value="agent">Agent</option><option value="admin">Admin</option><option value="viewer">Viewer</option></select></div>
+            <div class="form-group"><label for="newRole">Role</label><select id="newRole">${roleOptionsHtml(currentUserIsOwner())}</select></div>
             <div class="form-group"><label for="newPassword">Password</label><input id="newPassword" type="password" autocomplete="new-password" /></div>
           </div>
         </div>
@@ -321,7 +341,7 @@
           <div class="form-group"><label for="inputDisplayName">Display name</label><input id="inputDisplayName" type="text" value="${escapeHtml(user.displayName || '')}" autocomplete="name" /></div>
           <div class="form-group"><label for="inputEmail">Email</label><input id="inputEmail" type="email" value="${escapeHtml(user.email || '')}" autocomplete="email" /></div>
           <div class="form-row">
-            <div class="form-group"><label for="inputRole">Role</label><select id="inputRole"><option value="admin">Admin</option><option value="agent">Agent</option><option value="viewer">Viewer</option></select></div>
+            <div class="form-group"><label for="inputRole">Role</label><select id="inputRole">${roleOptionsHtml(currentUserIsOwner() || isOwner(user))}</select></div>
             <div class="form-group"><label for="inputStatus">Status</label><select id="inputStatus"><option value="true">Active</option><option value="false">Disabled</option></select></div>
           </div>
           <div class="form-group"><label for="inputPassword">New password</label><input id="inputPassword" type="password" placeholder="Leave empty to keep current" autocomplete="new-password" /></div>
@@ -351,6 +371,14 @@
 
       inputRole.value = user.role;
       inputStatus.value = String(user.isActive !== false);
+      const ownerLocked = isOwner(user) && !currentUserIsOwner() && !currentUserIsSelectedUser(user);
+      if (ownerLocked) {
+        [inputUsername, inputDisplayName, inputEmail, inputRole, inputStatus, inputPassword, uploadAvatar, removeAvatar, saveProfile, deleteProfile].forEach(el => {
+          if (el) el.disabled = true;
+        });
+        profileMessage.textContent = 'Owner account: only an owner can change or delete this profile.';
+        profileMessage.style.color = '#92400e';
+      }
 
       const updatePreview = url => {
         avatarPreview.innerHTML = '';
@@ -401,6 +429,7 @@
       });
 
       saveProfile.addEventListener('click', async () => {
+        if (ownerLocked) return;
         if (state.isSaving) return;
         const payload = {
           username: inputUsername.value.trim(),
@@ -432,6 +461,7 @@
       });
 
       deleteProfile.addEventListener('click', async () => {
+        if (ownerLocked) return;
         if (!confirm(`Delete user ${user.username}? This cannot be undone.`)) return;
         deleteProfile.disabled = true;
         deleteProfile.textContent = 'Deleting...';
@@ -461,6 +491,8 @@
     async function loadUsers() {
       setUsersMessage('Loading users...');
       try {
+        const me = await api('/auth/me');
+        state.currentUser = me.user || null;
         const data = await api('/api/admin/users');
         state.users = Array.isArray(data.users) ? data.users : [];
         if (!state.users.length) {

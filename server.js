@@ -128,9 +128,11 @@ const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 20, standardHeade
 
 function isAuthed(req) { return req.session && req.session.authenticated === true; }
 function requireAuth(req, res, next) { return isAuthed(req) ? next() : res.status(401).json({ error: 'unauthorized' }); }
+function isAdminRole(role) { return role === 'admin' || role === 'owner'; }
+function isOwnerRole(role) { return role === 'owner'; }
 function requireAdmin(req, res, next) {
   if (!isAuthed(req)) return res.status(401).json({ error: 'unauthorized' });
-  if (req.session.role !== 'admin') return res.status(403).json({ error: 'admin_required' });
+  if (!isAdminRole(req.session.role)) return res.status(403).json({ error: 'admin_required' });
   return next();
 }
 function avatarFilenameForUserId(id) {
@@ -238,7 +240,11 @@ async function auditTicketChanges({
 }
 function normalizeRole(role) {
   const value = String(role || 'agent').trim().toLowerCase();
-  return ['admin', 'agent', 'viewer'].includes(value) ? value : null;
+  return ['owner', 'admin', 'agent', 'viewer'].includes(value) ? value : null;
+}
+async function ownerAccountExists() {
+  const count = await prisma.user.count({ where: { role: 'owner' } });
+  return count > 0;
 }
 function normalizeBoardStatusForDb(stage) {
   const value = String(stage || 'new').trim().toLowerCase();
@@ -1989,7 +1995,7 @@ app.get('/api/jira/status', requireAuth, async (req, res) => {
       hasAccessToken: !!jira.accessToken,
       emailMasked: jira.emailMasked,
       configuredVia: jira.configuredVia,
-      canConfigure: req.session.role === 'admin'
+      canConfigure: isAdminRole(req.session.role)
     });
   } catch (error) {
     return res.status(500).json({ error: String(error.message || error) });
@@ -2687,7 +2693,7 @@ app.get('/profile', requireAuth, (req, res) => {
       setText('statUsername', username);
       setText('statRole', role);
 
-      if (role === 'admin') {
+      if (role === 'admin' || role === 'owner') {
         document.getElementById('manageUsersBtn')?.classList.remove('hidden');
         document.getElementById('adminTopLink')?.classList.remove('hidden');
       }
@@ -2767,6 +2773,7 @@ app.post('/api/admin/users', requireAdmin, async (req, res) => {
 
     if (!username || !password) return res.status(400).json({ error: 'username_and_password_required' });
     if (!role) return res.status(400).json({ error: 'invalid_role' });
+    if (role === 'owner' && !isOwnerRole(req.session.role)) return res.status(403).json({ error: 'owner_required' });
     if (password.length < 8) return res.status(400).json({ error: 'password_too_short' });
 
     const exists = await prisma.user.findUnique({ where: { username } });
@@ -2792,6 +2799,9 @@ app.patch('/api/admin/users/:id', requireAdmin, async (req, res) => {
     if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: 'invalid_user_id' });
     const existing = await prisma.user.findUnique({ where: { id } });
     if (!existing) return res.status(404).json({ error: 'user_not_found' });
+    const isSelf = existing.id === req.session.userId;
+    const requesterIsOwner = isOwnerRole(req.session.role);
+    if (isOwnerRole(existing.role) && !isSelf && !requesterIsOwner) return res.status(403).json({ error: 'owner_required' });
 
     const data = {};
     if (req.body?.username !== undefined) {
@@ -2804,6 +2814,7 @@ app.patch('/api/admin/users/:id', requireAdmin, async (req, res) => {
     if (req.body?.role !== undefined) {
       const role = normalizeRole(req.body.role);
       if (!role) return res.status(400).json({ error: 'invalid_role' });
+      if ((role === 'owner' || existing.role === 'owner') && !requesterIsOwner) return res.status(403).json({ error: 'owner_required' });
       data.role = role;
     }
     if (req.body?.displayName !== undefined) data.displayName = String(req.body.displayName || '').trim() || null;
@@ -2818,8 +2829,9 @@ app.patch('/api/admin/users/:id', requireAdmin, async (req, res) => {
       try { saveUserAvatarFile(id, req.body.avatarBase64); } catch (avatarError) { return res.status(400).json({ error: 'invalid_avatar_data' }); }
     }
 
-    if (existing.id === req.session.userId && data.isActive === false) return res.status(400).json({ error: 'cannot_disable_self' });
-    if (existing.id === req.session.userId && data.role && data.role !== 'admin') return res.status(400).json({ error: 'cannot_remove_own_admin_role' });
+    if (isSelf && data.isActive === false) return res.status(400).json({ error: 'cannot_disable_self' });
+    if (isSelf && data.role && !isAdminRole(data.role)) return res.status(400).json({ error: 'cannot_remove_own_admin_role' });
+    if (existing.role === 'owner' && data.isActive === false && !requesterIsOwner) return res.status(403).json({ error: 'owner_required' });
     if (!Object.keys(data).length) return res.status(400).json({ error: 'no_changes' });
 
     const user = await prisma.user.update({ where: { id }, data });
@@ -2834,11 +2846,14 @@ app.delete('/api/admin/users/:id', requireAdmin, async (req, res) => {
   try {
     const id = Number(req.params.id);
     if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: 'invalid_user_id' });
-    if (id === req.session.userId) return res.status(400).json({ error: 'cannot_delete_self' });
     const existing = await prisma.user.findUnique({ where: { id } });
     if (!existing) return res.status(404).json({ error: 'user_not_found' });
+    if (isOwnerRole(existing.role) && id !== req.session.userId && !isOwnerRole(req.session.role)) return res.status(403).json({ error: 'owner_required' });
     removeUserAvatarFiles(id);
     await prisma.user.delete({ where: { id } });
+    if (id === req.session.userId) {
+      req.session.destroy(() => {});
+    }
     res.json({ ok: true, deletedUser: sanitizeUser(existing) });
   } catch (error) {
     console.error('Delete user failed:', error);
