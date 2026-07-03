@@ -284,6 +284,28 @@ header {
   white-space: nowrap;
 }
 
+.user-avatar-pill {
+  width: 38px;
+  height: 38px;
+  border-radius: 999px;
+  border: 1px solid rgba(255,255,255,.18);
+  background: rgba(255,255,255,.12);
+  display: grid;
+  place-items: center;
+}
+
+.avatar-image {
+  width: 28px;
+  height: 28px;
+  border-radius: 999px;
+  background: rgba(255,255,255,.15);
+  color: #fff;
+  display: grid;
+  place-items: center;
+  font-size: 12px;
+  font-weight: 700;
+}
+
 .current-user-dot {
   width: 8px;
   height: 8px;
@@ -472,38 +494,85 @@ header {
    ========================= */
 
 .workload-bar {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 8px;
-  max-width: 460px;
-  align-items: center;
-  min-height: 30px;
-}
-
-.agent-pill {
   display: flex;
   align-items: center;
   gap: 6px;
-  justify-content: center;
-  padding: 9px 12px;
-  width: 100%;
+  max-width: min(42vw, 430px);
+  padding: 3px;
   border-radius: 999px;
-  font-size: 12px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+  -webkit-overflow-scrolling: touch;
+  white-space: nowrap;
+  flex: 0 1 auto;
+  min-width: 0;
+  min-height: 32px;
+}
+
+.workload-bar::-webkit-scrollbar {
+  display: none;
+}
+
+.workload-bar::before {
+  content: "Load";
+  flex: 0 0 auto;
+  padding: 0 5px 0 7px;
+  color: rgba(255, 255, 255, 0.46);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+
+.agent-pill {
+  --agent-accent: #38bdf8;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  justify-content: center;
+  flex: 0 0 auto;
+  height: 24px;
+  min-width: 54px;
+  padding: 0 6px 0 9px;
+  border-radius: 999px;
+  font-size: 11px;
   font-weight: 900;
   line-height: 1;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  box-shadow: 0 8px 18px rgba(15, 23, 42, 0.18);
+  background: color-mix(in srgb, var(--agent-accent) 14%, rgba(15, 23, 42, .86));
+  color: var(--agent-accent);
+  border: 1px solid color-mix(in srgb, var(--agent-accent) 28%, rgba(255, 255, 255, .08));
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.07);
+  transition: transform .15s ease, background .15s ease, border-color .15s ease;
+}
+
+.agent-pill:hover {
+  transform: translateY(-1px);
+  background: color-mix(in srgb, var(--agent-accent) 20%, rgba(15, 23, 42, .82));
+  border-color: color-mix(in srgb, var(--agent-accent) 42%, rgba(255, 255, 255, .10));
 }
 
 @media (max-width: 920px) {
   .workload-bar {
-    grid-template-columns: repeat(auto-fit, minmax(100px, 1fr));
+    order: 20;
+    max-width: 100%;
+    width: 100%;
   }
 }
 
 .agent-pill .cnt {
-  font-size: 14px;
+  min-width: 20px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  display: inline-grid;
+  place-items: center;
+  font-size: 11px;
   font-weight: 900;
+  color: #ffffff;
+  background: color-mix(in srgb, var(--agent-accent) 32%, rgba(15, 23, 42, .78));
 }
 
 .filter-bar {
@@ -2464,13 +2533,16 @@ th {
   <div class="header-right">
     <button class="create-ticket-btn" id="create-ticket-btn">&#43; New Ticket</button>
     <button class="mentions-btn" id="mentions-btn" title="Tagged Alerts"><span class="bell-icon">&#128276;</span><span class="mentions-badge" id="mentions-badge" style="display:none">0</span></button>
+    <div class="user-avatar-pill" id="headerAvatar" title="Current user profile picture">
+      <span class="avatar-image" id="headerAvatarImage">?</span>
+    </div>
     <div class="current-user-pill" title="Current user">
-  <span class="current-user-dot"></span>
-  <span class="current-user-prefix">You:</span>
-  <strong id="current-user-label">You</strong>
-</div>
+      <span class="current-user-dot"></span>
+      <span class="current-user-prefix">You:</span>
+      <strong id="current-user-label">You</strong>
+    </div>
 
-<input type="hidden" id="current-user" value="YOU" />
+    <input type="hidden" id="current-user" value="YOU" />
 <a class="audit-board-btn" href="/audit/tickets" title="View ticket audit log">
   Audit Log
 </a>
@@ -4044,10 +4116,14 @@ function renderHygieneDashboard(grid){
   const t=dataHygieneReport?.totals||{};
   const rows=dataHygieneReport?.rows||{};
   const generatedAt=dataHygieneReport?.generatedAt?fmtDate(dataHygieneReport.generatedAt):'';
+  const reportMeta=dataHygieneReport?.meta||{};
+  const cacheAgeMinutes=Number.isFinite(Number(reportMeta.cacheAgeMs))?Math.max(0,Math.round(Number(reportMeta.cacheAgeMs)/60000)):null;
+  const cacheCopy=cacheAgeMinutes!==null?`  Cache age ${cacheAgeMinutes} min`:'';
+  const refreshCopy=reportMeta.backgroundRefresh?'  Refreshing in background':'';
   const scanned=Number(t.companiesScanned||0);
   const total=Math.max(1,Number(t.companiesScanned||0));
   const pct=n=>((Number(n||0)/total)*100).toFixed(1);
-  grid.innerHTML=`<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px;background:#fff;border:1px solid #d7d7d7;border-radius:14px;padding:12px;box-shadow:0 6px 16px rgba(0,0,0,.06);"><div style="font-size:12px;color:#555;">Client-linked companies only (${esc(dataHygieneReport?.constraints?.clientLinkedDefinition||'num_associated_contacts > 0')})  Scanned ${scanned} companies  Updated ${generatedAt}${dataHygieneReport?.meta?.partial?'  Partial snapshot':''}</div><button class="btn-out" id="refresh-hygiene">Refresh report</button></div>
+  grid.innerHTML=`<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px;background:#fff;border:1px solid #d7d7d7;border-radius:14px;padding:12px;box-shadow:0 6px 16px rgba(0,0,0,.06);"><div style="font-size:12px;color:#555;">Client-linked companies only (${esc(dataHygieneReport?.constraints?.clientLinkedDefinition||'num_associated_contacts > 0')})  Scanned ${scanned} companies  Updated ${generatedAt}${dataHygieneReport?.meta?.partial?'  Partial snapshot':''}${esc(cacheCopy)}${esc(refreshCopy)}</div><button class="btn-out" id="refresh-hygiene">Refresh report</button></div>
   <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;margin-bottom:12px;">
     <div style="background:#fff;border:1px solid #d7d7d7;border-radius:12px;padding:12px;"><div style="font-size:11px;color:#666;">Duplicates</div><div style="font-family:Caladea,serif;font-size:30px;">${Number(t.duplicates||0)}</div><div style="height:7px;background:#f1f5f9;border-radius:999px;overflow:hidden;"><div style="height:7px;width:${pct(t.duplicates)}%;background:#111;"></div></div></div>
     <div style="background:#fff;border:1px solid #d7d7d7;border-radius:12px;padding:12px;"><div style="font-size:11px;color:#666;">AM/CS Mismatch</div><div style="font-family:Caladea,serif;font-size:30px;">${Number(t.ownerMismatch||0)}</div><div style="height:7px;background:#f1f5f9;border-radius:999px;overflow:hidden;"><div style="height:7px;width:${pct(t.ownerMismatch)}%;background:#111;"></div></div></div>
@@ -4406,7 +4482,7 @@ function updateWorkload(){
     ...SUPPORT_AGENTS.filter(a=>!['ZIO','SGU','SHE','JBA','RMD','SFA'].includes(a))
   ];
   document.getElementById('workload-bar').innerHTML = displayOrder.map(a=>{
-    return `<div class="agent-pill" style="background:${agentColor(a)}20;color:${agentColor(a)}">${a} <span class="cnt">${load[a]||0}</span></div>`;
+    return `<div class="agent-pill" style="--agent-accent:${agentColor(a)}" title="${esc(a)} workload">${a}<span class="cnt">${load[a]||0}</span></div>`;
   }).join('');
 }
 function showToast(msg,cls=''){const t=document.getElementById('toast');t.textContent=msg;t.className='show'+(cls?' '+cls:'');clearTimeout(t._timer);t._timer=setTimeout(()=>{t.className='';},4500);}
@@ -4439,8 +4515,20 @@ async function buildAgentUI(){
 
   const sel=document.getElementById('current-user');
   const label=document.getElementById('current-user-label');
+  const avatarEl=document.getElementById('headerAvatarImage');
   if(sel)sel.value=optionValue;
   if(label)label.textContent=optionValue;
+  if(avatarEl){
+    if(loggedUser.avatarUrl){
+      avatarEl.style.backgroundImage = `url(${loggedUser.avatarUrl})`;
+      avatarEl.style.backgroundSize = 'cover';
+      avatarEl.style.backgroundPosition = 'center';
+      avatarEl.textContent = '';
+    } else {
+      avatarEl.style.backgroundImage = '';
+      avatarEl.textContent = String(displayName).charAt(0).toUpperCase();
+    }
+  }
 
   const isAdmin = loggedUser.role === 'admin';
   setAdminOnlyNavigationVisible(isAdmin);

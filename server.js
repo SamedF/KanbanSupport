@@ -61,8 +61,8 @@ const HUBSPOT_ALLOWED_WRITE_SCOPES = new Set(
     .map(s => s.trim())
     .filter(Boolean)
 );
-const DATA_HYGIENE_CACHE_TTL_MS = Number(process.env.DATA_HYGIENE_CACHE_TTL_MS || 5 * 60 * 1000);
-const DATA_HYGIENE_PAGE_DELAY_MS = Number(process.env.DATA_HYGIENE_PAGE_DELAY_MS || 250);
+const DATA_HYGIENE_CACHE_TTL_MS = Number(process.env.DATA_HYGIENE_CACHE_TTL_MS || 15 * 60 * 1000);
+const DATA_HYGIENE_PAGE_DELAY_MS = Number(process.env.DATA_HYGIENE_PAGE_DELAY_MS || 0);
 const DATA_HYGIENE_MAX_PAGES = Number(process.env.DATA_HYGIENE_MAX_PAGES || 30);
 const DATA_HYGIENE_MAX_DURATION_MS = Number(process.env.DATA_HYGIENE_MAX_DURATION_MS || 25000);
 const DATA_HYGIENE_MAX_ROWS = Number(process.env.DATA_HYGIENE_MAX_ROWS || 2500);
@@ -98,6 +98,7 @@ const APP_BUILD_VERSION = (
   'local-dev'
 ).slice(0, 7);
 let dataHygieneCache = { generatedAt: 0, payload: null };
+let dataHygieneBuildPromise = null;
 
 app.set('trust proxy', process.env.TRUST_PROXY === 'true' ? 1 : 0);
 app.disable('x-powered-by');
@@ -1438,6 +1439,182 @@ async function collectCompaniesBySearch(token, properties, filterGroups, deadlin
   return rows;
 }
 
+async function buildDataHygieneReport(token) {
+  const startedAt = Date.now();
+  const deadlineTs = startedAt + DATA_HYGIENE_MAX_DURATION_MS;
+  const properties = [
+    'name',
+    'domain',
+    'lifecyclestage',
+    'parent_company_id',
+    'num_child_companies',
+    'num_associated_contacts',
+    'num_associated_deals',
+    'hubspot_owner_id',
+    'am_owner',
+    'am',
+    'account_manager',
+    'co_owner',
+    'co-owner',
+    'coowner',
+    'co_owner_name',
+    'cs_owner',
+    'customer_success_owner',
+    'contract_signature_date',
+    'contract_signed_date',
+    'contract_sign_date',
+    'signature_date'
+  ];
+
+  let rows = await collectCompaniesBySearch(token, properties, [
+    { filters: [{ propertyName: 'num_associated_contacts', operator: 'GT', value: '0' }] }
+  ], deadlineTs);
+  let linkedRuleUsed = 'num_associated_contacts > 0';
+  if (!rows.length && Date.now() < deadlineTs) {
+    rows = await collectCompaniesBySearch(token, properties, [
+      { filters: [{ propertyName: 'num_associated_deals', operator: 'GT', value: '0' }] }
+    ], deadlineTs);
+    linkedRuleUsed = 'num_associated_deals > 0';
+  }
+  if (!rows.length && Date.now() < deadlineTs) {
+    rows = await collectCompaniesBySearch(token, properties, [
+      { filters: [{ propertyName: 'lifecyclestage', operator: 'IN', values: ['customer', 'opportunity'] }] }
+    ], deadlineTs);
+    linkedRuleUsed = 'lifecyclestage IN (customer, opportunity)';
+  }
+
+  const portalBase = 'https://app.hubspot.com/contacts/25445053/record/0-2/';
+  const byDomain = new Map();
+  const byName = new Map();
+  const ownerMismatch = [];
+  const missingContractDate = [];
+  const noDealParentOrMonohotel = [];
+
+  const contractCandidates = ['contract_signature_date', 'contract_signed_date', 'contract_sign_date', 'signature_date'];
+  const contractHits = Object.fromEntries(contractCandidates.map(k => [k, 0]));
+
+  const normalizedRows = rows.map(r => {
+    const p = r.properties || {};
+    const id = String(r.id || '');
+    const name = String(p.name || '').trim();
+    const domain = String(p.domain || '').trim().toLowerCase();
+    const amOwner = firstNonEmptyValue(p, ['am_owner', 'account_manager', 'am', 'hubspot_owner_id']);
+    const csOwner = firstNonEmptyValue(p, ['co_owner', 'co-owner', 'coowner', 'co_owner_name', 'cs_owner', 'customer_success_owner']) || firstNonEmptyValue(p, ['am_owner', 'account_manager', 'am']);
+    const parentCompanyId = String(p.parent_company_id || '').trim();
+    const childCount = Number(p.num_child_companies || 0);
+    const dealCount = Number(p.num_associated_deals || 0);
+    const contractKey = contractCandidates.find(k => String(p[k] || '').trim()) || '';
+    const contractValue = contractKey ? String(p[contractKey] || '').trim() : '';
+    if (contractKey) contractHits[contractKey] += 1;
+
+    return {
+      id,
+      name,
+      domain,
+      amOwner,
+      csOwner,
+      lifecycleStage: String(p.lifecyclestage || '').trim(),
+      contractKey,
+      contractValue,
+      parentCompanyId,
+      childCount,
+      dealCount,
+      url: `${portalBase}${encodeURIComponent(id)}`
+    };
+  });
+
+  for (const r of normalizedRows) {
+    if (r.domain) {
+      if (!byDomain.has(r.domain)) byDomain.set(r.domain, []);
+      byDomain.get(r.domain).push(r);
+    }
+    const nn = normalizeName(r.name);
+    if (nn) {
+      if (!byName.has(nn)) byName.set(nn, []);
+      byName.get(nn).push(r);
+    }
+    const hasAm = !!r.amOwner;
+    const hasCs = !!r.csOwner;
+    if ((hasAm && !hasCs) || (!hasAm && hasCs)) ownerMismatch.push(r);
+    if (!r.contractValue) missingContractDate.push(r);
+    const isParent = r.childCount > 0;
+    const isChild = !!r.parentCompanyId;
+    const isMonohotel = !isParent && !isChild;
+    if ((isParent || isMonohotel) && r.dealCount <= 0) {
+      noDealParentOrMonohotel.push({ ...r, companyType: isParent ? 'parent' : 'monohotel' });
+    }
+  }
+
+  const duplicates = [];
+  for (const [domain, group] of byDomain.entries()) {
+    if (group.length > 1) {
+      group.forEach(r => duplicates.push({ ...r, duplicateReason: `domain:${domain}`, duplicateGroupSize: group.length }));
+    }
+  }
+  for (const [nname, group] of byName.entries()) {
+    if (group.length > 1) {
+      const alreadyById = new Set(duplicates.map(d => d.id));
+      group.forEach(r => {
+        if (!alreadyById.has(r.id)) duplicates.push({ ...r, duplicateReason: `name:${nname}`, duplicateGroupSize: group.length });
+      });
+    }
+  }
+
+  const selectedContractProperty = Object.entries(contractHits).sort((a, b) => b[1] - a[1])[0]?.[0] || contractCandidates[0];
+  return {
+    ok: true,
+    generatedAt: new Date().toISOString(),
+    constraints: {
+      clientLinkedOnly: true,
+      clientLinkedDefinition: linkedRuleUsed
+    },
+    totals: {
+      companiesScanned: normalizedRows.length,
+      duplicates: duplicates.length,
+      ownerMismatch: ownerMismatch.length,
+      missingContractDate: missingContractDate.length,
+      noDealParentOrMonohotel: noDealParentOrMonohotel.length
+    },
+    meta: {
+      selectedContractProperty,
+      partial: Date.now() >= deadlineTs || normalizedRows.length >= DATA_HYGIENE_MAX_ROWS,
+      durationMs: Date.now() - startedAt
+    },
+    rows: {
+      duplicates,
+      ownerMismatch,
+      missingContractDate,
+      noDealParentOrMonohotel
+    }
+  };
+}
+
+function getCachedDataHygienePayload() {
+  if (!dataHygieneCache.payload) return null;
+  const ageMs = Date.now() - dataHygieneCache.generatedAt;
+  return {
+    ...dataHygieneCache.payload,
+    meta: {
+      ...(dataHygieneCache.payload.meta || {}),
+      cacheAgeMs: ageMs,
+      cacheFresh: ageMs < DATA_HYGIENE_CACHE_TTL_MS
+    }
+  };
+}
+
+function refreshDataHygieneCache(token) {
+  if (dataHygieneBuildPromise) return dataHygieneBuildPromise;
+  dataHygieneBuildPromise = buildDataHygieneReport(token)
+    .then(payload => {
+      dataHygieneCache = { generatedAt: Date.now(), payload };
+      return getCachedDataHygienePayload();
+    })
+    .finally(() => {
+      dataHygieneBuildPromise = null;
+    });
+  return dataHygieneBuildPromise;
+}
+
 
 async function upsertBoardTicketsToDatabase(state, req) {
   if (!state || typeof state !== 'object') return { count: 0 };
@@ -1768,7 +1945,35 @@ app.get('/healthz', async (req, res) => {
 });
 
 app.get('/auth/me', requireAuth, (req, res) => {
-  res.json({ user: { id: req.session.userId, username: req.session.username, role: req.session.role } });
+  res.json({ user: { id: req.session.userId, username: req.session.username, role: req.session.role, avatarUrl: avatarUrlForUserId(req.session.userId) } });
+});
+
+app.patch('/api/profile', requireAuth, async (req, res) => {
+  try {
+    const id = Number(req.session.userId);
+    if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: 'invalid_user' });
+
+    const data = {};
+    if (req.body?.password) {
+      const password = String(req.body.password);
+      if (password.length < 8) return res.status(400).json({ error: 'password_too_short' });
+      data.passwordHash = await bcrypt.hash(password, 10);
+    }
+    const avatarChanged = req.body?.avatarBase64 !== undefined;
+    if (avatarChanged) {
+      try { saveUserAvatarFile(id, req.body.avatarBase64); } catch (avatarError) { return res.status(400).json({ error: 'invalid_avatar_data' }); }
+    }
+
+    if (!Object.keys(data).length && !avatarChanged) return res.status(400).json({ error: 'no_changes' });
+
+    const user = Object.keys(data).length
+      ? await prisma.user.update({ where: { id }, data })
+      : await prisma.user.findUnique({ where: { id } });
+    res.json({ ok: true, user: sanitizeUser(user) });
+  } catch (error) {
+    console.error('Update profile failed:', error);
+    res.status(500).json({ error: 'update_profile_failed' });
+  }
 });
 app.get('/api/jira/status', requireAuth, async (req, res) => {
   try {
@@ -2003,26 +2208,81 @@ app.get('/profile', requireAuth, (req, res) => {
     }
 
     .hero {
-      padding: 32px;
+      padding: 34px;
       background:
-        linear-gradient(135deg, rgba(37,99,235,.96), rgba(14,165,233,.88));
+        linear-gradient(135deg, rgba(15,23,42,.98), rgba(37,99,235,.92) 54%, rgba(20,184,166,.86));
       color: white;
       display: flex;
       align-items: center;
-      gap: 18px;
+      gap: 22px;
+    }
+
+    .avatar-picker {
+      position: relative;
+      width: 92px;
+      height: 92px;
+      flex: 0 0 auto;
+      border: 0;
+      padding: 0;
+      border-radius: 999px;
+      background: transparent;
+      cursor: pointer;
+    }
+
+    .avatar-ring {
+      position: absolute;
+      inset: -5px;
+      border-radius: inherit;
+      background: conic-gradient(from 140deg, #ffffff, #93c5fd, #5eead4, #ffffff);
+      opacity: .96;
     }
 
     .avatar {
-      width: 72px;
-      height: 72px;
-      border-radius: 24px;
-      background: rgba(255,255,255,.18);
-      border: 1px solid rgba(255,255,255,.28);
+      position: relative;
+      width: 100%;
+      height: 100%;
+      border-radius: inherit;
+      background:
+        radial-gradient(circle at 30% 22%, rgba(255,255,255,.36), transparent 30%),
+        linear-gradient(135deg, rgba(255,255,255,.24), rgba(255,255,255,.10));
+      border: 3px solid rgba(255,255,255,.96);
       display: grid;
       place-items: center;
-      font-size: 32px;
+      color: white;
+      font-size: 38px;
       font-weight: 900;
-      box-shadow: inset 0 1px 0 rgba(255,255,255,.2);
+      overflow: hidden;
+      box-shadow: 0 18px 38px rgba(15,23,42,.26);
+      transition: transform .16s ease, box-shadow .16s ease;
+    }
+
+    .avatar-picker:hover .avatar,
+    .avatar-picker:focus-visible .avatar {
+      transform: translateY(-1px) scale(1.02);
+      box-shadow: 0 22px 44px rgba(15,23,42,.32);
+    }
+
+    .avatar-action {
+      position: absolute;
+      right: -4px;
+      bottom: 2px;
+      min-width: 34px;
+      height: 34px;
+      border-radius: 999px;
+      border: 3px solid white;
+      background: #0f172a;
+      color: white;
+      display: grid;
+      place-items: center;
+      font-size: 16px;
+      line-height: 1;
+      box-shadow: 0 10px 22px rgba(15,23,42,.28);
+    }
+
+    .avatar-help {
+      margin-top: 10px;
+      color: rgba(255,255,255,.74);
+      font-size: 13px;
     }
 
     h1 {
@@ -2099,6 +2359,66 @@ app.get('/profile', requireAuth, (req, res) => {
       color: var(--text);
       font-weight: 650;
       word-break: break-word;
+    }
+
+    .form-input {
+      width: min(100%, 380px);
+      border: 1px solid #cbd5e1;
+      border-radius: 12px;
+      background: #f8fafc;
+      color: var(--text);
+      padding: 12px 14px;
+      font: inherit;
+      font-weight: 650;
+      outline: none;
+      transition: border-color .15s ease, box-shadow .15s ease, background .15s ease;
+    }
+
+    .form-input:focus {
+      border-color: var(--primary);
+      background: #fff;
+      box-shadow: 0 0 0 4px rgba(37,99,235,.12);
+    }
+
+    .avatar-upload-panel {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      flex-wrap: wrap;
+    }
+
+    .avatar-preview {
+      width: 62px;
+      height: 62px;
+      border-radius: 999px;
+      border: 2px solid #dbeafe;
+      background:
+        radial-gradient(circle at 30% 22%, rgba(255,255,255,.9), transparent 34%),
+        linear-gradient(135deg, #2563eb, #14b8a6);
+      color: white;
+      display: grid;
+      place-items: center;
+      font-size: 24px;
+      font-weight: 900;
+      overflow: hidden;
+      cursor: pointer;
+      box-shadow: 0 12px 26px rgba(37,99,235,.14);
+    }
+
+    .avatar-copy {
+      min-width: 210px;
+    }
+
+    .avatar-title {
+      font-weight: 850;
+      margin-bottom: 4px;
+    }
+
+    .avatar-note {
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 650;
+      line-height: 1.45;
     }
 
     .badge {
@@ -2178,6 +2498,7 @@ app.get('/profile', requireAuth, (req, res) => {
 
       .hero {
         padding: 24px;
+        align-items: flex-start;
       }
 
       .grid {
@@ -2208,10 +2529,16 @@ app.get('/profile', requireAuth, (req, res) => {
   <main class="wrap">
     <section class="profile-card">
       <div class="hero">
-        <div class="avatar" id="avatar">?</div>
+        <button class="avatar-picker" id="avatarPicker" type="button" aria-label="Change profile picture">
+          <span class="avatar-ring" aria-hidden="true"></span>
+          <span class="avatar" id="avatar">?</span>
+          <span class="avatar-action" aria-hidden="true">&#128247;</span>
+        </button>
+        <input id="avatarInput" class="hidden" type="file" accept="image/png,image/jpeg,image/webp" />
         <div>
           <h1 id="profileTitle">Profile</h1>
           <div class="subtitle" id="profileSubtitle">Loading account details...</div>
+          <div class="avatar-help">Click your photo to upload a new image.</div>
         </div>
       </div>
 
@@ -2229,7 +2556,7 @@ app.get('/profile', requireAuth, (req, res) => {
 
           <div class="stat">
             <div class="stat-label">Session</div>
-            <div class="stat-value"><span class="badge">● Active</span></div>
+            <div class="stat-value"><span class="badge">Active</span></div>
           </div>
         </div>
 
@@ -2253,21 +2580,73 @@ app.get('/profile', requireAuth, (req, res) => {
             <div class="label">Environment</div>
             <div class="value">Support Kanban Web App</div>
           </div>
+
+          <div class="row">
+            <div class="label">Password</div>
+            <div class="value">
+              <input id="newPassword" class="form-input" type="password" placeholder="Leave blank to keep current password" autocomplete="new-password" />
+            </div>
+          </div>
+
+          <div class="row">
+            <div class="label">Profile picture</div>
+            <div class="value">
+              <div class="avatar-upload-panel">
+                <button class="avatar-preview" id="avatarPreview" type="button">?</button>
+                <div class="avatar-copy">
+                  <div class="avatar-title">Profile photo</div>
+                  <div class="avatar-note">PNG, JPG, or WebP. Your selected image appears here before saving.</div>
+                </div>
+              </div>
+            </div>
+          </div>
         </div>
 
         <div class="actions">
-          <a class="btn btn-primary" href="/">← Back to board</a>
-          <a id="manageUsersBtn" class="btn btn-secondary hidden" href="/admin/users">⚙ Manage users</a>
-          <button class="btn btn-danger" id="logoutBtn" type="button">↩ Logout</button>
+          <a class="btn btn-primary" href="/">&larr; Back to board</a>
+          <a id="manageUsersBtn" class="btn btn-secondary hidden" href="/admin/users">Manage users</a>
+          <button class="btn btn-secondary" id="saveProfileBtn" type="button">Save profile</button>
+          <button class="btn btn-danger" id="logoutBtn" type="button">Logout</button>
         </div>
       </div>
     </section>
   </main>
 
   <script>
+    let selectedAvatarBase64 = null;
+    let currentInitial = '?';
+
     function setText(id, value) {
       const el = document.getElementById(id);
       if (el) el.textContent = value || '-';
+    }
+
+    function setAvatarImage(url, initial) {
+      const el = document.getElementById('avatar');
+      if (!el) return;
+      if (url) {
+        el.style.backgroundImage = 'url(' + url + ')';
+        el.style.backgroundSize = 'cover';
+        el.style.backgroundPosition = 'center';
+        el.textContent = '';
+      } else {
+        el.style.backgroundImage = '';
+        el.textContent = initial;
+      }
+    }
+
+    function setAvatarPreview(url) {
+      const el = document.getElementById('avatarPreview');
+      if (!el) return;
+      if (url) {
+        el.style.backgroundImage = 'url(' + url + ')';
+        el.style.backgroundSize = 'cover';
+        el.style.backgroundPosition = 'center';
+        el.textContent = '';
+      } else {
+        el.style.backgroundImage = '';
+        el.textContent = currentInitial;
+      }
     }
 
     async function logout() {
@@ -2295,8 +2674,11 @@ app.get('/profile', requireAuth, (req, res) => {
       const username = user.username || 'User';
       const role = user.role || 'user';
       const initial = String(username).charAt(0).toUpperCase();
+      currentInitial = initial;
 
       setText('avatar', initial);
+      setAvatarImage(user.avatarUrl, initial);
+      setAvatarPreview(user.avatarUrl);
       setText('profileTitle', username);
       setText('profileSubtitle', 'Signed in as ' + role);
       setText('userId', String(user.id || '-'));
@@ -2310,6 +2692,55 @@ app.get('/profile', requireAuth, (req, res) => {
         document.getElementById('adminTopLink')?.classList.remove('hidden');
       }
     }
+
+    function openAvatarPicker() {
+      document.getElementById('avatarInput')?.click();
+    }
+
+    document.getElementById('avatarPicker')?.addEventListener('click', openAvatarPicker);
+    document.getElementById('avatarPreview')?.addEventListener('click', openAvatarPicker);
+
+    document.getElementById('avatarInput')?.addEventListener('change', async (event) => {
+      const file = event.target.files?.[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = () => {
+        const result = reader.result;
+        if (!result || typeof result !== 'string') return;
+        selectedAvatarBase64 = result;
+        setAvatarPreview(result);
+      };
+      reader.readAsDataURL(file);
+    });
+
+    document.getElementById('saveProfileBtn')?.addEventListener('click', async () => {
+      const password = document.getElementById('newPassword')?.value.trim();
+      const payload = {};
+      if (password) payload.password = password;
+      if (selectedAvatarBase64 !== null) payload.avatarBase64 = selectedAvatarBase64;
+      if (!Object.keys(payload).length) {
+        alert('Nothing to save. Change your password or upload a profile picture first.');
+        return;
+      }
+      const res = await fetch('/api/profile', {
+        method: 'PATCH',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      const result = await res.json();
+      if (!res.ok) {
+        alert(result.error || 'Unable to update profile.');
+        return;
+      }
+      const username = result.user?.username || 'User';
+      const initial = String(username).charAt(0).toUpperCase();
+      setAvatarImage(result.user?.avatarUrl, initial);
+      setAvatarPreview(result.user?.avatarUrl);
+      selectedAvatarBase64 = null;
+      if (document.getElementById('newPassword')) document.getElementById('newPassword').value = '';
+      alert('Profile updated successfully.');
+    });
 
     document.getElementById('logoutBtn')?.addEventListener('click', logout);
     document.getElementById('logoutTopBtn')?.addEventListener('click', logout);
@@ -2960,158 +3391,20 @@ app.get('/api/hubspot/owners/resolve', requireAuth, async (req, res) => {
 app.get('/api/hubspot/data-hygiene', requireAuth, async (req, res) => {
   try {
     const force = String(req.query.force || '').toLowerCase() === '1';
-    if (!force && dataHygieneCache.payload && (Date.now() - dataHygieneCache.generatedAt) < DATA_HYGIENE_CACHE_TTL_MS) {
-      return res.json(dataHygieneCache.payload);
-    }
-
     const token = await getHubspotAccessToken(req);
-    const deadlineTs = Date.now() + DATA_HYGIENE_MAX_DURATION_MS;
-    const properties = [
-      'name',
-      'domain',
-      'lifecyclestage',
-      'parent_company_id',
-      'num_child_companies',
-      'num_associated_contacts',
-      'num_associated_deals',
-      'hubspot_owner_id',
-      'am_owner',
-      'am',
-      'account_manager',
-      'co_owner',
-      'co-owner',
-      'coowner',
-      'co_owner_name',
-      'cs_owner',
-      'customer_success_owner',
-      'contract_signature_date',
-      'contract_signed_date',
-      'contract_sign_date',
-      'signature_date'
-    ];
+    const cached = getCachedDataHygienePayload();
 
-    let rows = await collectCompaniesBySearch(token, properties, [
-      { filters: [{ propertyName: 'num_associated_contacts', operator: 'GT', value: '0' }] }
-    ], deadlineTs);
-    let linkedRuleUsed = 'num_associated_contacts > 0';
-    if (!rows.length && Date.now() < deadlineTs) {
-      rows = await collectCompaniesBySearch(token, properties, [
-        { filters: [{ propertyName: 'num_associated_deals', operator: 'GT', value: '0' }] }
-      ], deadlineTs);
-      linkedRuleUsed = 'num_associated_deals > 0';
-    }
-    if (!rows.length && Date.now() < deadlineTs) {
-      rows = await collectCompaniesBySearch(token, properties, [
-        { filters: [{ propertyName: 'lifecyclestage', operator: 'IN', values: ['customer', 'opportunity'] }] }
-      ], deadlineTs);
-      linkedRuleUsed = 'lifecyclestage IN (customer, opportunity)';
+    if (!force && cached?.meta?.cacheFresh) return res.json(cached);
+
+    if (!force && cached) {
+      void refreshDataHygieneCache(token).catch(err => console.warn('Data hygiene background refresh failed:', err.message || err));
+      return res.json({
+        ...cached,
+        meta: { ...(cached.meta || {}), backgroundRefresh: true }
+      });
     }
 
-    const portalBase = 'https://app.hubspot.com/contacts/25445053/record/0-2/';
-    const byDomain = new Map();
-    const byName = new Map();
-    const ownerMismatch = [];
-    const missingContractDate = [];
-    const noDealParentOrMonohotel = [];
-
-    const contractCandidates = ['contract_signature_date', 'contract_signed_date', 'contract_sign_date', 'signature_date'];
-    const contractHits = Object.fromEntries(contractCandidates.map(k => [k, 0]));
-
-    const normalizedRows = rows.map(r => {
-      const p = r.properties || {};
-      const id = String(r.id || '');
-      const name = String(p.name || '').trim();
-      const domain = String(p.domain || '').trim().toLowerCase();
-      const amOwner = firstNonEmptyValue(p, ['am_owner', 'account_manager', 'am', 'hubspot_owner_id']);
-      const csOwner = firstNonEmptyValue(p, ['co_owner', 'co-owner', 'coowner', 'co_owner_name', 'cs_owner', 'customer_success_owner']) || firstNonEmptyValue(p, ['am_owner', 'account_manager', 'am']);
-      const parentCompanyId = String(p.parent_company_id || '').trim();
-      const childCount = Number(p.num_child_companies || 0);
-      const dealCount = Number(p.num_associated_deals || 0);
-      const contractKey = contractCandidates.find(k => String(p[k] || '').trim()) || '';
-      const contractValue = contractKey ? String(p[contractKey] || '').trim() : '';
-      if (contractKey) contractHits[contractKey] += 1;
-
-      return {
-        id,
-        name,
-        domain,
-        amOwner,
-        csOwner,
-        lifecycleStage: String(p.lifecyclestage || '').trim(),
-        contractKey,
-        contractValue,
-        parentCompanyId,
-        childCount,
-        dealCount,
-        url: `${portalBase}${encodeURIComponent(id)}`
-      };
-    });
-
-    for (const r of normalizedRows) {
-      if (r.domain) {
-        if (!byDomain.has(r.domain)) byDomain.set(r.domain, []);
-        byDomain.get(r.domain).push(r);
-      }
-      const nn = normalizeName(r.name);
-      if (nn) {
-        if (!byName.has(nn)) byName.set(nn, []);
-        byName.get(nn).push(r);
-      }
-      const hasAm = !!r.amOwner;
-      const hasCs = !!r.csOwner;
-      if ((hasAm && !hasCs) || (!hasAm && hasCs)) ownerMismatch.push(r);
-      if (!r.contractValue) missingContractDate.push(r);
-      const isParent = r.childCount > 0;
-      const isChild = !!r.parentCompanyId;
-      const isMonohotel = !isParent && !isChild;
-      if ((isParent || isMonohotel) && r.dealCount <= 0) {
-        noDealParentOrMonohotel.push({ ...r, companyType: isParent ? 'parent' : 'monohotel' });
-      }
-    }
-
-    const duplicates = [];
-    for (const [domain, group] of byDomain.entries()) {
-      if (group.length > 1) {
-        group.forEach(r => duplicates.push({ ...r, duplicateReason: `domain:${domain}`, duplicateGroupSize: group.length }));
-      }
-    }
-    for (const [nname, group] of byName.entries()) {
-      if (group.length > 1) {
-        const alreadyById = new Set(duplicates.map(d => d.id));
-        group.forEach(r => {
-          if (!alreadyById.has(r.id)) duplicates.push({ ...r, duplicateReason: `name:${nname}`, duplicateGroupSize: group.length });
-        });
-      }
-    }
-
-    const selectedContractProperty = Object.entries(contractHits).sort((a, b) => b[1] - a[1])[0]?.[0] || contractCandidates[0];
-    const payload = {
-      ok: true,
-      generatedAt: new Date().toISOString(),
-      constraints: {
-        clientLinkedOnly: true,
-        clientLinkedDefinition: linkedRuleUsed
-      },
-      totals: {
-        companiesScanned: normalizedRows.length,
-        duplicates: duplicates.length,
-        ownerMismatch: ownerMismatch.length,
-        missingContractDate: missingContractDate.length,
-        noDealParentOrMonohotel: noDealParentOrMonohotel.length
-      },
-      meta: {
-        selectedContractProperty,
-        partial: Date.now() >= deadlineTs || normalizedRows.length >= DATA_HYGIENE_MAX_ROWS
-      },
-      rows: {
-        duplicates,
-        ownerMismatch,
-        missingContractDate,
-        noDealParentOrMonohotel
-      }
-    };
-    dataHygieneCache = { generatedAt: Date.now(), payload };
-    return res.json(payload);
+    return res.json(await refreshDataHygieneCache(token));
   } catch (err) {
     return res.status(500).json({ error: String(err.message || err) });
   }
@@ -3418,9 +3711,20 @@ app.post('/api/mcp-proxy', requireAuth, async (req, res) => {
 app.use('/assets', requireAuth, express.static(path.join(__dirname, 'public')));
 app.get('/', (req, res) => isAuthed(req) ? res.type('html').sendFile(path.join(__dirname, 'index.html')) : res.redirect('/login'));
 
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
   console.log(`Support Kanban secure web app on http://localhost:${PORT}`);
   if (SESSION_SECRET === 'change-this-session-secret') {
-  console.log('WARNING: Set SESSION_SECRET before production use.');
-}
+    console.log('WARNING: Set SESSION_SECRET before production use.');
+  }
+});
+
+server.on('error', (err) => {
+  if (err?.code === 'EADDRINUSE') {
+    console.error(`Port ${PORT} is already in use.`);
+    console.error('Stop the existing server using that port, or set a different PORT in .env before running npm start.');
+    console.error(`On Windows, you can find the process with: netstat -ano | findstr :${PORT}`);
+    process.exit(1);
+  }
+
+  throw err;
 });
