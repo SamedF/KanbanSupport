@@ -13,36 +13,45 @@
     .top { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 16px; align-items: center; margin-bottom: 24px; }
     .title { margin: 0; font-size: clamp(2rem, 2.5vw, 2.4rem); }
     .subtitle { margin: 8px 0 0; color: #475569; max-width: 760px; font-size: 0.95rem; }
+    .top a.btn-secondary { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-width: 170px; padding: 14px 22px; font-size: 0.95rem; background: #ffffff; border-color: rgba(148,163,184,.4); box-shadow: 0 10px 24px rgba(15,23,42,.08); }
+    .top a.btn-secondary:hover { transform: translateY(-1px); box-shadow: 0 14px 30px rgba(15,23,42,.12); }
     .panel-grid { display: grid; grid-template-columns: 1fr 420px; gap: 22px; }
     .panel { background: #fff; border: 1px solid rgba(148,163,184,.24); border-radius: 24px; box-shadow: 0 20px 45px rgba(15,23,42,.08); padding: 24px; }
     .panel-header { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; margin-bottom: 18px; }
     .panel-header h2 { margin: 0; font-size: 1.2rem; }
     .panel-header p { margin: 8px 0 0; color: #64748b; font-size: 0.95rem; line-height: 1.6; }
     .search-row { display: grid; grid-template-columns: 1fr auto; gap: 12px; margin-bottom: 18px; }
-    .search-row input { padding: 14px 16px; border: 1px solid #cbd5e1; border-radius: 16px; background: #f8fafc; font-size: 0.95rem; }
+    .search-row input { padding: 14px 18px; border: 1px solid #cbd5e1; border-radius: 16px; background: #f8fafc; font-size: 0.95rem; }
     .btn { border: 0; border-radius: 16px; padding: 14px 18px; font-weight: 700; cursor: pointer; transition: transform .16s ease, box-shadow .16s ease; }
-    .btn-primary { background: #4338ca; color: #fff; }
+    .btn-primary { background: #4338ca; color: #fff; box-shadow: 0 14px 30px rgba(67,56,202,.14); }
+    .btn-primary:hover { transform: translateY(-1px); }
     .btn-secondary { background: #fff; color: #0f172a; border: 1px solid rgba(148,163,184,.3); }
+    .btn-secondary:hover { transform: translateY(-1px); }
     .btn-danger { background: #fee2e2; color: #b91c1c; border: 1px solid #fecaca; }
-    .users-list { display: grid; gap: 12px; max-height: calc(100vh - 360px); overflow-y: auto; }
-    .card { display: flex; justify-content: space-between; gap: 14px; align-items: center; padding: 16px 18px; background: #fff; border: 1px solid rgba(148,163,184,.22); border-radius: 18px; cursor: pointer; transition: transform .16s ease, box-shadow .16s ease; }
+    .btn-danger:hover { transform: translateY(-1px); }
+    .users-list { display: grid; gap: 12px; max-height: calc(100vh - 360px); overflow-y: auto; padding: 12px; background: #f8fafc; border-radius: 24px; }
+    .card { display: flex; justify-content: space-between; gap: 18px; align-items: center; padding: 20px 24px; background: #fff; border: 1px solid rgba(148,163,184,.22); border-radius: 22px; cursor: pointer; transition: transform .16s ease, box-shadow .16s ease, border-color .16s ease; }
     .card:hover { transform: translateY(-1px); box-shadow: 0 14px 30px rgba(79,70,229,.08); }
     .card.selected { border-color: rgba(79,70,229,.45); box-shadow: 0 16px 32px rgba(79,70,229,.12); }
-    .user-info { display: flex; gap: 14px; align-items: center; min-width: 0; }
-    .avatar { width: 52px; height: 52px; border-radius: 50%; display: grid; place-items: center; background: #eef2ff; color: #334155; font-size: 0.95rem; font-weight: 700; overflow: hidden; }
-    .avatar img { width: 100%; height: 100%; object-fit: cover; }
-    .meta { min-width: 0; display: grid; gap: 4px; }
-    .meta strong { font-size: 0.97rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .meta small { color: #64748b; font-size: 0.84rem; display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .status { font-size: 0.78rem; padding: 8px 12px; border-radius: 999px; background: #eef2ff; color: #4338ca; white-space: nowrap; }
-    .profile-panel { min-height: 460px; }
-    .empty-state { text-align: center; padding: 72px 20px; color: #475569; }
+    .card .user-info { display: flex; gap: 14px; align-items: center; min-width: 0; flex: 1; }
+    .card .avatar { width: 56px; height: 56px; border-radius: 50%; display: grid; place-items: center; background: #eef2ff; color: #334155; font-size: 0.95rem; font-weight: 700; overflow: hidden; }
+    .card .avatar img { width: 100%; height: 100%; object-fit: cover; }
+    .card .meta { min-width: 0; display: grid; gap: 8px; }
+    .card .name-row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+    .card .meta strong { font-size: 1rem; line-height: 1.2; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .card .meta .subtitle { color: #64748b; font-size: 0.86rem; display: block; overflow-wrap: anywhere; line-height: 1.4; white-space: normal; }
+    .card .meta .role { display: inline-flex; align-items: center; gap: 6px; padding: 6px 10px; border-radius: 999px; background: #eff6ff; color: #1d4ed8; font-size: 0.78rem; font-weight: 700; white-space: nowrap; }
+    .card .status { font-size: 0.78rem; padding: 8px 12px; border-radius: 999px; background: #eef2ff; color: #4338ca; white-space: nowrap; }
+    .profile-panel { min-height: 520px; display: grid; align-content: flex-start; }
+    .empty-state { text-align: center; padding: 42px 24px; color: #475569; }
     .empty-state h3 { margin: 0 0 10px; font-size: 1.1rem; }
     .form-grid { display: grid; gap: 18px; }
     .form-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
     .form-group { display: grid; gap: 8px; }
     .form-group label { font-size: 0.84rem; color: #475569; font-weight: 700; }
     .form-group input, .form-group select { width: 100%; padding: 14px 16px; border: 1px solid #d2d6dc; border-radius: 16px; background: #f8fafc; font-size: 0.95rem; }
+    .button-row { display: flex; gap: 12px; flex-wrap: wrap; }
+    .message { min-height: 24px; margin-top: 14px; font-size: 0.95rem; }
     .avatar-box { display: grid; gap: 14px; justify-items: center; }
     .avatar-preview { width: 130px; height: 130px; border-radius: 24px; background: #f8fafc; border: 1px dashed rgba(148,163,184,.6); display: grid; place-items: center; overflow: hidden; }
     .help-text { color: #64748b; font-size: 0.9rem; line-height: 1.6; }
@@ -90,7 +99,7 @@
   </div>
 
   <script>
-    const state = { users: [], selectedUserId: null, avatarDataUrl: null, avatarRemoved: false, isSaving: false };
+    const state = { users: [], selectedUserId: null, avatarDataUrl: null, avatarRemoved: false, isSaving: false, profilePanelMode: 'view' };
     const elements = {
       usersList: document.getElementById('usersList'),
       searchInput: document.getElementById('searchInput'),
@@ -156,11 +165,19 @@
 
         const meta = document.createElement('div');
         meta.className = 'meta';
+        const nameRow = document.createElement('div');
+        nameRow.className = 'name-row';
         const name = document.createElement('strong');
         name.textContent = user.displayName || user.username;
-        const subtitle = document.createElement('small');
-        subtitle.textContent = `${user.username} · ${user.email || 'No email'} · ${user.role}`;
-        meta.append(name, subtitle);
+        const role = document.createElement('span');
+        role.className = 'role';
+        role.textContent = user.role;
+        nameRow.append(name, role);
+
+        const subtitle = document.createElement('div');
+        subtitle.className = 'subtitle';
+        subtitle.textContent = `${user.username} · ${user.email || 'No email'}`;
+        meta.append(nameRow, subtitle);
         userInfo.append(avatar, meta);
 
         const status = document.createElement('div');
@@ -172,7 +189,103 @@
       });
     }
 
+    function renderCreateUserPanel() {
+      state.avatarDataUrl = null;
+      state.avatarRemoved = false;
+      elements.profilePanel.innerHTML = `
+        <div class="panel-header">
+          <div>
+            <h2>Create new user</h2>
+            <p>Add a new agent, admin, or viewer account.</p>
+          </div>
+        </div>
+        <div class="form-grid">
+          <div class="form-group"><label for="newUsername">Username</label><input id="newUsername" type="text" autocomplete="username" /></div>
+          <div class="form-group"><label for="newDisplayName">Display name</label><input id="newDisplayName" type="text" autocomplete="name" /></div>
+          <div class="form-group"><label for="newEmail">Email</label><input id="newEmail" type="email" autocomplete="email" /></div>
+          <div class="form-row">
+            <div class="form-group"><label for="newRole">Role</label><select id="newRole"><option value="agent">Agent</option><option value="admin">Admin</option><option value="viewer">Viewer</option></select></div>
+            <div class="form-group"><label for="newPassword">Password</label><input id="newPassword" type="password" autocomplete="new-password" /></div>
+          </div>
+        </div>
+        <div class="button-row" style="justify-content:flex-end;gap:10px;margin-top:18px;">
+          <button class="btn btn-secondary" id="cancelCreate" type="button">Cancel</button>
+          <button class="btn btn-primary" id="submitCreate" type="button">Create user</button>
+        </div>
+        <p class="help-text">Use this form to create a new support account without leaving the current page.</p>
+        <div class="message" id="createMessage"></div>
+      `;
+
+      const inputUsername = document.getElementById('newUsername');
+      const inputDisplayName = document.getElementById('newDisplayName');
+      const inputEmail = document.getElementById('newEmail');
+      const inputRole = document.getElementById('newRole');
+      const inputPassword = document.getElementById('newPassword');
+      const createMessage = document.getElementById('createMessage');
+      const submitCreate = document.getElementById('submitCreate');
+      const cancelCreate = document.getElementById('cancelCreate');
+
+      const resetMessage = () => {
+        createMessage.textContent = '';
+        createMessage.style.color = '#475569';
+      };
+
+      cancelCreate.addEventListener('click', () => {
+        state.profilePanelMode = 'view';
+        renderProfilePanel();
+      });
+
+      submitCreate.addEventListener('click', async () => {
+        const username = inputUsername.value.trim();
+        const password = inputPassword.value;
+        const displayName = inputDisplayName.value.trim() || null;
+        const email = inputEmail.value.trim() || null;
+        const role = inputRole.value;
+
+        if (!username) {
+          createMessage.textContent = 'Username is required.';
+          createMessage.style.color = '#b91c1c';
+          return;
+        }
+        if (!password || password.length < 8) {
+          createMessage.textContent = 'Password must be at least 8 characters.';
+          createMessage.style.color = '#b91c1c';
+          return;
+        }
+        resetMessage();
+        submitCreate.disabled = true;
+        submitCreate.textContent = 'Creating...';
+
+        try {
+          await api('/api/admin/users', {
+            method: 'POST',
+            body: { username, password, displayName, email, role }
+          });
+          createMessage.textContent = 'User created successfully.';
+          createMessage.style.color = '#16a34a';
+          inputUsername.value = '';
+          inputDisplayName.value = '';
+          inputEmail.value = '';
+          inputPassword.value = '';
+          state.profilePanelMode = 'view';
+          await loadUsers();
+          renderProfilePanel();
+        } catch (error) {
+          createMessage.textContent = error.message || 'Unable to create user.';
+          createMessage.style.color = '#b91c1c';
+        } finally {
+          submitCreate.disabled = false;
+          submitCreate.textContent = 'Create user';
+        }
+      });
+    }
+
     function renderProfilePanel() {
+      if (state.profilePanelMode === 'create') {
+        renderCreateUserPanel();
+        return;
+      }
+
       const user = getSelectedUser();
       if (!user) {
         elements.profilePanel.innerHTML = `
@@ -378,30 +491,11 @@
 
     elements.searchInput.addEventListener('input', renderUsers);
     elements.refreshButton.addEventListener('click', loadUsers);
-    elements.createButton.addEventListener('click', async () => {
-      const username = prompt('Enter username for the new user:');
-      if (!username) return;
-      const password = prompt('Enter a password (min 8 characters):');
-      if (!password || password.length < 8) return alert('Password must be at least 8 characters.');
-      const displayName = prompt('Display name (optional):') || '';
-      const email = prompt('Email (optional):') || '';
-      const role = prompt('Role (admin, agent, viewer):', 'agent');
-      if (!role || !['admin','agent','viewer'].includes(role.trim().toLowerCase())) return alert('Role must be admin, agent, or viewer.');
-      try {
-        await api('/api/admin/users', {
-          method: 'POST',
-          body: {
-            username: username.trim(),
-            password,
-            displayName: displayName.trim() || null,
-            email: email.trim() || null,
-            role: role.trim().toLowerCase()
-          }
-        });
-        await loadUsers();
-      } catch (error) {
-        alert(error.message || 'Unable to create user.');
-      }
+    elements.createButton.addEventListener('click', () => {
+      state.profilePanelMode = 'create';
+      state.selectedUserId = null;
+      renderUsers();
+      renderProfilePanel();
     });
 
     loadUsers();
