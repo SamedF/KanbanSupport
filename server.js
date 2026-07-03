@@ -16,6 +16,7 @@ const PORT = Number(process.env.PORT || 3000);
 const DATA_PATH = path.join(__dirname, 'data', 'board-state.json');
 const TOKEN_STORE_PATH = path.join(__dirname, 'data', 'oauth-tokens.json');
 const VERSIONS_DIR = path.join(__dirname, 'versions');
+const AVATAR_UPLOAD_DIR = path.join(__dirname, 'public', 'uploads', 'avatars');
 const MAX_BACKUPS = Number(process.env.STATE_BACKUP_KEEP || 50);
 const BACKUP_MIN_INTERVAL_MS = Number(process.env.STATE_BACKUP_MIN_INTERVAL_MS || 60_000);
 
@@ -106,7 +107,8 @@ if (IS_PRODUCTION && SESSION_SECRET === 'change-this-session-secret') {
 }
 
 app.use(helmet({ contentSecurityPolicy: false }));
-app.use(express.json({ limit: '2mb' }));
+app.use(express.json({ limit: '4mb' }));
+fs.mkdirSync(AVATAR_UPLOAD_DIR, { recursive: true });
 // The default express-session MemoryStore keeps every session in the Node
 // process's own memory for as long as the process runs and never survives a
 // restart - on a memory-constrained host that grows without bound. Persist
@@ -130,6 +132,45 @@ function requireAdmin(req, res, next) {
   if (req.session.role !== 'admin') return res.status(403).json({ error: 'admin_required' });
   return next();
 }
+function avatarFilenameForUserId(id) {
+  if (!id) return null;
+  try {
+    const files = fs.readdirSync(AVATAR_UPLOAD_DIR);
+    return files.find(f => f.startsWith(`avatar-${id}.`)) || null;
+  } catch (_error) {
+    return null;
+  }
+}
+function avatarUrlForUserId(id) {
+  const filename = avatarFilenameForUserId(id);
+  return filename ? `/assets/uploads/avatars/${filename}` : null;
+}
+function removeUserAvatarFiles(id) {
+  if (!id) return;
+  try {
+    const files = fs.readdirSync(AVATAR_UPLOAD_DIR);
+    files.filter(f => f.startsWith(`avatar-${id}.`)).forEach(f => {
+      try { fs.unlinkSync(path.join(AVATAR_UPLOAD_DIR, f)); } catch (_e) {}
+    });
+  } catch (_error) {}
+}
+function saveUserAvatarFile(id, dataUrl) {
+  if (!id) return null;
+  if (!dataUrl) {
+    removeUserAvatarFiles(id);
+    return null;
+  }
+  const value = String(dataUrl || '').trim();
+  const match = value.match(/^data:(image\/(png|jpeg|jpg|webp));base64,([A-Za-z0-9+/=]+)$/);
+  if (!match) throw new Error('invalid_avatar_data');
+  const mime = match[1];
+  const base64 = match[3];
+  const ext = mime === 'image/png' ? 'png' : mime === 'image/jpeg' || mime === 'image/jpg' ? 'jpg' : 'webp';
+  removeUserAvatarFiles(id);
+  const filename = `avatar-${id}.${ext}`;
+  fs.writeFileSync(path.join(AVATAR_UPLOAD_DIR, filename), Buffer.from(base64, 'base64'));
+  return `/assets/uploads/avatars/${filename}`;
+}
 function sanitizeUser(user) {
   if (!user) return null;
   return {
@@ -139,6 +180,7 @@ function sanitizeUser(user) {
     isActive: user.isActive !== false,
     displayName: user.displayName || null,
     email: user.email || null,
+    avatarUrl: avatarUrlForUserId(user.id),
     createdAt: user.createdAt,
     updatedAt: user.updatedAt
   };
@@ -2303,6 +2345,9 @@ app.post('/api/admin/users', requireAdmin, async (req, res) => {
     const user = await prisma.user.create({
       data: { username, passwordHash, role, displayName, email, isActive: true }
     });
+    if (req.body?.avatarBase64) {
+      try { saveUserAvatarFile(user.id, req.body.avatarBase64); } catch (avatarError) { console.warn('Avatar upload skipped:', avatarError.message || avatarError); }
+    }
     res.status(201).json({ user: sanitizeUser(user) });
   } catch (error) {
     console.error('Create user failed:', error);
@@ -2338,6 +2383,9 @@ app.patch('/api/admin/users/:id', requireAdmin, async (req, res) => {
       if (password.length < 8) return res.status(400).json({ error: 'password_too_short' });
       data.passwordHash = await bcrypt.hash(password, 10);
     }
+    if (req.body?.avatarBase64 !== undefined) {
+      try { saveUserAvatarFile(id, req.body.avatarBase64); } catch (avatarError) { return res.status(400).json({ error: 'invalid_avatar_data' }); }
+    }
 
     if (existing.id === req.session.userId && data.isActive === false) return res.status(400).json({ error: 'cannot_disable_self' });
     if (existing.id === req.session.userId && data.role && data.role !== 'admin') return res.status(400).json({ error: 'cannot_remove_own_admin_role' });
@@ -2358,6 +2406,7 @@ app.delete('/api/admin/users/:id', requireAdmin, async (req, res) => {
     if (id === req.session.userId) return res.status(400).json({ error: 'cannot_delete_self' });
     const existing = await prisma.user.findUnique({ where: { id } });
     if (!existing) return res.status(404).json({ error: 'user_not_found' });
+    removeUserAvatarFiles(id);
     await prisma.user.delete({ where: { id } });
     res.json({ ok: true, deletedUser: sanitizeUser(existing) });
   } catch (error) {
@@ -2378,7 +2427,7 @@ app.get('/api/tickets', requireAuth, async (req, res) => {
   });
   res.json({ tickets });
 });
-app.get('/api/tickets/:id/audit', requireAuth, async (req, res) => {
+app.get('/api/tickets/:id/audit', requireAdmin, async (req, res) => {
   const ticketId = Number(req.params.id);
 
   if (!Number.isInteger(ticketId) || ticketId <= 0) {
@@ -2422,7 +2471,7 @@ app.get('/api/tickets/:id/audit', requireAuth, async (req, res) => {
   }
 });
 
-app.get('/api/audit/tickets', requireAuth, async (req, res) => {
+app.get('/api/audit/tickets', requireAdmin, async (req, res) => {
   const limit = Math.min(Number(req.query.limit || 100), 500);
 
   try {
@@ -2451,7 +2500,7 @@ app.get('/api/audit/tickets', requireAuth, async (req, res) => {
     return res.status(500).json({ error: 'read_ticket_audit_list_failed' });
   }
 });
-app.get('/audit/tickets', requireAuth, (req, res) => {
+app.get('/audit/tickets', requireAdmin, (req, res) => {
   return res.type('html').send(`
 <!doctype html>
 <html lang="en">

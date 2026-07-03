@@ -94,6 +94,10 @@ body {
   color: var(--text);
 }
 
+.hidden {
+  display: none !important;
+}
+
 /* =========================
    Header
    ========================= */
@@ -132,7 +136,7 @@ header {
 }
 
 .audit-board-btn::before {
-  content: "??";
+  content: "\1F4CB";
   font-size: 13px;
 }
 
@@ -468,25 +472,37 @@ header {
    ========================= */
 
 .workload-bar {
-  display: flex;
-  gap: 5px;
-  flex-wrap: wrap;
-  max-width: 300px;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  max-width: 460px;
+  align-items: center;
+  min-height: 30px;
 }
 
 .agent-pill {
   display: flex;
   align-items: center;
-  gap: 4px;
-  padding: 4px 9px;
+  gap: 6px;
+  justify-content: center;
+  padding: 9px 12px;
+  width: 100%;
   border-radius: 999px;
-  font-size: 11px;
-  font-weight: 700;
-  box-shadow: 0 6px 14px rgba(15, 23, 42, 0.12);
+  font-size: 12px;
+  font-weight: 900;
+  line-height: 1;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow: 0 8px 18px rgba(15, 23, 42, 0.18);
+}
+
+@media (max-width: 920px) {
+  .workload-bar {
+    grid-template-columns: repeat(auto-fit, minmax(100px, 1fr));
+  }
 }
 
 .agent-pill .cnt {
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 900;
 }
 
@@ -1134,6 +1150,164 @@ header {
   border: none;
   outline: none;
   color: #ffffff;
+}
+
+.agent-assign-wrap {
+  position: relative;
+  display: inline-flex;
+}
+
+.agent-assign-wrap.open {
+  z-index: 1200;
+}
+
+.agent-assign-trigger {
+  border: 1px solid rgba(226, 232, 240, 0.86);
+  border-radius: 999px;
+  color: #0f172a;
+  background: linear-gradient(180deg, #ffffff, #f8fafc);
+  font-size: 10px;
+  font-weight: 900;
+  line-height: 1;
+  min-width: 84px;
+  height: 25px;
+  padding: 0 9px 0 10px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 7px;
+  cursor: pointer;
+  box-shadow: 0 4px 10px rgba(15, 23, 42, 0.06);
+  transition: border-color .15s ease, box-shadow .15s ease, transform .15s ease;
+}
+
+.agent-assign-trigger:hover,
+.agent-assign-wrap.open .agent-assign-trigger {
+  border-color: #c7d2fe;
+  box-shadow: 0 8px 18px rgba(79, 70, 229, 0.16);
+  transform: translateY(-1px);
+}
+
+.agent-assign-trigger:focus-visible {
+  outline: none;
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.16);
+}
+
+.agent-assign-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-assign-chevron {
+  width: 14px;
+  height: 14px;
+  border-radius: 999px;
+  background: #eef2ff;
+  color: #4f46e5;
+  display: inline-grid;
+  place-items: center;
+  font-size: 9px;
+  flex: 0 0 auto;
+  transition: transform .15s ease;
+}
+
+.agent-assign-wrap.open .agent-assign-chevron {
+  transform: rotate(180deg);
+}
+
+.agent-assign-menu {
+  position: fixed;
+  width: 188px;
+  max-height: 244px;
+  overflow: auto;
+  padding: 8px;
+  border: 1px solid rgba(226, 232, 240, 0.96);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.98);
+  backdrop-filter: blur(14px);
+  box-shadow: 0 18px 44px rgba(15, 23, 42, 0.18);
+  z-index: 2200;
+  display: none;
+  will-change: left, top, transform;
+}
+
+.agent-assign-menu::before {
+  content: '';
+  position: absolute;
+  top: -7px;
+  left: var(--agent-menu-arrow-left, 22px);
+  width: 0;
+  height: 0;
+  border-left: 7px solid transparent;
+  border-right: 7px solid transparent;
+  border-bottom: 7px solid rgba(255, 255, 255, 0.98);
+  filter: drop-shadow(0 -1px 1px rgba(0, 0, 0, 0.08));
+  transition: left .1s ease;
+}
+
+.agent-assign-menu.above::before {
+  top: auto;
+  bottom: -7px;
+  border-bottom: 0;
+  border-top: 7px solid rgba(255, 255, 255, 0.98);
+}
+
+.agent-assign-wrap.open .agent-assign-menu,
+.agent-assign-menu.open {
+  display: block;
+}
+
+.agent-assign-group {
+  padding: 5px 6px 4px;
+  font-size: 9px;
+  font-weight: 900;
+  color: #94a3b8;
+  text-transform: uppercase;
+}
+
+.agent-assign-option {
+  width: 100%;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: #334155;
+  padding: 7px 8px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 850;
+  text-align: left;
+}
+
+.agent-assign-option span:first-child {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: inherit;
+}
+
+.agent-assign-option:hover {
+  background: #f1f5f9;
+  color: #0f172a;
+}
+
+.agent-assign-option.active {
+  background: #eef2ff;
+  color: #3730a3;
+}
+
+.agent-assign-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  flex: 0 0 auto;
 }
 
 .com-btn {
@@ -2038,14 +2212,29 @@ textarea:focus {
 .crm-shell {
   display: flex;
   min-height: calc(100vh - 84px);
+  align-items: flex-start;
 }
 
 .crm-sidebar {
   width: 220px;
+  flex: 0 0 220px;
+  position: sticky;
+  top: 77px;
+  height: calc(100vh - 77px);
+  overflow: auto;
   background: #0f172a;
   color: #ffffff;
   padding: 14px 10px;
   border-right: 1px solid rgba(255,255,255,.08);
+  transition: width .18s ease, flex-basis .18s ease, padding .18s ease;
+  z-index: 50;
+}
+
+.crm-sidebar.collapsed {
+  width: 52px;
+  flex-basis: 52px;
+  padding: 14px 8px;
+  overflow: visible;
 }
 
 .crm-side-title {
@@ -2054,6 +2243,47 @@ textarea:focus {
   padding: 8px 10px 14px;
   border-bottom: 1px solid rgba(255,255,255,.12);
   margin-bottom: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.crm-side-title-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.crm-sidebar-toggle {
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  border: 1px solid rgba(255,255,255,.16);
+  background: rgba(255,255,255,.08);
+  color: #ffffff;
+  display: inline-grid;
+  place-items: center;
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 900;
+  flex: 0 0 auto;
+}
+
+.crm-sidebar-toggle:hover {
+  background: rgba(255,255,255,.15);
+}
+
+.crm-sidebar.collapsed .crm-side-title {
+  padding: 8px 0 14px;
+  justify-content: center;
+}
+
+.crm-sidebar.collapsed .crm-side-title-text,
+.crm-sidebar.collapsed .crm-nav,
+.crm-sidebar.collapsed #support-subnav {
+  display: none;
 }
 
 .crm-nav {
@@ -2166,8 +2396,26 @@ th {
 
   .crm-sidebar {
     width: 100%;
+    flex-basis: auto;
+    position: relative;
+    top: auto;
+    height: auto;
+    overflow: visible;
     border-right: none;
     border-bottom: 1px solid rgba(255,255,255,.08);
+  }
+
+  .crm-sidebar.collapsed {
+    width: 100%;
+    flex-basis: auto;
+  }
+
+  .crm-sidebar.collapsed .crm-nav {
+    display: grid;
+  }
+
+  .crm-sidebar.collapsed .crm-side-title-text {
+    display: block;
   }
 
   .crm-nav {
@@ -2214,8 +2462,8 @@ th {
     <div class="meta"><span class="live-indicator"><span class="live-dot"></span>LIVE</span><span id="meta">Loading</span><span class="poll-countdown" id="poll-cd"></span></div>
   </div>
   <div class="header-right">
-    <button class="create-ticket-btn" id="create-ticket-btn"> New Ticket</button>
-    <button class="mentions-btn" id="mentions-btn" title="Tagged Alerts"><span class="bell-icon">??</span><span class="mentions-badge" id="mentions-badge" style="display:none">0</span></button>
+    <button class="create-ticket-btn" id="create-ticket-btn">&#43; New Ticket</button>
+    <button class="mentions-btn" id="mentions-btn" title="Tagged Alerts"><span class="bell-icon">&#128276;</span><span class="mentions-badge" id="mentions-badge" style="display:none">0</span></button>
     <div class="current-user-pill" title="Current user">
   <span class="current-user-dot"></span>
   <span class="current-user-prefix">You:</span>
@@ -2230,7 +2478,7 @@ th {
       <button class="account-btn" id="account-btn">Account </button>
      <div class="account-panel" id="account-panel">
   <a class="account-link account-profile-link" href="/profile">
-    <span class="account-icon">??</span>
+    <span class="account-icon">&#128100;</span>
     <span>
       <strong>Profile</strong>
       <small>View your account</small>
@@ -2238,7 +2486,7 @@ th {
   </a>
 
   <a class="account-link account-users-link" href="/admin/users">
-    <span class="account-icon">??</span>
+    <span class="account-icon">&#128101;</span>
     <span>
       <strong>Manage Users</strong>
       <small>Add, update, remove users</small>
@@ -2246,7 +2494,7 @@ th {
   </a>
 
   <button class="account-item" id="jira-settings-btn" type="button">
-    <span class="account-icon">??</span>
+    <span class="account-icon">&#9881;</span>
     <span>
       <strong>Jira Settings</strong>
       <small>Shared Jira connection</small>
@@ -2254,7 +2502,7 @@ th {
   </button>
 
   <button class="account-item account-logout-btn" id="logout-btn" type="button">
-    <span class="account-icon">?</span>
+    <span class="account-icon">&#10140;</span>
     <span>
       <strong>Logout</strong>
       <small>End current session</small>
@@ -2267,8 +2515,11 @@ th {
   </div>
 </header>
 <div class="crm-shell">
-  <aside class="crm-sidebar">
-    <div class="crm-side-title">Quinta CRM</div>
+  <aside class="crm-sidebar" id="crm-sidebar">
+    <div class="crm-side-title">
+      <span class="crm-side-title-text">Quinta CRM</span>
+      <button class="crm-sidebar-toggle" id="crm-sidebar-toggle" type="button" title="Collapse sidebar" aria-label="Collapse sidebar">‹</button>
+    </div>
     <div class="crm-nav">
       <button class="crm-nav-btn active" id="board-view-btn"> Support Board</button>
       <div id="support-subnav" style="padding-left:10px;margin-top:4px;margin-bottom:4px;">
@@ -2812,9 +3063,19 @@ let allTickets=[],pollSecsLeft=POLL_SECS,activeP='all',activeA='all',activeCompa
 let viewMode='board',comTicketId=null,jiraTicketId=null,selectedTags=new Set();
 function normalizeAgentCode(value){
   const code=String(value||'').trim().toUpperCase();
-  return ALL_AGENTS.includes(code)||code==='YOU'?code:'';
+  return ALL_AGENTS.includes(code)||code==='YOU'||code==='ADMIN'?code:'';
 }
-const currentUser=()=>normalizeAgentCode(document.getElementById('current-user')?.value) || 'YOU';
+const currentUser=()=>normalizeAgentCode(document.getElementById('current-user')?.value) || 'ADMIN';
+function currentUserIsAdmin(){
+  return currentSessionUser?.role==='admin';
+}
+function ticketVisibleToCurrentUser(ticket){
+  if(currentUserIsAdmin())return true;
+  const user=currentUser();
+  if(!user)return false;
+  const {assignee,csOwner}=ticketFilterAgentValues(ticket);
+  return assignee===user||csOwner===user;
+}
 
 let _saveTimer=null;
 let stateVersion=0;
@@ -2974,7 +3235,7 @@ function processJiraReporterAlerts(issues){
   });
   if(created){
     if(getJiraAlerts(activeUser).some(a=>!isJiraAlertRead(a.key))){
-      showToast(`?? ${created} Jira alert${created>1?'s':''} received`,'ok');
+      showToast(`${created} Jira alert${created>1?'s':''} received`,'ok');
     }
     saveState('jira_reporter_alerts');
     updateMentionsBadge();
@@ -3158,7 +3419,7 @@ async function syncTicketStatusToHubspot(ticketId,newCol){const hsId=ticketHubsp
 
 //  Spam 
 function recordSpamSender(spamEmail){if(!spamEmail||isQuintaSender(spamEmail)||spamSenders.has(spamEmail))return 0;spamSenders.add(spamEmail);let count=0;allTickets.forEach(t=>{const te=ticketClientEmail[t.id]||t.email.sender?.toLowerCase();if(te===spamEmail){ticketCategory[t.id]='Spam';count++;}});return count;}
-function getSpamTickets(){return allTickets.filter(t=>ticketCategory[t.id]==='Spam'&&normalizeTicketStage(ticketState[t.id]||'new')!=='res').sort((a,b)=>new Date(b.email.receivedDateTime||0)-new Date(a.email.receivedDateTime||0));}
+function getSpamTickets(){return allTickets.filter(t=>ticketCategory[t.id]==='Spam'&&normalizeTicketStage(ticketState[t.id]||'new')!=='res'&&ticketVisibleToCurrentUser(t)).sort((a,b)=>new Date(b.email.receivedDateTime||0)-new Date(a.email.receivedDateTime||0));}
 function updateSpamBadge(){const cnt=getSpamTickets().length;const badge=document.getElementById('spam-count');const btn=document.getElementById('spam-view-btn');if(cnt>0){badge.textContent=cnt>99?'99+':cnt;badge.style.display='inline-flex';}else{badge.style.display='none';}(cnt>0&&!btn.classList.contains('active'))&&(btn.style.fontWeight='700');}
 function setSideNavActive(mode){
   document.getElementById('board-view-btn')?.classList.toggle('active',mode==='board'||mode==='kpi');
@@ -3226,6 +3487,11 @@ function renderJiraConnectionStatus(){
   }
   el.textContent=bits.join(' ');
 }
+function setAdminOnlyNavigationVisible(isAdmin){
+  document.querySelector('.account-users-link')?.classList.toggle('hidden', !isAdmin);
+  document.querySelector('.audit-board-btn')?.classList.toggle('hidden', !isAdmin);
+  document.getElementById('jira-settings-btn')?.classList.toggle('hidden', !isAdmin);
+}
 async function loadBuildVersion(){
   try{
     const res=await fetch('/healthz',{credentials:'include'});
@@ -3245,7 +3511,7 @@ async function refreshJiraStatus(){
   }
   renderJiraConnectionStatus();
   const btn=document.getElementById('jira-settings-btn');
-  if(btn)btn.style.display=(jiraConnection.canConfigure||jiraConnection.connected)?'flex':'none';
+  if(btn)btn.classList.toggle('hidden', !jiraConnection.canConfigure);
 }
 async function refreshLinkedJiraIssues(force=false){
   if(jiraIssuesLoading)return;
@@ -3477,6 +3743,7 @@ function renderKpiView(){
     .filter(ticketMatchesCompany)
     .filter(t=>!activeJira||!!ticketJira[t.id])
     .filter(ticketMatchesTeam)
+    .filter(t=>ticketVisibleToCurrentUser(t))
     .filter(t=>ticketMatchesAgentFilter(t,kpiAgentFilter));
   const statusCounts={new:0,inp:0,wus:0,dft:0,wct:0,res:0};
   const agentRows={};
@@ -4111,7 +4378,22 @@ function classifyPriority(e){const st=classifySubtype(e);if(st&&SUBTYPE_BY_ID[st
 function classifyCategory(e){const st=classifySubtype(e);if(st&&SUBTYPE_BY_ID[st])return SUBTYPE_BY_ID[st].type;return'Other';}
 function classifySubtype(e){const t=((e.subject||'')+' '+(e.summary||'')).toLowerCase();if(/velma fully down|chatbot not responding|platform down/.test(t))return '4.1';if(/booking engine broken|widget missing|booking widget/.test(t))return '2.2';if(/payment gateway|payment not processing/.test(t))return '2.8';if(/pms sync|availability|rates not flowing/.test(t))return '2.1';if(/channel disconnected|whatsapp|instagram|messenger/.test(t))return '2.3';if(/token expired/.test(t))return '2.4';if(/ota|expedia|booking\.com/.test(t))return '2.5';if(/crm integration/.test(t))return '2.6';if(/script missing|install(ed)? on .*website/.test(t))return '2.7';if(/mapping error|room type|rate mapped/.test(t))return '2.9';if(/wrong language/.test(t))return '1.6';if(/missing dialog/.test(t))return '1.3';if(/partial answer|fields missing/.test(t))return '1.4';if(/broken transactional link|booking\/payment url/.test(t))return '1.5';if(/fallback triggered|unreached/.test(t))return '1.8';if(/outdated answer|policy changed/.test(t))return '1.2';if(/rya|wrong answer|rethink/.test(t))return '1.1';if(/account access|cannot log in|login issue/.test(t))return '4.2';if(/account status stuck|pending|setup not transitioning/.test(t))return '4.3';if(/feature not activated|q brain|module missing/.test(t))return '4.4';if(/analytics not showing|q-bi|reporting dashboard/.test(t))return '4.5';if(/platform bug/.test(t))return '5.1';if(/connector bug/.test(t))return '5.2';if(/intent detection failure|misclassif/.test(t))return '5.3';if(/infrastructure|timing out|timeout/.test(t))return '5.4';if(/connect|integr|pms|channel|webhook|api|crm/.test(t))return '2.6';if(/velma|chatbot|bot/.test(t))return '1.1';return '3.1';}
 function autoAssignNew(tickets){tickets.forEach(t=>{if(ticketAssignee[t.id]||ticketCategory[t.id]==='Spam')return;ensureSupportAssignmentForTicket(t.id,t.email);});}
-function updateWorkload(){const load=Object.fromEntries(SUPPORT_AGENTS.map(a=>[a,0]));allTickets.filter(t=>ticketCategory[t.id]!=='Spam').forEach(t=>{const a=ticketAssignee[t.id];if(a in load)load[a]++;});const sorted=SUPPORT_AGENTS.map(a=>({a,n:load[a]})).sort((x,y)=>y.n-x.n).slice(0,5);document.getElementById('workload-bar').innerHTML=sorted.map(({a,n})=>`<div class="agent-pill" style="background:${agentColor(a)}20;color:${agentColor(a)}">${a} <span class="cnt">${n}</span></div>`).join('');}
+function updateWorkload(){
+  const load = Object.fromEntries(SUPPORT_AGENTS.map(a=>[a,0]));
+  allTickets.filter(t=>ticketCategory[t.id]!=='Spam').forEach(t=>{const a=ticketAssignee[t.id];if(a in load)load[a]++;});
+  const displayOrder = [
+    'ZIO',
+    'SGU',
+    'SHE',
+    'JBA',
+    'RMD',
+    'SFA',
+    ...SUPPORT_AGENTS.filter(a=>!['ZIO','SGU','SHE','JBA','RMD','SFA'].includes(a))
+  ];
+  document.getElementById('workload-bar').innerHTML = displayOrder.map(a=>{
+    return `<div class="agent-pill" style="background:${agentColor(a)}20;color:${agentColor(a)}">${a} <span class="cnt">${load[a]||0}</span></div>`;
+  }).join('');
+}
 function showToast(msg,cls=''){const t=document.getElementById('toast');t.textContent=msg;t.className='show'+(cls?' '+cls:'');clearTimeout(t._timer);t._timer=setTimeout(()=>{t.className='';},4500);}
 function startCountdown(){pollSecsLeft=POLL_SECS;const cd=document.getElementById('poll-cd');const tick=setInterval(()=>{pollSecsLeft--;cd.textContent=pollSecsLeft>0?' '+pollSecsLeft+'s':' checking';if(pollSecsLeft<=0)clearInterval(tick);},1000);}
 function rebuildTagged(){taggedTickets.clear();const me=currentUser();Object.entries(ticketComments).forEach(([id,cs])=>{if(cs.some(c=>Array.isArray(c.tags)&&c.tags.map(normalizeAgentCode).includes(me)))taggedTickets.add(id);});document.getElementById('tagged-filter').style.display=taggedTickets.size?'':'none';updateMentionsBadge();}
@@ -4137,13 +4419,16 @@ async function buildAgentUI(){
     : (loggedUser.username || 'User');
 
   const optionValue = loggedUser.role === 'admin'
-    ? 'YOU'
+    ? 'ADMIN'
     : String(loggedUser.username || 'USER').toUpperCase();
 
   const sel=document.getElementById('current-user');
   const label=document.getElementById('current-user-label');
   if(sel)sel.value=optionValue;
   if(label)label.textContent=optionValue;
+
+  const isAdmin = loggedUser.role === 'admin';
+  setAdminOnlyNavigationVisible(isAdmin);
 
   const af=document.getElementById('agent-filter');
   af.innerHTML='<option value="all">All agents</option><optgroup label="Support">'+SUPPORT_AGENTS.map(a=>`<option>${a}</option>`).join('')+'</optgroup><optgroup label="CS">'+CS_AGENTS.map(a=>`<option>${a}</option>`).join('')+'</optgroup><option value="tagged">Tagged me</option>';
@@ -4186,8 +4471,85 @@ async function buildAgentUI(){
     });
   });
 }
-const nextAgent=cur=>{const i=SUPPORT_AGENTS.indexOf(cur);return SUPPORT_AGENTS[i>=0?(i+1)%SUPPORT_AGENTS.length:0];};
 const nextPriority=cur=>PRIORITIES[(PRIORITIES.indexOf(cur)+1)%PRIORITIES.length];
+function agentAssignMenuHtml(selected){
+  const renderGroup=(label,agents,isCs=false)=>`<div class="agent-assign-group">${label}</div>`+agents.map(a=>`
+    <button class="agent-assign-option${a===selected?' active':''}" type="button" data-agent-pick="${esc(a)}">
+      <span>${esc(a)}${isCs?' CS':''}</span>
+      <span class="agent-assign-dot" style="background:${agentColor(a)}"></span>
+    </button>`).join('');
+  return renderGroup('Support',SUPPORT_AGENTS)+renderGroup('CS',CS_AGENTS,true);
+}
+
+function getAgentAssignMenuElement(wrap){
+  return wrap.querySelector('.agent-assign-menu') || document.querySelector(`.agent-assign-menu[data-agent-menu-id="${wrap.dataset.agentMenu}"]`);
+}
+
+function moveAgentAssignMenuToBody(wrap){
+  const menu = getAgentAssignMenuElement(wrap);
+  if(menu && menu.parentElement !== document.body){
+    document.body.appendChild(menu);
+  }
+}
+
+function restoreAgentAssignMenuToWrap(wrap){
+  const menu = document.querySelector(`.agent-assign-menu[data-agent-menu-id="${wrap.dataset.agentMenu}"]`);
+  if(menu && menu.parentElement !== wrap){
+    wrap.appendChild(menu);
+  }
+}
+
+function positionAgentAssignMenu(wrap){
+  const trigger=wrap?.querySelector('[data-agent-trigger]');
+  const menu=getAgentAssignMenuElement(wrap);
+  if(!trigger||!menu) return;
+  const rect=trigger.getBoundingClientRect();
+
+  const prevDisplay=menu.style.display;
+  const prevVisibility=menu.style.visibility;
+  menu.style.visibility='hidden';
+  menu.style.display='block';
+  const width=menu.offsetWidth || 188;
+  const height=menu.offsetHeight || 244;
+  menu.style.display=prevDisplay;
+  menu.style.visibility=prevVisibility || 'visible';
+
+  let left = rect.left;
+  if(left + width > window.innerWidth - 10) left = window.innerWidth - width - 10;
+  if(left < 10) left = 10;
+
+  const arrowLeft = Math.round(rect.left + rect.width / 2 - left - 7);
+  menu.style.setProperty('--agent-menu-arrow-left', `${Math.max(10, Math.min(width - 24, arrowLeft))}px`);
+
+  let top = rect.bottom + 7;
+  const maxTop = window.innerHeight - height - 10;
+  if(top > maxTop){
+    top = rect.top - height - 7;
+    menu.classList.add('above');
+  } else {
+    menu.classList.remove('above');
+  }
+  if(top < 10) top = 10;
+
+  menu.style.left = `${Math.round(left)}px`;
+  menu.style.top = `${Math.round(top)}px`;
+}
+
+function applyTicketAgentSelection(id,previousAgent,selected){
+  if(!id||!selected)return;
+  if(CS_AGENTS.includes(selected)){
+    ticketCSOwner[id]=selected;
+    ticketAssignmentMode[id]='cs';
+  }else{
+    if(!ticketCSOwner[id]&&CS_AGENTS.includes(previousAgent))ticketCSOwner[id]=previousAgent;
+    ticketAssignmentMode[id]='support';
+  }
+  ticketAssignee[id]=selected;
+  manualSupportOverride[id]=true;
+  saveState('manual_agent_dropdown');
+  updateWorkload();
+  renderBoard();
+}
 
 function clearNewReplyGlow(id){if(!ticketHasNewReply[id])return;delete ticketHasNewReply[id];saveState('new_reply_seen');renderBoard();}
 function makeCard(ticket,isNew=false){
@@ -4210,7 +4572,6 @@ function makeCard(ticket,isNew=false){
   const recentCommentsHtml=recentComments.length?recentComments.map(c=>{const tagHtml=(c.tags||[]).map(t=>`<span class="ctag" style="background:${t===CLIENT_TAG?'#475569':agentColor(t)}">@${esc(t)}</span>`).join('');return`<div class="card-inline-comment"><div class="card-inline-head"><span class="card-inline-author">${esc(c.author||'SYSTEM')}</span><span class="card-inline-time">${fmtTime(c.ts)}</span>${tagHtml}</div><div class="card-inline-text">${esc(c.text||'')}</div></div>`;}).join(''):'<div class="card-inline-empty">No internal comments yet.</div>';
   const inlineSectionHtml=inlineOpen?`<div class="card-inline-thread"><div class="card-inline-comments">${recentCommentsHtml}</div><div class="card-inline-compose"><textarea class="card-inline-textarea" data-inline-text="${id}" placeholder="Add an internal note or tag a teammate...">${esc(inlineDraft)}</textarea><div class="card-inline-tags">${inlineTagsHtml}</div><div class="card-inline-actions"><button class="btn-out" data-inline-modal="${id}" style="font-size:10px;padding:3px 8px;">Full thread</button><button class="btn-primary" data-inline-post="${id}" style="font-size:10px;padding:4px 10px;">Post comment</button></div></div></div>`:'';
   const subtype=ticketSubtype[id]||'';const catOpts=CATEGORIES.map(c=>`<option value="${esc(c)}"${c===cat?' selected':''}>${esc(c)}</option>`).join('');const subOpts=TICKET_SUBTYPES.filter(x=>x.type===cat).map(x=>`<option value="${x.id}"${x.id===subtype?' selected':''}>${x.id} ? ${esc(x.label)}</option>`).join('');
-  const ac=agentColor(agent);
   const clientEmail=ticketClientEmail[id]||null;
   const isInternalReply=isQuintaSender(email.sender)&&!!clientEmail;
   const hs=clientEmail?hsCache[clientEmail]:undefined;
@@ -4273,8 +4634,8 @@ function makeCard(ticket,isNew=false){
   div.draggable=true;div.dataset.id=id;
   div.innerHTML=`
     <div class="card-top-meta">
-      <span class="ticket-no">${ticketNo}${unreadMentions?` <button class="ticket-bell active" data-inline-bell="${id}" title="${unreadMentions} unread alert${unreadMentions>1?'s':''}">??</button>`:''}</span>
-      <button class="com-btn${comments.length?' has-comments':''}" data-inline-toggle="${id}">${unreadMentions?`?? `:''}Notes${comments.length?` <span class="com-badge">${comments.length}</span>`:''}</button>
+      <span class="ticket-no">${ticketNo}${unreadMentions?` <button class="ticket-bell active" data-inline-bell="${id}" title="${unreadMentions} unread alert${unreadMentions>1?'s':''}">&#128276;</button>`:''}</span>
+      <button class="com-btn${comments.length?' has-comments':''}" data-inline-toggle="${id}">${unreadMentions?`&#128276; `:''}Notes${comments.length?` <span class="com-badge">${comments.length}</span>`:''}</button>
     </div>
     <div class="card-row1">
       <div class="card-title">${ticket.isManual?'<span class="manual-badge">Manual</span> ':''}${esc(email.subject||'(no subject)')}</div>
@@ -4290,7 +4651,13 @@ function makeCard(ticket,isNew=false){
         ${jiraBtn}
         ${hsTicketBtn}
         <button class="open-email-btn" data-oe="${id}"> Open</button>
-        <button class="agent-badge-card" data-ag="${id}" style="background:${ac}" title="Assigned support agent">${agent}</button>
+        <div class="agent-assign-wrap" data-agent-menu="${id}">
+          <button class="agent-assign-trigger" type="button" data-agent-trigger="${id}" title="Assigned agent">
+            <span class="agent-assign-label">${esc(agent)}</span>
+            <span class="agent-assign-chevron">v</span>
+          </button>
+          <div class="agent-assign-menu" data-agent-menu-id="${id}">${agentAssignMenuHtml(agent)}</div>
+        </div>
         ${showCSBadge?`<span class="agent-badge-card" style="background:${agentColor(csOwner)};opacity:.75;cursor:default;" title="CS owner">${csOwner} CS</span>`:''}
       </div>
     </div>
@@ -4298,7 +4665,50 @@ function makeCard(ticket,isNew=false){
   div.addEventListener('dragstart',e=>{e.dataTransfer.setData('ticketId',id);setTimeout(()=>div.classList.add('dragging'),0);});
   div.addEventListener('dragend',()=>div.classList.remove('dragging'));
   div.querySelector('[data-pr]').addEventListener('click',e=>{e.stopPropagation();ticketPriority[id]=nextPriority(priority);saveState();renderBoard();});
-  div.querySelector('[data-ag]').addEventListener('click',e=>{e.stopPropagation();if(!ticketCSOwner[id]&&CS_AGENTS.includes(agent))ticketCSOwner[id]=agent;ticketAssignee[id]=nextAgent(agent);ticketAssignmentMode[id]='support';manualSupportOverride[id]=true;saveState('manual_support_cycle');updateWorkload();renderBoard();});
+  const agentWrap=div.querySelector('[data-agent-menu]');
+  div.querySelector('[data-agent-trigger]').addEventListener('click',e=>{
+    e.stopPropagation();
+    document.querySelectorAll('.agent-assign-wrap.open').forEach(w=>{
+      if(w!==agentWrap){
+        w.classList.remove('open');
+        restoreAgentAssignMenuToWrap(w);
+        const closedMenu=getAgentAssignMenuElement(w);
+        if(closedMenu) closedMenu.classList.remove('open');
+      }
+    });
+    agentWrap.classList.toggle('open');
+    const menu=getAgentAssignMenuElement(agentWrap);
+    if(agentWrap.classList.contains('open')){
+      if(menu){
+        menu.classList.add('open');
+        menu.style.display='block';
+        menu.style.visibility='visible';
+        menu.style.pointerEvents='auto';
+        moveAgentAssignMenuToBody(agentWrap);
+      }
+      requestAnimationFrame(()=>{
+        if(agentWrap.classList.contains('open')) positionAgentAssignMenu(agentWrap);
+      });
+    } else if(menu){
+      menu.classList.remove('open');
+      menu.style.display='none';
+      menu.style.visibility='hidden';
+      menu.style.pointerEvents='none';
+      restoreAgentAssignMenuToWrap(agentWrap);
+    }
+  });
+  agentWrap.querySelectorAll('[data-agent-pick]').forEach(btn=>btn.addEventListener('click',e=>{
+    e.stopPropagation();
+    const menu=getAgentAssignMenuElement(agentWrap);
+    if(menu){
+      menu.classList.remove('open');
+      menu.style.display='none';
+      menu.style.visibility='hidden';
+      restoreAgentAssignMenuToWrap(agentWrap);
+    }
+    agentWrap.classList.remove('open');
+    applyTicketAgentSelection(id,agent,normalizeAgentCode(btn.dataset.agentPick));
+  }));
     div.querySelector('[data-cat]').addEventListener('change',e=>{const newCat=e.target.value;ticketCategory[id]=newCat;if(newCat==='Spam'){const spamEmail=ticketClientEmail[id]||email.sender?.toLowerCase();if(spamEmail&&!isQuintaSender(spamEmail)){const rc=recordSpamSender(spamEmail);showToast(rc>1?` Spam recorded  ${rc} tickets marked`:' Spam sender recorded','spam-t');}}saveState();renderBoard();updateSpamBadge();});
   div.querySelector('[data-jira-open]').addEventListener('click',ev=>{ev.preventDefault();ev.stopPropagation();if(jiraKey&&JIRA_URL){window.open(`${JIRA_URL}${encodeURIComponent(jiraKey)}`,'_blank');return;}openJiraModal(id);});
   div.querySelector('[data-hs-open]')?.addEventListener('click',ev=>{ev.preventDefault();ev.stopPropagation();const hsId=ticketHubspotId[id];if(!hsId){showToast('Ticket not synced to HubSpot yet');return;}window.open(`https://app.hubspot.com/contacts/25445053/record/0-5/${encodeURIComponent(hsId)}`,'_blank');});
@@ -4320,6 +4730,7 @@ function renderBoard(){
   STAGES.forEach(col=>{
     const tickets=allTickets.filter(t=>{
       if(ticketCategory[t.id]==='Spam')return false;
+      if(!ticketVisibleToCurrentUser(t))return false;
       const p=ticketPriority[t.id]||t.priority;
       if(activeP!=='all'&&p!==activeP)return false;
       if(!ticketMatchesAgentFilter(t,activeA))return false;
@@ -4412,6 +4823,35 @@ document.getElementById('mentions-btn').addEventListener('click',()=>{renderMent
 document.getElementById('mark-all-read').addEventListener('click',()=>{getMentions(currentUser()).forEach(m=>{readMentions.add(m.key);});readAllJiraAlertsForUser(currentUser());saveReads();renderMentions();updateMentionsBadge();});
 document.getElementById('account-btn').addEventListener('click',e=>{e.stopPropagation();document.getElementById('account-panel').classList.toggle('open');});
 document.addEventListener('click',e=>{const panel=document.getElementById('account-panel');const menu=e.target.closest('.account-menu');if(!menu&&panel.classList.contains('open'))panel.classList.remove('open');});
+document.addEventListener('click',e=>{
+  if(!e.target.closest('.agent-assign-wrap') && !e.target.closest('.agent-assign-menu')){
+    document.querySelectorAll('.agent-assign-wrap.open').forEach(w=>{
+      w.classList.remove('open');
+      const menu=getAgentAssignMenuElement(w);
+      if(menu){
+        menu.classList.remove('open');
+        restoreAgentAssignMenuToWrap(w);
+      }
+    });
+  }
+});
+function repositionOpenAgentMenu(){document.querySelectorAll('.agent-assign-wrap.open').forEach(positionAgentAssignMenu);}
+window.addEventListener('scroll',repositionOpenAgentMenu,{passive:true});
+window.addEventListener('resize',repositionOpenAgentMenu);
+document.getElementById('main-board')?.addEventListener('scroll',repositionOpenAgentMenu,{passive:true});
+const crmSidebar=document.getElementById('crm-sidebar');
+const crmSidebarToggle=document.getElementById('crm-sidebar-toggle');
+function setCrmSidebarCollapsed(collapsed){
+  crmSidebar?.classList.toggle('collapsed', collapsed);
+  if(crmSidebarToggle){
+    crmSidebarToggle.textContent=collapsed?'›':'‹';
+    crmSidebarToggle.title=collapsed?'Open sidebar':'Collapse sidebar';
+    crmSidebarToggle.setAttribute('aria-label', collapsed?'Open sidebar':'Collapse sidebar');
+  }
+  try{localStorage.setItem('crmSidebarCollapsed', collapsed?'1':'0');}catch(_){}
+}
+try{setCrmSidebarCollapsed(localStorage.getItem('crmSidebarCollapsed')==='1');}catch(_){}
+crmSidebarToggle?.addEventListener('click',e=>{e.stopPropagation();setCrmSidebarCollapsed(!crmSidebar?.classList.contains('collapsed'));});
 document.getElementById('logout-btn').addEventListener('click',async()=>{
   try{await fetch('/auth/logout',{method:'POST',credentials:'include'});}catch(_){}
   window.location.href='/login';

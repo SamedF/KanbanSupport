@@ -2,99 +2,409 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Admin Users</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Manage Users</title>
   <style>
-    body{font-family:Segoe UI,Arial,sans-serif;background:#f8fafc;margin:0;color:#0f172a}.wrap{max-width:1050px;margin:32px auto;padding:0 16px}h1{margin:0 0 16px}.grid{display:grid;grid-template-columns:340px 1fr;gap:16px}.card{background:#fff;border:1px solid #e2e8f0;border-radius:14px;padding:16px;box-shadow:0 8px 22px rgba(15,23,42,.06)}label{display:block;font-size:12px;color:#64748b;font-weight:700;margin:10px 0 5px}input,select{width:100%;box-sizing:border-box;padding:10px;border:1px solid #cbd5e1;border-radius:8px}button{border:0;border-radius:8px;padding:9px 12px;font-weight:700;cursor:pointer}.primary{background:#2563eb;color:#fff}.ghost{background:#fff;border:1px solid #cbd5e1;color:#334155}.danger{background:#fff;border:1px solid #fecaca;color:#dc2626}.row{border:1px solid #e2e8f0;border-radius:12px;padding:12px;margin-bottom:10px;background:#fff}.row-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}.actions{display:flex;gap:8px;justify-content:flex-end;margin-top:10px}.msg{min-height:20px;font-size:13px;margin-top:10px}.top{display:flex;justify-content:space-between;align-items:center;margin-bottom:16px}a{color:#2563eb;text-decoration:none}@media(max-width:850px){.grid{grid-template-columns:1fr}.row-grid{grid-template-columns:1fr}}
+    :root { color-scheme: light; color: #0f172a; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; background: #eef4fb; }
+    a { color: #2563eb; text-decoration: none; }
+    .page { max-width: 1200px; margin: 0 auto; padding: 24px; }
+    .top { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 16px; align-items: center; margin-bottom: 24px; }
+    .title { margin: 0; font-size: clamp(2rem, 2.5vw, 2.4rem); }
+    .subtitle { margin: 8px 0 0; color: #475569; max-width: 760px; font-size: 0.95rem; }
+    .panel-grid { display: grid; grid-template-columns: 1fr 420px; gap: 22px; }
+    .panel { background: #fff; border: 1px solid rgba(148,163,184,.24); border-radius: 24px; box-shadow: 0 20px 45px rgba(15,23,42,.08); padding: 24px; }
+    .panel-header { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; margin-bottom: 18px; }
+    .panel-header h2 { margin: 0; font-size: 1.2rem; }
+    .panel-header p { margin: 8px 0 0; color: #64748b; font-size: 0.95rem; line-height: 1.6; }
+    .search-row { display: grid; grid-template-columns: 1fr auto; gap: 12px; margin-bottom: 18px; }
+    .search-row input { padding: 14px 16px; border: 1px solid #cbd5e1; border-radius: 16px; background: #f8fafc; font-size: 0.95rem; }
+    .btn { border: 0; border-radius: 16px; padding: 14px 18px; font-weight: 700; cursor: pointer; transition: transform .16s ease, box-shadow .16s ease; }
+    .btn-primary { background: #4338ca; color: #fff; }
+    .btn-secondary { background: #fff; color: #0f172a; border: 1px solid rgba(148,163,184,.3); }
+    .btn-danger { background: #fee2e2; color: #b91c1c; border: 1px solid #fecaca; }
+    .users-list { display: grid; gap: 12px; max-height: calc(100vh - 360px); overflow-y: auto; }
+    .card { display: flex; justify-content: space-between; gap: 14px; align-items: center; padding: 16px 18px; background: #fff; border: 1px solid rgba(148,163,184,.22); border-radius: 18px; cursor: pointer; transition: transform .16s ease, box-shadow .16s ease; }
+    .card:hover { transform: translateY(-1px); box-shadow: 0 14px 30px rgba(79,70,229,.08); }
+    .card.selected { border-color: rgba(79,70,229,.45); box-shadow: 0 16px 32px rgba(79,70,229,.12); }
+    .user-info { display: flex; gap: 14px; align-items: center; min-width: 0; }
+    .avatar { width: 52px; height: 52px; border-radius: 50%; display: grid; place-items: center; background: #eef2ff; color: #334155; font-size: 0.95rem; font-weight: 700; overflow: hidden; }
+    .avatar img { width: 100%; height: 100%; object-fit: cover; }
+    .meta { min-width: 0; display: grid; gap: 4px; }
+    .meta strong { font-size: 0.97rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .meta small { color: #64748b; font-size: 0.84rem; display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .status { font-size: 0.78rem; padding: 8px 12px; border-radius: 999px; background: #eef2ff; color: #4338ca; white-space: nowrap; }
+    .profile-panel { min-height: 460px; }
+    .empty-state { text-align: center; padding: 72px 20px; color: #475569; }
+    .empty-state h3 { margin: 0 0 10px; font-size: 1.1rem; }
+    .form-grid { display: grid; gap: 18px; }
+    .form-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+    .form-group { display: grid; gap: 8px; }
+    .form-group label { font-size: 0.84rem; color: #475569; font-weight: 700; }
+    .form-group input, .form-group select { width: 100%; padding: 14px 16px; border: 1px solid #d2d6dc; border-radius: 16px; background: #f8fafc; font-size: 0.95rem; }
+    .avatar-box { display: grid; gap: 14px; justify-items: center; }
+    .avatar-preview { width: 130px; height: 130px; border-radius: 24px; background: #f8fafc; border: 1px dashed rgba(148,163,184,.6); display: grid; place-items: center; overflow: hidden; }
+    .help-text { color: #64748b; font-size: 0.9rem; line-height: 1.6; }
+    .message { min-height: 24px; margin-top: 14px; font-size: 0.95rem; }
+    @media (max-width: 1040px) { .panel-grid { grid-template-columns: 1fr; } .users-list { max-height: none; } }
+    @media (max-width: 700px) { .search-row { grid-template-columns: 1fr; } .form-row { grid-template-columns: 1fr; } }
   </style>
 </head>
 <body>
-  <div class="wrap">
-    <div class="top"><h1>Admin Users</h1><a href="/">Back to board</a></div>
-    <div class="grid">
-      <div class="card">
-        <h2>Add user</h2>
-        <label>Username</label><input id="username" />
-        <label>Password</label><input id="password" type="password" placeholder="Minimum 8 characters" />
-        <label>Display name</label><input id="displayName" />
-        <label>Email</label><input id="email" type="email" />
-        <label>Role</label><select id="role"><option value="agent">Agent</option><option value="viewer">Viewer</option><option value="admin">Admin</option></select>
-        <button class="primary" id="create" style="width:100%;margin-top:14px">Create user</button>
-        <div class="msg" id="msg"></div>
+  <div class="page">
+    <div class="top">
+      <div>
+        <h1 class="title">Manage users</h1>
+        <p class="subtitle">Search, edit usernames, set roles, and upload avatars for your support team.</p>
       </div>
-      <div class="card">
-        <div class="top"><h2>Existing users</h2><button class="ghost" id="refresh">Refresh</button></div>
-        <div id="list">Loading...</div>
-      </div>
+      <a class="btn-secondary" href="/">Back to board</a>
+    </div>
+
+    <div class="panel-grid">
+      <section class="panel">
+        <div class="panel-header">
+          <div>
+            <h2>Users</h2>
+            <p>Search users and select a profile to edit.</p>
+          </div>
+          <button class="btn btn-secondary" id="refreshButton" type="button">Refresh</button>
+        </div>
+
+        <div class="search-row">
+          <input id="searchInput" type="search" placeholder="Search by username, name, email, or role" autocomplete="off" />
+          <button class="btn btn-primary" id="createButton" type="button">Create user</button>
+        </div>
+
+        <div id="usersList" class="users-list">Loading users...</div>
+      </section>
+
+      <aside class="panel profile-panel" id="profilePanel">
+        <div class="empty-state">
+          <div class="avatar">👤</div>
+          <h3>No user selected</h3>
+          <p>Select a user to edit details, change username, update password, and manage profile photo.</p>
+        </div>
+      </aside>
     </div>
   </div>
-<script>
-const $ = id => document.getElementById(id);
-function esc(value){return String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));}
-async function api(url, opts={}){
-  const response = await fetch(url, { method: opts.method || 'GET', credentials: 'same-origin', headers: {'Content-Type':'application/json'}, body: opts.body ? JSON.stringify(opts.body) : undefined });
-  const data = await response.json().catch(() => ({}));
-  if(!response.ok) throw new Error(data.error || 'Request failed');
-  return data;
-}
-async function load(){
-  const data = await api('/api/admin/users');
-  const users = data.users || [];
-  $('list').innerHTML = users.length ? users.map(user => {
-    return '<div class="row" data-id="'+user.id+'">'+
-      '<div class="row-grid">'+
-        '<div><label>Username</label><input value="'+esc(user.username)+'" disabled /></div>'+
-        '<div><label>Display name</label><input class="displayName" value="'+esc(user.displayName || '')+'" /></div>'+
-        '<div><label>Email</label><input class="email" value="'+esc(user.email || '')+'" /></div>'+
-        '<div><label>Role</label><select class="role">'+
-          '<option value="agent" '+(user.role === 'agent' ? 'selected' : '')+'>Agent</option>'+
-          '<option value="viewer" '+(user.role === 'viewer' ? 'selected' : '')+'>Viewer</option>'+
-          '<option value="admin" '+(user.role === 'admin' ? 'selected' : '')+'>Admin</option>'+
-        '</select></div>'+
-        '<div><label>Status</label><select class="isActive">'+
-          '<option value="true" '+(user.isActive ? 'selected' : '')+'>Active</option>'+
-          '<option value="false" '+(!user.isActive ? 'selected' : '')+'>Disabled</option>'+
-        '</select></div>'+
-        '<div><label>New password</label><input class="password" type="password" placeholder="leave empty" /></div>'+
-      '</div>'+
-      '<div class="actions"><button class="primary save">Save</button><button class="danger del">Remove</button></div>'+
-    '</div>';
-  }).join('') : 'No users yet.';
-  document.querySelectorAll('.save').forEach(button => button.onclick = saveUser);
-  document.querySelectorAll('.del').forEach(button => button.onclick = deleteUser);
-}
-async function saveUser(event){
-  const row = event.target.closest('.row');
-  const body = {
-    displayName: row.querySelector('.displayName').value,
-    email: row.querySelector('.email').value,
-    role: row.querySelector('.role').value,
-    isActive: row.querySelector('.isActive').value === 'true'
-  };
-  const password = row.querySelector('.password').value;
-  if(password) body.password = password;
-  await api('/api/admin/users/' + row.dataset.id, { method: 'PATCH', body });
-  await load();
-}
-async function deleteUser(event){
-  const row = event.target.closest('.row');
-  if(!confirm('Remove this user?')) return;
-  await api('/api/admin/users/' + row.dataset.id, { method: 'DELETE' });
-  await load();
-}
-$('create').onclick = async () => {
-  try {
-    $('msg').textContent = 'Creating...';
-    await api('/api/admin/users', { method: 'POST', body: { username: $('username').value, password: $('password').value, displayName: $('displayName').value, email: $('email').value, role: $('role').value } });
-    $('username').value = $('password').value = $('displayName').value = $('email').value = '';
-    $('msg').textContent = 'User created.';
-    await load();
-  } catch(error) {
-    $('msg').textContent = error.message;
-  }
-};
-$('refresh').onclick = load;
-load().catch(error => $('list').textContent = error.message);
-</script>
+
+  <script>
+    const state = { users: [], selectedUserId: null, avatarDataUrl: null, avatarRemoved: false, isSaving: false };
+    const elements = {
+      usersList: document.getElementById('usersList'),
+      searchInput: document.getElementById('searchInput'),
+      refreshButton: document.getElementById('refreshButton'),
+      createButton: document.getElementById('createButton'),
+      profilePanel: document.getElementById('profilePanel')
+    };
+
+    function escapeHtml(value) {
+      return String(value ?? '').replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch]);
+    }
+
+    async function api(url, options = {}) {
+      const response = await fetch(url, {
+        method: options.method || 'GET',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: options.body ? JSON.stringify(options.body) : undefined
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.error || 'Request failed');
+      return payload;
+    }
+
+    function setUsersMessage(message, isError = false) {
+      elements.usersList.innerHTML = `<div class="help-text">${escapeHtml(message)}</div>`;
+      elements.usersList.style.color = isError ? '#b91c1c' : '#475569';
+    }
+
+    function getSelectedUser() {
+      return state.users.find(user => user.id === state.selectedUserId) || null;
+    }
+
+    function renderUsers() {
+      const query = elements.searchInput.value.trim().toLowerCase();
+      const visible = state.users.filter(user => {
+        const text = [user.username, user.displayName, user.email, user.role].filter(Boolean).join(' ').toLowerCase();
+        return text.includes(query);
+      });
+      if (!visible.length) {
+        setUsersMessage('No users match your search.');
+        return;
+      }
+      elements.usersList.innerHTML = '';
+      visible.sort((a, b) => a.username.localeCompare(b.username)).forEach(user => {
+        const card = document.createElement('button');
+        card.type = 'button';
+        card.className = 'card' + (state.selectedUserId === user.id ? ' selected' : '');
+        card.addEventListener('click', () => selectUser(user.id));
+
+        const userInfo = document.createElement('div');
+        userInfo.className = 'user-info';
+        const avatar = document.createElement('div');
+        avatar.className = 'avatar';
+        if (user.avatarUrl) {
+          const img = document.createElement('img');
+          img.src = user.avatarUrl;
+          img.alt = escapeHtml(user.displayName || user.username);
+          avatar.appendChild(img);
+        } else {
+          avatar.textContent = (user.displayName || user.username || '?').slice(0, 2).toUpperCase();
+        }
+
+        const meta = document.createElement('div');
+        meta.className = 'meta';
+        const name = document.createElement('strong');
+        name.textContent = user.displayName || user.username;
+        const subtitle = document.createElement('small');
+        subtitle.textContent = `${user.username} · ${user.email || 'No email'} · ${user.role}`;
+        meta.append(name, subtitle);
+        userInfo.append(avatar, meta);
+
+        const status = document.createElement('div');
+        status.className = 'status';
+        status.textContent = user.isActive ? 'Active' : 'Disabled';
+
+        card.append(userInfo, status);
+        elements.usersList.append(card);
+      });
+    }
+
+    function renderProfilePanel() {
+      const user = getSelectedUser();
+      if (!user) {
+        elements.profilePanel.innerHTML = `
+          <div class="empty-state">
+            <div class="avatar">👤</div>
+            <h3>No user selected</h3>
+            <p>Select a user to edit details, change username, update password, and manage profile photo.</p>
+          </div>`;
+        return;
+      }
+
+      state.avatarDataUrl = null;
+      state.avatarRemoved = false;
+
+      elements.profilePanel.innerHTML = `
+        <div class="panel-header">
+          <div>
+            <h2>${escapeHtml(user.displayName || user.username)}</h2>
+            <p>Editing profile for ${escapeHtml(user.username)}</p>
+          </div>
+          <button class="btn btn-secondary" id="closeProfile" type="button">Close</button>
+        </div>
+        <div class="avatar-box">
+          <div class="avatar-preview" id="avatarPreview"></div>
+          <div class="button-row">
+            <button class="btn btn-secondary" type="button" id="uploadAvatar">Upload picture</button>
+            <button class="btn btn-danger" type="button" id="removeAvatar">Remove picture</button>
+          </div>
+          <input type="file" id="avatarInput" accept="image/png,image/jpeg,image/webp" style="display:none" />
+        </div>
+        <div class="form-grid">
+          <div class="form-group"><label for="inputUsername">Username</label><input id="inputUsername" type="text" value="${escapeHtml(user.username)}" autocomplete="username" /></div>
+          <div class="form-group"><label for="inputDisplayName">Display name</label><input id="inputDisplayName" type="text" value="${escapeHtml(user.displayName || '')}" autocomplete="name" /></div>
+          <div class="form-group"><label for="inputEmail">Email</label><input id="inputEmail" type="email" value="${escapeHtml(user.email || '')}" autocomplete="email" /></div>
+          <div class="form-row">
+            <div class="form-group"><label for="inputRole">Role</label><select id="inputRole"><option value="admin">Admin</option><option value="agent">Agent</option><option value="viewer">Viewer</option></select></div>
+            <div class="form-group"><label for="inputStatus">Status</label><select id="inputStatus"><option value="true">Active</option><option value="false">Disabled</option></select></div>
+          </div>
+          <div class="form-group"><label for="inputPassword">New password</label><input id="inputPassword" type="password" placeholder="Leave empty to keep current" autocomplete="new-password" /></div>
+        </div>
+        <div class="button-row">
+          <button class="btn btn-primary" id="saveProfile" type="button">Save changes</button>
+          <button class="btn btn-danger" id="deleteProfile" type="button">Delete user</button>
+        </div>
+        <p class="help-text">Username, role, and email can be changed here. Upload a PNG/JPG/WEBP avatar if you want a profile photo.</p>
+        <div class="message" id="profileMessage"></div>
+      `;
+
+      const avatarPreview = document.getElementById('avatarPreview');
+      const avatarInput = document.getElementById('avatarInput');
+      const uploadAvatar = document.getElementById('uploadAvatar');
+      const removeAvatar = document.getElementById('removeAvatar');
+      const saveProfile = document.getElementById('saveProfile');
+      const deleteProfile = document.getElementById('deleteProfile');
+      const closeProfile = document.getElementById('closeProfile');
+      const profileMessage = document.getElementById('profileMessage');
+      const inputUsername = document.getElementById('inputUsername');
+      const inputDisplayName = document.getElementById('inputDisplayName');
+      const inputEmail = document.getElementById('inputEmail');
+      const inputRole = document.getElementById('inputRole');
+      const inputStatus = document.getElementById('inputStatus');
+      const inputPassword = document.getElementById('inputPassword');
+
+      inputRole.value = user.role;
+      inputStatus.value = String(user.isActive !== false);
+
+      const updatePreview = url => {
+        avatarPreview.innerHTML = '';
+        if (url) {
+          const img = document.createElement('img');
+          img.src = url;
+          img.alt = escapeHtml(user.username);
+          avatarPreview.append(img);
+        } else {
+          avatarPreview.textContent = 'No avatar';
+        }
+      };
+
+      updatePreview(user.avatarUrl);
+
+      uploadAvatar.addEventListener('click', () => avatarInput.click());
+      removeAvatar.addEventListener('click', () => {
+        state.avatarRemoved = true;
+        state.avatarDataUrl = null;
+        updatePreview('');
+        profileMessage.textContent = 'Avatar will be removed on save.';
+        profileMessage.style.color = '#475569';
+      });
+
+      avatarInput.addEventListener('change', event => {
+        const file = event.target.files?.[0];
+        if (!file) return;
+        if (!/^image\/(png|jpe?g|webp)$/.test(file.type)) {
+          profileMessage.textContent = 'Only PNG, JPG, or WEBP images are supported.';
+          profileMessage.style.color = '#b91c1c';
+          return;
+        }
+        const reader = new FileReader();
+        reader.onload = () => {
+          state.avatarDataUrl = reader.result;
+          state.avatarRemoved = false;
+          updatePreview(state.avatarDataUrl);
+          profileMessage.textContent = 'Avatar ready to save.';
+          profileMessage.style.color = '#2563eb';
+        };
+        reader.readAsDataURL(file);
+      });
+
+      closeProfile.addEventListener('click', () => {
+        state.selectedUserId = null;
+        renderUsers();
+        renderProfilePanel();
+      });
+
+      saveProfile.addEventListener('click', async () => {
+        if (state.isSaving) return;
+        const payload = {
+          username: inputUsername.value.trim(),
+          displayName: inputDisplayName.value.trim() || null,
+          email: inputEmail.value.trim() || null,
+          role: inputRole.value,
+          isActive: inputStatus.value === 'true'
+        };
+        if (inputPassword.value.trim()) payload.password = inputPassword.value.trim();
+        if (state.avatarRemoved) payload.avatarBase64 = null;
+        else if (state.avatarDataUrl) payload.avatarBase64 = state.avatarDataUrl;
+
+        saveProfile.disabled = true;
+        saveProfile.textContent = 'Saving...';
+        profileMessage.textContent = '';
+        try {
+          await api(`/api/admin/users/${user.id}`, { method: 'PATCH', body: payload });
+          inputPassword.value = '';
+          profileMessage.textContent = 'Profile updated successfully.';
+          profileMessage.style.color = '#16a34a';
+          await loadUsers();
+        } catch (error) {
+          profileMessage.textContent = error.message;
+          profileMessage.style.color = '#b91c1c';
+        } finally {
+          saveProfile.disabled = false;
+          saveProfile.textContent = 'Save changes';
+        }
+      });
+
+      deleteProfile.addEventListener('click', async () => {
+        if (!confirm(`Delete user ${user.username}? This cannot be undone.`)) return;
+        deleteProfile.disabled = true;
+        deleteProfile.textContent = 'Deleting...';
+        try {
+          await api(`/api/admin/users/${user.id}`, { method: 'DELETE' });
+          state.selectedUserId = null;
+          await loadUsers();
+          renderProfilePanel();
+        } catch (error) {
+          profileMessage.textContent = error.message;
+          profileMessage.style.color = '#b91c1c';
+        } finally {
+          deleteProfile.disabled = false;
+          deleteProfile.textContent = 'Delete user';
+        }
+      });
+    }
+
+    function selectUser(userId) {
+      state.selectedUserId = userId;
+      state.avatarDataUrl = null;
+      state.avatarRemoved = false;
+      renderUsers();
+      renderProfilePanel();
+    }
+
+    async function loadUsers() {
+      setUsersMessage('Loading users...');
+      try {
+        const data = await api('/api/admin/users');
+        state.users = Array.isArray(data.users) ? data.users : [];
+        if (!state.users.length) {
+          setUsersMessage('No users available. Create one to get started.');
+          elements.profilePanel.innerHTML = `
+            <div class="empty-state">
+              <div class="avatar">👤</div>
+              <h3>No users yet</h3>
+              <p>Create a user to begin managing accounts.</p>
+            </div>`;
+          return;
+        }
+        renderUsers();
+        if (state.selectedUserId && !state.users.some(u => u.id === state.selectedUserId)) {
+          state.selectedUserId = null;
+        }
+        renderProfilePanel();
+      } catch (error) {
+        setUsersMessage(error.message || 'Unable to load users.', true);
+        elements.profilePanel.innerHTML = `
+          <div class="empty-state">
+            <div class="avatar">⚠️</div>
+            <h3>Unable to load profile</h3>
+            <p>Check your session and refresh the page.</p>
+          </div>`;
+      }
+    }
+
+    elements.searchInput.addEventListener('input', renderUsers);
+    elements.refreshButton.addEventListener('click', loadUsers);
+    elements.createButton.addEventListener('click', async () => {
+      const username = prompt('Enter username for the new user:');
+      if (!username) return;
+      const password = prompt('Enter a password (min 8 characters):');
+      if (!password || password.length < 8) return alert('Password must be at least 8 characters.');
+      const displayName = prompt('Display name (optional):') || '';
+      const email = prompt('Email (optional):') || '';
+      const role = prompt('Role (admin, agent, viewer):', 'agent');
+      if (!role || !['admin','agent','viewer'].includes(role.trim().toLowerCase())) return alert('Role must be admin, agent, or viewer.');
+      try {
+        await api('/api/admin/users', {
+          method: 'POST',
+          body: {
+            username: username.trim(),
+            password,
+            displayName: displayName.trim() || null,
+            email: email.trim() || null,
+            role: role.trim().toLowerCase()
+          }
+        });
+        await loadUsers();
+      } catch (error) {
+        alert(error.message || 'Unable to create user.');
+      }
+    });
+
+    loadUsers();
+  </script>
 </body>
 </html>
