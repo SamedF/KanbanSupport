@@ -37,7 +37,12 @@ const HAS_STATIC_HUBSPOT_TOKEN = !!HUBSPOT_TOKEN && HUBSPOT_TOKEN.startsWith('pa
 const HUBSPOT_CLIENT_ID = process.env.HUBSPOT_CLIENT_ID || '';
 const HUBSPOT_CLIENT_SECRET = process.env.HUBSPOT_CLIENT_SECRET || '';
 const HUBSPOT_REDIRECT_URI = process.env.HUBSPOT_REDIRECT_URI || `http://localhost:${PORT}/auth/hubspot/callback`;
-const HUBSPOT_SCOPES = process.env.HUBSPOT_SCOPES || 'crm.objects.contacts.read crm.objects.companies.read crm.objects.deals.read crm.objects.tickets.read crm.objects.owners.read cms.site_search.read';
+// Must match exactly what's configured as "Required scopes" on the HubSpot
+// app (developer dashboard > Auth tab) - HubSpot rejects the OAuth request
+// outright if it includes a scope the app isn't configured for (this is what
+// broke the preprod HubSpot connection: cms.site_search.read isn't a scope
+// this app has, and tickets.read there is just called "tickets").
+const HUBSPOT_SCOPES = process.env.HUBSPOT_SCOPES || 'crm.objects.companies.read crm.objects.contacts.read crm.objects.custom.read crm.objects.deals.read crm.objects.leads.read crm.objects.line_items.read crm.objects.owners.read crm.objects.products.read crm.objects.quotes.read crm.objects.users.read crm.schemas.companies.read crm.schemas.contacts.read crm.schemas.custom.read crm.schemas.deals.read oauth settings.users.read tickets';
 const HUBSPOT_PKCE_CODE_VERIFIER = process.env.HUBSPOT_PKCE_CODE_VERIFIER || '';
 const HUBSPOT_PKCE_CODE_CHALLENGE = process.env.HUBSPOT_PKCE_CODE_CHALLENGE || '';
 const HUBSPOT_AUTHORIZE_BASE = process.env.HUBSPOT_AUTHORIZE_BASE || 'https://app.hubspot.com/oauth/authorize';
