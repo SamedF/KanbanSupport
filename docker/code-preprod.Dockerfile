@@ -59,9 +59,11 @@ COPY prisma ./prisma
 COPY public ./public
 COPY index.html ./
 
-# Writable runtime state dirs (also mounted as volumes in k8s).
+# nodejs (uid 1001) must own /app: it reads prisma.config.ts and Prisma's
+# config loader writes a temporary esbuild bundle into the working dir at
+# runtime (`prisma migrate deploy`). Also covers the writable state dirs.
 RUN mkdir -p /app/data /app/versions \
-    && chown -R nodejs:nodejs /app/data /app/versions
+    && chown -R nodejs:nodejs /app
 
 USER nodejs
 EXPOSE 3000
