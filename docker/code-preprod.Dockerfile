@@ -20,10 +20,14 @@ RUN apt-get update \
 COPY package.json package-lock.json ./
 RUN npm ci --no-audit --no-fund
 
-# Generate the Prisma client against the committed schema (no DB needed).
+# Generate the Prisma client against the committed schema.
+# prisma.config.ts resolves env("DATABASE_URL") at config-load time, but
+# `generate` never connects — a throwaway placeholder (scoped to this RUN,
+# never in the final image) satisfies the loader.
 COPY prisma ./prisma
 COPY prisma.config.ts ./
-RUN npx prisma generate
+RUN DATABASE_URL="postgresql://placeholder:placeholder@localhost:5432/placeholder" \
+    npx prisma generate
 
 ############################
 # Stage 2 — runtime
