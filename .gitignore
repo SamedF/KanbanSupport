@@ -31,3 +31,9 @@ Thumbs.db
 .vscode/
 *.swp
 *.swo
+
+# App runtime data (Support Kanban)
+data/*.json
+versions/*.json
+backups/
+/generated/prisma

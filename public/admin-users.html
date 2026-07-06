@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Admin Users</title>
+  <style>
+    body{font-family:Segoe UI,Arial,sans-serif;background:#f8fafc;margin:0;color:#0f172a}.wrap{max-width:1050px;margin:32px auto;padding:0 16px}h1{margin:0 0 16px}.grid{display:grid;grid-template-columns:340px 1fr;gap:16px}.card{background:#fff;border:1px solid #e2e8f0;border-radius:14px;padding:16px;box-shadow:0 8px 22px rgba(15,23,42,.06)}label{display:block;font-size:12px;color:#64748b;font-weight:700;margin:10px 0 5px}input,select{width:100%;box-sizing:border-box;padding:10px;border:1px solid #cbd5e1;border-radius:8px}button{border:0;border-radius:8px;padding:9px 12px;font-weight:700;cursor:pointer}.primary{background:#2563eb;color:#fff}.ghost{background:#fff;border:1px solid #cbd5e1;color:#334155}.danger{background:#fff;border:1px solid #fecaca;color:#dc2626}.row{border:1px solid #e2e8f0;border-radius:12px;padding:12px;margin-bottom:10px;background:#fff}.row-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}.actions{display:flex;gap:8px;justify-content:flex-end;margin-top:10px}.msg{min-height:20px;font-size:13px;margin-top:10px}.top{display:flex;justify-content:space-between;align-items:center;margin-bottom:16px}a{color:#2563eb;text-decoration:none}@media(max-width:850px){.grid{grid-template-columns:1fr}.row-grid{grid-template-columns:1fr}}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="top"><h1>Admin Users</h1><a href="/">Back to board</a></div>
+    <div class="grid">
+      <div class="card">
+        <h2>Add user</h2>
+        <label>Username</label><input id="username" />
+        <label>Password</label><input id="password" type="password" placeholder="Minimum 8 characters" />
+        <label>Display name</label><input id="displayName" />
+        <label>Email</label><input id="email" type="email" />
+        <label>Role</label><select id="role"><option value="agent">Agent</option><option value="viewer">Viewer</option><option value="admin">Admin</option></select>
+        <button class="primary" id="create" style="width:100%;margin-top:14px">Create user</button>
+        <div class="msg" id="msg"></div>
+      </div>
+      <div class="card">
+        <div class="top"><h2>Existing users</h2><button class="ghost" id="refresh">Refresh</button></div>
+        <div id="list">Loading...</div>
+      </div>
+    </div>
+  </div>
+<script>
+const $ = id => document.getElementById(id);
+function esc(value){return String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));}
+async function api(url, opts={}){
+  const response = await fetch(url, { method: opts.method || 'GET', credentials: 'same-origin', headers: {'Content-Type':'application/json'}, body: opts.body ? JSON.stringify(opts.body) : undefined });
+  const data = await response.json().catch(() => ({}));
+  if(!response.ok) throw new Error(data.error || 'Request failed');
+  return data;
+}
+async function load(){
+  const data = await api('/api/admin/users');
+  const users = data.users || [];
+  $('list').innerHTML = users.length ? users.map(user => {
+    return '<div class="row" data-id="'+user.id+'">'+
+      '<div class="row-grid">'+
+        '<div><label>Username</label><input value="'+esc(user.username)+'" disabled /></div>'+
+        '<div><label>Display name</label><input class="displayName" value="'+esc(user.displayName || '')+'" /></div>'+
+        '<div><label>Email</label><input class="email" value="'+esc(user.email || '')+'" /></div>'+
+        '<div><label>Role</label><select class="role">'+
+          '<option value="agent" '+(user.role === 'agent' ? 'selected' : '')+'>Agent</option>'+
+          '<option value="viewer" '+(user.role === 'viewer' ? 'selected' : '')+'>Viewer</option>'+
+          '<option value="admin" '+(user.role === 'admin' ? 'selected' : '')+'>Admin</option>'+
+        '</select></div>'+
+        '<div><label>Status</label><select class="isActive">'+
+          '<option value="true" '+(user.isActive ? 'selected' : '')+'>Active</option>'+
+          '<option value="false" '+(!user.isActive ? 'selected' : '')+'>Disabled</option>'+
+        '</select></div>'+
+        '<div><label>New password</label><input class="password" type="password" placeholder="leave empty" /></div>'+
+      '</div>'+
+      '<div class="actions"><button class="primary save">Save</button><button class="danger del">Remove</button></div>'+
+    '</div>';
+  }).join('') : 'No users yet.';
+  document.querySelectorAll('.save').forEach(button => button.onclick = saveUser);
+  document.querySelectorAll('.del').forEach(button => button.onclick = deleteUser);
+}
+async function saveUser(event){
+  const row = event.target.closest('.row');
+  const body = {
+    displayName: row.querySelector('.displayName').value,
+    email: row.querySelector('.email').value,
+    role: row.querySelector('.role').value,
+    isActive: row.querySelector('.isActive').value === 'true'
+  };
+  const password = row.querySelector('.password').value;
+  if(password) body.password = password;
+  await api('/api/admin/users/' + row.dataset.id, { method: 'PATCH', body });
+  await load();
+}
+async function deleteUser(event){
+  const row = event.target.closest('.row');
+  if(!confirm('Remove this user?')) return;
+  await api('/api/admin/users/' + row.dataset.id, { method: 'DELETE' });
+  await load();
+}
+$('create').onclick = async () => {
+  try {
+    $('msg').textContent = 'Creating...';
+    await api('/api/admin/users', { method: 'POST', body: { username: $('username').value, password: $('password').value, displayName: $('displayName').value, email: $('email').value, role: $('role').value } });
+    $('username').value = $('password').value = $('displayName').value = $('email').value = '';
+    $('msg').textContent = 'User created.';
+    await load();
+  } catch(error) {
+    $('msg').textContent = error.message;
+  }
+};
+$('refresh').onclick = load;
+load().catch(error => $('list').textContent = error.message);
+</script>
+</body>
+</html>
