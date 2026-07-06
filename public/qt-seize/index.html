@@ -1,0 +1,498 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>QT Seize</title>
+  <style>
+    :root {
+      --bg: #f8fafc;
+      --card: #ffffff;
+      --ink: #0f172a;
+      --muted: #64748b;
+      --border: #d7d7d7;
+      --primary: #2563eb;
+      --primary-dark: #1d4ed8;
+      --soft: #eef4ff;
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: Inter, "Segoe UI", Arial, sans-serif;
+      background: var(--bg);
+      color: var(--ink);
+    }
+
+    .qt-app {
+      padding: 18px;
+      min-height: 100vh;
+    }
+
+    .qt-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 330px;
+      gap: 14px;
+      align-items: start;
+    }
+
+    .panel {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      box-shadow: 0 6px 16px rgba(0,0,0,.06);
+    }
+
+    .drop-zone {
+      min-height: 250px;
+      display: grid;
+      place-items: center;
+      padding: 32px;
+      border: 2px dashed #b8c4d8;
+      background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
+      cursor: pointer;
+      text-align: center;
+    }
+
+    .drop-zone.dragging {
+      border-color: var(--primary);
+      background: var(--soft);
+    }
+
+    .drop-icon {
+      width: 52px;
+      height: 52px;
+      margin: 0 auto 14px;
+      border-radius: 14px;
+      display: grid;
+      place-items: center;
+      background: #e0ecff;
+      color: var(--primary);
+      font-size: 28px;
+      font-weight: 900;
+    }
+
+    h1, h2, p { margin: 0; }
+    h1 {
+      font-family: Caladea, Georgia, serif;
+      font-size: 28px;
+      font-weight: 700;
+    }
+
+    .hint {
+      margin-top: 6px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .settings {
+      padding: 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .settings h2 {
+      font-family: Caladea, Georgia, serif;
+      font-size: 22px;
+      margin-bottom: 2px;
+    }
+
+    label {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      font-size: 12px;
+      color: var(--muted);
+      font-weight: 700;
+    }
+
+    input, select {
+      width: 100%;
+      border: 1px solid #cbd5e1;
+      border-radius: 8px;
+      padding: 10px 11px;
+      color: var(--ink);
+      background: #ffffff;
+      font: inherit;
+    }
+
+    input[type="checkbox"] {
+      width: auto;
+    }
+
+    input[type="range"] {
+      padding-left: 0;
+      padding-right: 0;
+    }
+
+    .row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+
+    .check-row {
+      flex-direction: row;
+      align-items: center;
+      justify-content: space-between;
+      border: 1px solid #e2e8f0;
+      border-radius: 8px;
+      padding: 9px 10px;
+      color: var(--ink);
+      background: #f8fafc;
+    }
+
+    .btn {
+      border: none;
+      border-radius: 10px;
+      padding: 12px 14px;
+      background: var(--primary);
+      color: #ffffff;
+      font-weight: 800;
+      cursor: pointer;
+    }
+
+    .btn:hover { background: var(--primary-dark); }
+    .btn:disabled { opacity: .55; cursor: not-allowed; }
+
+    .btn-secondary {
+      background: #f1f5f9;
+      color: #334155;
+      border: 1px solid #cbd5e1;
+    }
+
+    .btn-secondary:hover { background: #e2e8f0; }
+
+    .toolbar {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      justify-content: space-between;
+      margin: 14px 0 10px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .image-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+      gap: 12px;
+    }
+
+    .image-card {
+      overflow: hidden;
+    }
+
+    .thumb {
+      aspect-ratio: 16 / 10;
+      background: #e2e8f0;
+      overflow: hidden;
+    }
+
+    .thumb img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
+    }
+
+    .image-meta {
+      padding: 10px;
+      display: grid;
+      gap: 6px;
+      font-size: 12px;
+    }
+
+    .image-name {
+      font-weight: 800;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .meta-line {
+      display: flex;
+      justify-content: space-between;
+      color: var(--muted);
+      gap: 8px;
+    }
+
+    .empty {
+      padding: 18px;
+      color: var(--muted);
+      font-size: 13px;
+      text-align: center;
+    }
+
+    @media (max-width: 900px) {
+      .qt-grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <div class="qt-app">
+    <div class="qt-grid">
+      <section>
+        <div class="panel drop-zone" id="dropZone">
+          <input id="fileInput" type="file" accept="image/*" multiple hidden />
+          <div>
+            <div class="drop-icon">+</div>
+            <h1>Drop your images here</h1>
+            <p class="hint">Click or drag images to prepare resized exports.</p>
+          </div>
+        </div>
+
+        <div class="toolbar">
+          <span id="imageCount">No images selected</span>
+          <button class="btn btn-secondary" id="clearBtn" type="button">Clear</button>
+        </div>
+        <div class="image-grid" id="imageGrid">
+          <div class="panel empty">Uploaded images will appear here.</div>
+        </div>
+      </section>
+
+      <aside class="panel settings">
+        <h2>Resize Settings</h2>
+        <div class="row">
+          <label>Width
+            <input id="widthInput" type="number" min="1" value="1920" />
+          </label>
+          <label>Height
+            <input id="heightInput" type="number" min="1" value="1080" />
+          </label>
+        </div>
+        <label>Fit
+          <select id="fitInput">
+            <option value="cover">Cover</option>
+            <option value="contain">Contain</option>
+            <option value="stretch">Stretch</option>
+          </select>
+        </label>
+        <label>Format
+          <select id="formatInput">
+            <option value="image/jpeg">jpeg</option>
+            <option value="image/png">png</option>
+            <option value="image/webp">webp</option>
+          </select>
+        </label>
+        <label>Quality <span id="qualityLabel">100%</span>
+          <input id="qualityInput" type="range" min="50" max="100" value="100" />
+        </label>
+        <label class="check-row">
+          Smart Sharpen
+          <input id="sharpenInput" type="checkbox" checked />
+        </label>
+        <button class="btn" id="resizeBtn" type="button">Resize Images</button>
+      </aside>
+    </div>
+  </div>
+
+  <script>
+    const state = { images: [] };
+    const dropZone = document.getElementById('dropZone');
+    const fileInput = document.getElementById('fileInput');
+    const imageGrid = document.getElementById('imageGrid');
+    const imageCount = document.getElementById('imageCount');
+    const qualityInput = document.getElementById('qualityInput');
+    const qualityLabel = document.getElementById('qualityLabel');
+
+    function formatBytes(bytes) {
+      if (!bytes) return '0 KB';
+      const units = ['B', 'KB', 'MB', 'GB'];
+      const index = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+      return `${(bytes / Math.pow(1024, index)).toFixed(index ? 2 : 0)} ${units[index]}`;
+    }
+
+    function esc(value) {
+      return String(value ?? '').replace(/[&<>"']/g, ch => ({
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&quot;',
+        "'": '&#39;'
+      })[ch]);
+    }
+
+    function loadImage(file) {
+      return new Promise((resolve, reject) => {
+        const url = URL.createObjectURL(file);
+        const img = new Image();
+        img.onload = () => resolve({ file, url, width: img.naturalWidth, height: img.naturalHeight });
+        img.onerror = () => {
+          URL.revokeObjectURL(url);
+          reject(new Error(`Could not load ${file.name}`));
+        };
+        img.src = url;
+      });
+    }
+
+    async function addFiles(files) {
+      const imageFiles = [...files].filter(file => file.type.startsWith('image/'));
+      const loaded = await Promise.all(imageFiles.map(loadImage));
+      state.images.push(...loaded.map(item => ({ id: crypto.randomUUID(), ...item })));
+      renderImages();
+    }
+
+    function renderImages() {
+      imageCount.textContent = state.images.length
+        ? `${state.images.length} image${state.images.length === 1 ? '' : 's'} ready`
+        : 'No images selected';
+      if (!state.images.length) {
+        imageGrid.innerHTML = '<div class="panel empty">Uploaded images will appear here.</div>';
+        return;
+      }
+      imageGrid.innerHTML = '';
+      state.images.forEach(image => {
+        const card = document.createElement('div');
+        card.className = 'panel image-card';
+        const name = esc(image.file.name);
+        card.innerHTML = `
+          <div class="thumb"><img src="${image.url}" alt=""></div>
+          <div class="image-meta">
+            <div class="image-name" title="${name}">${name}</div>
+            <div class="meta-line"><span>Resolution</span><strong>${image.width} x ${image.height}</strong></div>
+            <div class="meta-line"><span>Size</span><strong>${formatBytes(image.file.size)}</strong></div>
+            <button class="btn btn-secondary" type="button" data-remove="${image.id}">Remove</button>
+          </div>
+        `;
+        card.querySelector('[data-remove]').addEventListener('click', () => removeImage(image.id));
+        imageGrid.appendChild(card);
+      });
+    }
+
+    function removeImage(id) {
+      const image = state.images.find(item => item.id === id);
+      if (image) URL.revokeObjectURL(image.url);
+      state.images = state.images.filter(item => item.id !== id);
+      renderImages();
+    }
+
+    function settings() {
+      return {
+        width: Math.max(1, Number(document.getElementById('widthInput').value) || 1),
+        height: Math.max(1, Number(document.getElementById('heightInput').value) || 1),
+        fit: document.getElementById('fitInput').value,
+        format: document.getElementById('formatInput').value,
+        quality: Number(qualityInput.value) / 100,
+        sharpen: document.getElementById('sharpenInput').checked,
+      };
+    }
+
+    function drawCover(ctx, img, width, height) {
+      const scale = Math.max(width / img.naturalWidth, height / img.naturalHeight);
+      const sw = width / scale;
+      const sh = height / scale;
+      const sx = (img.naturalWidth - sw) / 2;
+      const sy = (img.naturalHeight - sh) / 2;
+      ctx.drawImage(img, sx, sy, sw, sh, 0, 0, width, height);
+    }
+
+    function drawContain(ctx, img, width, height) {
+      const scale = Math.min(width / img.naturalWidth, height / img.naturalHeight);
+      const dw = img.naturalWidth * scale;
+      const dh = img.naturalHeight * scale;
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, width, height);
+      ctx.drawImage(img, (width - dw) / 2, (height - dh) / 2, dw, dh);
+    }
+
+    function sharpen(canvas) {
+      const ctx = canvas.getContext('2d');
+      const src = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      const out = ctx.createImageData(src);
+      const w = canvas.width;
+      const weights = [0, -1, 0, -1, 5, -1, 0, -1, 0];
+      for (let y = 1; y < canvas.height - 1; y++) {
+        for (let x = 1; x < canvas.width - 1; x++) {
+          for (let c = 0; c < 3; c++) {
+            let value = 0;
+            for (let ky = -1; ky <= 1; ky++) {
+              for (let kx = -1; kx <= 1; kx++) {
+                const srcIndex = ((y + ky) * w + (x + kx)) * 4 + c;
+                value += src.data[srcIndex] * weights[(ky + 1) * 3 + (kx + 1)];
+              }
+            }
+            out.data[(y * w + x) * 4 + c] = Math.max(0, Math.min(255, value));
+          }
+          out.data[(y * w + x) * 4 + 3] = src.data[(y * w + x) * 4 + 3];
+        }
+      }
+      ctx.putImageData(out, 0, 0);
+    }
+
+    function extensionFor(format) {
+      return format === 'image/png' ? 'png' : format === 'image/webp' ? 'webp' : 'jpg';
+    }
+
+    function canvasToBlob(canvas, format, quality) {
+      return new Promise(resolve => canvas.toBlob(resolve, format, quality));
+    }
+
+    async function resizeOne(image, config) {
+      const source = await loadImage(image.file);
+      const img = new Image();
+      img.src = source.url;
+      await img.decode();
+      const canvas = document.createElement('canvas');
+      canvas.width = config.width;
+      canvas.height = config.height;
+      const ctx = canvas.getContext('2d');
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = 'high';
+      if (config.fit === 'cover') drawCover(ctx, img, config.width, config.height);
+      else if (config.fit === 'contain') drawContain(ctx, img, config.width, config.height);
+      else ctx.drawImage(img, 0, 0, config.width, config.height);
+      URL.revokeObjectURL(source.url);
+      if (config.sharpen && config.width * config.height <= 8000000) sharpen(canvas);
+      const blob = await canvasToBlob(canvas, config.format, config.quality);
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `${image.file.name.replace(/\.[^/.]+$/, '')}.${extensionFor(config.format)}`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    }
+
+    dropZone.addEventListener('click', () => fileInput.click());
+    fileInput.addEventListener('change', event => addFiles(event.target.files));
+    dropZone.addEventListener('dragover', event => {
+      event.preventDefault();
+      dropZone.classList.add('dragging');
+    });
+    dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragging'));
+    dropZone.addEventListener('drop', event => {
+      event.preventDefault();
+      dropZone.classList.remove('dragging');
+      addFiles(event.dataTransfer.files);
+    });
+    qualityInput.addEventListener('input', () => {
+      qualityLabel.textContent = `${qualityInput.value}%`;
+    });
+    document.getElementById('clearBtn').addEventListener('click', () => {
+      state.images.forEach(image => URL.revokeObjectURL(image.url));
+      state.images = [];
+      renderImages();
+    });
+    document.getElementById('resizeBtn').addEventListener('click', async event => {
+      if (!state.images.length) {
+        alert('Please upload at least one image.');
+        return;
+      }
+      event.currentTarget.disabled = true;
+      event.currentTarget.textContent = 'Processing...';
+      try {
+        const config = settings();
+        for (const image of state.images) await resizeOne(image, config);
+      } catch (error) {
+        alert(error.message || String(error));
+      } finally {
+        event.currentTarget.disabled = false;
+        event.currentTarget.textContent = 'Resize Images';
+      }
+    });
+  </script>
+</body>
+</html>
