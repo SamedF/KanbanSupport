@@ -31,12 +31,13 @@ const M365_TENANT_ID = process.env.M365_TENANT_ID || '';
 const M365_CLIENT_ID = process.env.M365_CLIENT_ID || '';
 const M365_CLIENT_SECRET = process.env.M365_CLIENT_SECRET || '';
 const M365_REDIRECT_URI = process.env.M365_REDIRECT_URI || `http://localhost:${PORT}/auth/microsoft/callback`;
-// Chat.Create/Chat.ReadWrite intentionally excluded: they're only needed by
-// graphSendTeamsDirectMessage(), which nothing currently calls (Resolved
-// notifications go through the Power Automate webhook instead) - requesting
-// them anyway forced an admin-consent prompt for permissions the app never
-// actually uses.
-const M365_SCOPES = String(process.env.M365_SCOPES || 'offline_access openid profile email User.Read User.ReadBasic.All Mail.Read Mail.Read.Shared').trim();
+// Chat.Create/Chat.ReadWrite/User.ReadBasic.All intentionally excluded:
+// they're only needed by graphSendTeamsDirectMessage() (via
+// graphFindUserByEmail(), which looks up other users), and nothing currently
+// calls that function - Resolved notifications go through the Power Automate
+// webhook instead. Requesting them anyway forced an admin-consent prompt for
+// permissions the app never actually uses.
+const M365_SCOPES = String(process.env.M365_SCOPES || 'offline_access openid profile email User.Read Mail.Read Mail.Read.Shared').trim();
 const SUPPORT_MAILBOX = String(process.env.SUPPORT_MAILBOX || 'helpdesk@quinta.im').trim().toLowerCase();
 const HUBSPOT_TOKEN = process.env.HUBSPOT_PRIVATE_APP_TOKEN || process.env.HUBSPOT_ACCESS_TOKEN || '';
 const HAS_STATIC_HUBSPOT_TOKEN = !!HUBSPOT_TOKEN && HUBSPOT_TOKEN.startsWith('pat-');
