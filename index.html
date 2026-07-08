@@ -3098,6 +3098,7 @@ const INITIAL_SYNC_DAYS=14;
 const POLL_LOOKBACK_HOURS=96;
 const POLL_BACKFILL_BUFFER_HOURS=6;
 const JIRA_REFRESH_MS=60000;
+const RESOLVED_RETENTION_MS=72*60*60*1000;
 const hasCowork=typeof window!=='undefined'&&window.cowork&&typeof window.cowork.callMcpTool==='function';
 //  SLA 
 const SLA_HOURS={High:4,Medium:24,Low:48};
@@ -3135,6 +3136,7 @@ let ticketJira={};   // ticketId  Jira key (e.g. 'QT-1234') | null
 let ticketHubspotId={}; // ticketId -> HubSpot ticket ID
 let ticketStageTouchedAt={}; // ticketId -> last stage-change timestamp (ms)
 let ticketHasNewReply={}; // ticketId -> true while an unread reply is glowing on the card
+let ticketResolutionMeta={}; // ticketId -> CS confirmation / send-back metadata
 let spamSenders=new Set();
 let hsCache={},domainCompanyCache={},readMentions=new Set(),readJiraAlerts=new Set();
 let jiraAlerts=[],jiraStatusSnapshot={};
@@ -3324,7 +3326,7 @@ function buildStatePayload(reason){
   const snapshot={
     allTickets,
     seenIds:Object.keys(seen),
-    ticketState,ticketStageTouchedAt,ticketHasNewReply,ticketPriority,ticketCategory,ticketSubtype,ticketAssignee,ticketAssignmentMode,manualSupportOverride,ticketCSOwner,ticketComments,ticketClientEmail,ticketCreatedAt,ticketNumbers,ticketNumberCounter,ticketJira,ticketHubspotId,
+    ticketState,ticketStageTouchedAt,ticketHasNewReply,ticketResolutionMeta,ticketPriority,ticketCategory,ticketSubtype,ticketAssignee,ticketAssignmentMode,manualSupportOverride,ticketCSOwner,ticketComments,ticketClientEmail,ticketCreatedAt,ticketNumbers,ticketNumberCounter,ticketJira,ticketHubspotId,
     spamSenders:[...spamSenders],hsCache,domainCompanyCache,readMentions:[...readMentions],jiraAlerts,readJiraAlerts:[...readJiraAlerts],jiraStatusSnapshot,companyCustomProps,companyProfiles,companiesViewType,companyNetworkCache,companyFilters,coOwnerMappings,actionHistory,
     _meta:{clientSavedAt:now,clientVersion:stateVersion}
   };
@@ -3557,6 +3559,7 @@ async function loadState(){
   if(s.ticketState){Object.entries(s.ticketState).forEach(([k,v])=>{ticketState[k]=normalizeTicketStage(v);});}
   if(s.ticketStageTouchedAt&&typeof s.ticketStageTouchedAt==='object')Object.assign(ticketStageTouchedAt,s.ticketStageTouchedAt);
   if(s.ticketHasNewReply&&typeof s.ticketHasNewReply==='object')Object.assign(ticketHasNewReply,s.ticketHasNewReply);
+  if(s.ticketResolutionMeta&&typeof s.ticketResolutionMeta==='object')Object.assign(ticketResolutionMeta,s.ticketResolutionMeta);
   if(s.ticketPriority)Object.assign(ticketPriority,s.ticketPriority);
   if(s.ticketCategory)Object.assign(ticketCategory,s.ticketCategory);if(s.ticketSubtype)Object.assign(ticketSubtype,s.ticketSubtype);
   if(s.ticketAssignee)Object.assign(ticketAssignee,s.ticketAssignee);
@@ -4873,6 +4876,52 @@ function applyTicketAgentSelection(id,previousAgent,selected){
 }
 
 function clearNewReplyGlow(id){if(!ticketHasNewReply[id])return;delete ticketHasNewReply[id];saveState('new_reply_seen');renderBoard();}
+function resolvedAtForTicket(id){
+  const touched=Number(ticketStageTouchedAt[id]||0);
+  if(touched>0)return touched;
+  const created=Date.parse(ticketCreatedAt[id]||'');
+  return Number.isFinite(created)?created:0;
+}
+function isResolvedTicketHidden(id,now=Date.now()){
+  if(normalizeTicketStage(ticketState[id]||'new')!=='res')return false;
+  const meta=ticketResolutionMeta[id]||{};
+  if(meta.confirmedAt)return true;
+  const resolvedAt=resolvedAtForTicket(id);
+  return !!resolvedAt&&now-resolvedAt>=RESOLVED_RETENTION_MS;
+}
+function resolvedReviewHtml(id,csOwner){
+  if(normalizeTicketStage(ticketState[id]||'new')!=='res')return'';
+  const meta=ticketResolutionMeta[id]||{};
+  const resolvedAt=resolvedAtForTicket(id);
+  const remaining=Math.max(0,RESOLVED_RETENTION_MS-(Date.now()-resolvedAt));
+  const hoursLeft=Math.ceil(remaining/(60*60*1000));
+  const role=String(currentSessionUser?.role||'').toLowerCase();
+  const canReview=role==='admin'||role==='owner'||normalizeCSAgent(currentUser())===normalizeCSAgent(csOwner);
+  const status=meta.sentBackAt?'Sent back by CS':`Auto-hides in ${hoursLeft||1}h unless CS sends it back`;
+  const actions=canReview?`<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px;"><button class="btn-primary" data-res-confirm="${id}" style="font-size:10px;padding:4px 8px;">Confirm resolved</button><button class="btn-out" data-res-sendback="${id}" style="font-size:10px;padding:4px 8px;">Send back</button></div>`:'';
+  return`<div style="margin-top:7px;padding:7px 8px;border:1px solid #bbf7d0;border-radius:8px;background:#f0fdf4;color:#166534;font-size:10px;line-height:1.35;"><strong>CS review</strong><div>${esc(status)}</div>${actions}</div>`;
+}
+function confirmTicketResolved(id){
+  ticketResolutionMeta[id]={...(ticketResolutionMeta[id]||{}),confirmedAt:Date.now(),confirmedBy:currentUser()};
+  saveState('resolved_confirmed_by_cs');
+  renderBoard();
+  showToast('Resolved ticket confirmed and hidden','ok');
+}
+async function sendResolvedTicketBack(id){
+  const note=prompt('Add a note for why this ticket is being sent back:');
+  if(note===null)return;
+  const text=String(note||'').trim();
+  if(!text){showToast('A send-back note is required','warn');return;}
+  ticketState[id]='inp';
+  ticketStageTouchedAt[id]=Date.now();
+  ticketResolutionMeta[id]={...(ticketResolutionMeta[id]||{}),sentBackAt:Date.now(),sentBackBy:currentUser(),sendBackNote:text};
+  postTicketComment(id,`CS sent back from Resolved: ${text}`,[ticketAssignee[id]].filter(Boolean));
+  const saved=await saveState('resolved_sent_back_by_cs');
+  renderActiveView();
+  const rs=await syncTicketStatusToHubspot(id,'inp');
+  if(!rs?.ok&&rs?.reason!=='missing_hubspot_ticket_id')showToast(`HubSpot status sync failed: ${rs?.error||rs?.reason}`);
+  showToast(saved?'Ticket sent back to In Progress':'Ticket sent back locally; save pending',saved?'ok':'warn');
+}
 function makeCard(ticket,isNew=false){
   const{email,id}=ticket;
   ensureTicketNumber(id);
@@ -4943,6 +4992,7 @@ function makeCard(ticket,isNew=false){
   const hsIsSyncing=hubspotTicketSyncInFlight.has(id);
   const hsFailed=hubspotTicketSyncFailed.has(id);
   const hsBlockReason=getHubspotSyncBlockReason(ticket);
+  const resolvedHtml=resolvedReviewHtml(id,csOwner);
   const hsTicketBtn=hsTicketId
     ?`<button class="btn-out" data-hs-open="${id}" style="font-size:10px;padding:2px 7px;" title="See ticket on HubSpot">See on HubSpot</button>`
     :(hsIsSyncing
@@ -4966,7 +5016,7 @@ function makeCard(ticket,isNew=false){
     </div>
     <div class="card-summary">${esc(email.summary||'No preview.')}</div>
     <div class="card-controls"><select class="cat-select" data-cat="${id}">${catOpts}</select><select class="cat-select" data-sub="${id}">${subOpts||'<option value="">No subtype</option>'}</select></div>
-    ${slaBadgeHtml}${hsHtml}${jiraDetailsHtml}
+    ${slaBadgeHtml}${hsHtml}${jiraDetailsHtml}${resolvedHtml}
     <div class="card-footer">
       ${senderHtml}
       <div class="card-actions">
@@ -5048,6 +5098,8 @@ function makeCard(ticket,isNew=false){
   div.querySelector('[data-inline-toggle]')?.addEventListener('click',ev=>{ev.stopPropagation();inlineCommentOpen[id]=!inlineOpen;if(inlineCommentOpen[id]){markAlertFeedReadForTicket(id,currentUser());clearNewReplyGlow(id);}renderBoard();});
   div.querySelector('[data-inline-bell]')?.addEventListener('click',ev=>{ev.stopPropagation();inlineCommentOpen[id]=true;markAlertFeedReadForTicket(id,currentUser());clearNewReplyGlow(id);renderBoard();});
   div.querySelector('[data-inline-modal]')?.addEventListener('click',ev=>{ev.stopPropagation();clearNewReplyGlow(id);openComModal(ticket);});
+  div.querySelector('[data-res-confirm]')?.addEventListener('click',ev=>{ev.stopPropagation();confirmTicketResolved(id);});
+  div.querySelector('[data-res-sendback]')?.addEventListener('click',ev=>{ev.stopPropagation();sendResolvedTicketBack(id);});
   div.querySelector('[data-inline-text]')?.addEventListener('input',ev=>{inlineCommentDrafts[id]=ev.target.value;});
   div.querySelectorAll('[data-inline-tag]').forEach(btn=>btn.addEventListener('click',ev=>{ev.stopPropagation();toggleInlineTag(id,btn.dataset.inlineTag);renderBoard();}));
   div.querySelector('[data-inline-post]')?.addEventListener('click',ev=>{ev.stopPropagation();const text=String(inlineCommentDrafts[id]||'').trim();if(!text)return;const tags=inlineSelectedTags(id);if(!postTicketComment(id,text,tags))return;inlineCommentDrafts[id]='';inlineTagDrafts[id]=[];inlineCommentOpen[id]=true;renderBoard();});
@@ -5070,6 +5122,7 @@ function renderBoard(){
       if(activeCompany!=='all'){const ce=ticketClientEmail[t.id];const hs=ce?hsCache[ce]:null;if(!hs||hs.companyName!==activeCompany)return false;}
       if(activeJira&&!ticketJira[t.id])return false; // Jira filter
       if(!ticketMatchesNumberQuery(t))return false;
+      if(isResolvedTicketHidden(t.id))return false;
       return normalizeTicketStage(ticketState[t.id]||'new')===col;
     });
     const el=document.getElementById('col-'+col);const icons={new:'N',inp:'IP',wus:'WU',dft:'T',wct:'WC',res:'R'};
@@ -5097,7 +5150,7 @@ function clearStaleTicketSearchInput(){const el=document.getElementById('ticket-
 window.addEventListener('pageshow',clearStaleTicketSearchInput);
 window.addEventListener('load',()=>{clearStaleTicketSearchInput();setTimeout(clearStaleTicketSearchInput,300);setTimeout(clearStaleTicketSearchInput,1500);});
 document.getElementById('current-user').addEventListener('change',()=>{renderBoard();updateMentionsBadge();});
-document.querySelectorAll('.col-body').forEach(col=>{col.addEventListener('dragover',e=>{e.preventDefault();col.classList.add('drag-over');});col.addEventListener('dragleave',()=>col.classList.remove('drag-over'));col.addEventListener('drop',async e=>{e.preventDefault();col.classList.remove('drag-over');const id=e.dataTransfer.getData('ticketId');if(!id)return;const prevCol=normalizeTicketStage(ticketState[id]||'new');const newCol=normalizeTicketStage(col.dataset.col);if(prevCol===newCol)return;ticketState[id]=newCol;ticketStageTouchedAt[id]=Date.now();renderActiveView();col.classList.add('just-received');setTimeout(()=>col.classList.remove('just-received'),600);const saved=await saveState('ticket_stage_move');if(saved)showToast(' Moved to '+COL_NAMES[newCol]+'  saved','move');else showToast('Stage updated locally but save is still pending');const rs=await syncTicketStatusToHubspot(id,newCol);if(!rs?.ok&&rs?.reason!=='missing_hubspot_ticket_id'){showToast(`HubSpot status sync failed: ${rs?.error||rs?.reason}`);}});});
+document.querySelectorAll('.col-body').forEach(col=>{col.addEventListener('dragover',e=>{e.preventDefault();col.classList.add('drag-over');});col.addEventListener('dragleave',()=>col.classList.remove('drag-over'));col.addEventListener('drop',async e=>{e.preventDefault();col.classList.remove('drag-over');const id=e.dataTransfer.getData('ticketId');if(!id)return;const prevCol=normalizeTicketStage(ticketState[id]||'new');const newCol=normalizeTicketStage(col.dataset.col);if(prevCol===newCol)return;ticketState[id]=newCol;ticketStageTouchedAt[id]=Date.now();if(newCol==='res')ticketResolutionMeta[id]={resolvedAt:ticketStageTouchedAt[id],resolvedBy:currentUser()};else delete ticketResolutionMeta[id];renderActiveView();col.classList.add('just-received');setTimeout(()=>col.classList.remove('just-received'),600);const saved=await saveState('ticket_stage_move');if(saved)showToast(' Moved to '+COL_NAMES[newCol]+'  saved','move');else showToast('Stage updated locally but save is still pending');const rs=await syncTicketStatusToHubspot(id,newCol);if(!rs?.ok&&rs?.reason!=='missing_hubspot_ticket_id'){showToast(`HubSpot status sync failed: ${rs?.error||rs?.reason}`);}});});
 document.querySelectorAll('[data-close]').forEach(b=>{b.addEventListener('click',()=>document.getElementById(b.dataset.close).classList.remove('open'));});
 document.querySelectorAll('.modal-bg').forEach(bg=>{bg.addEventListener('click',e=>{if(e.target===bg)bg.classList.remove('open');});});
 

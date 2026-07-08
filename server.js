@@ -19,6 +19,7 @@ const VERSIONS_DIR = path.join(__dirname, 'versions');
 const AVATAR_UPLOAD_DIR = path.join(__dirname, 'public', 'uploads', 'avatars');
 const MAX_BACKUPS = Number(process.env.STATE_BACKUP_KEEP || 50);
 const BACKUP_MIN_INTERVAL_MS = Number(process.env.STATE_BACKUP_MIN_INTERVAL_MS || 60_000);
+const RESOLVED_RETENTION_MS = Number(process.env.RESOLVED_RETENTION_MS || 72 * 60 * 60 * 1000);
 
 //const USERNAME = process.env.KANBAN_USER || 'admin';
 const SESSION_SECRET = process.env.SESSION_SECRET || 'change-this-session-secret';
@@ -286,6 +287,19 @@ function normalizeDbStatusForBoard(status) {
   if (value === 'waiting on contact') return 'wct';
   if (value === 'resolved' || value === 'closed') return 'res';
   return 'new';
+}
+function resolvedAtFromState(state, ticketId) {
+  const touched = Number(state?.ticketStageTouchedAt?.[ticketId] || 0);
+  if (touched > 0) return touched;
+  const created = Date.parse(state?.ticketCreatedAt?.[ticketId] || '');
+  return Number.isFinite(created) ? created : 0;
+}
+function isResolvedHiddenInState(state, ticketId, now = Date.now()) {
+  if (normalizeBoardStatusForDb(state?.ticketState?.[ticketId] || 'new') !== 'Resolved') return false;
+  const meta = (state?.ticketResolutionMeta && typeof state.ticketResolutionMeta === 'object') ? state.ticketResolutionMeta[ticketId] : null;
+  if (meta?.confirmedAt) return true;
+  const resolvedAt = resolvedAtFromState(state, ticketId);
+  return !!resolvedAt && now - resolvedAt >= RESOLVED_RETENTION_MS;
 }
 function safeDateForDb(value) {
   if (!value) return null;
@@ -755,6 +769,20 @@ async function safeWriteState(state) {
   nextState.ticketCSOwner = mergeTicketMap('ticketCSOwner');
   nextState.ticketAssignmentMode = mergeTicketMap('ticketAssignmentMode');
   nextState.manualSupportOverride = mergeTicketMap('manualSupportOverride');
+  nextState.ticketResolutionMeta = mergeTicketMap('ticketResolutionMeta');
+
+  const pruneResolvedHiddenTickets = (stateToPrune) => {
+    const nowForPrune = Date.now();
+    const hiddenIds = new Set(
+      (Array.isArray(stateToPrune.allTickets) ? stateToPrune.allTickets : [])
+        .filter(t => t && t.id && isResolvedHiddenInState(stateToPrune, String(t.id), nowForPrune))
+        .map(t => String(t.id))
+    );
+    if (!hiddenIds.size) return stateToPrune;
+    stateToPrune.allTickets = (Array.isArray(stateToPrune.allTickets) ? stateToPrune.allTickets : []).filter(t => !hiddenIds.has(String(t?.id || '')));
+    return stateToPrune;
+  };
+  pruneResolvedHiddenTickets(nextState);
 
   // Whether a ticket has already had its "Resolved" Teams DM sent - a plain
   // boolean, reset only when the ticket leaves Resolved. Using the ticket's
@@ -808,10 +836,11 @@ async function safeWriteState(state) {
   // A stale snapshot (e.g. from a lagging tab) must not blindly overwrite
   // fields it didn't correctly merge - keep the current state as the base and
   // only layer in the fields we've safely reconciled above by id/timestamp.
-  const reconciledFields = ['ticketState', 'ticketStageTouchedAt', 'ticketNumbers', 'ticketNumberCounter', 'allTickets', 'seenIds', 'ticketAssignee', 'ticketCSOwner', 'ticketAssignmentMode', 'manualSupportOverride'];
+  const reconciledFields = ['ticketState', 'ticketStageTouchedAt', 'ticketNumbers', 'ticketNumberCounter', 'allTickets', 'seenIds', 'ticketAssignee', 'ticketCSOwner', 'ticketAssignmentMode', 'manualSupportOverride', 'ticketResolutionMeta'];
   const finalState = isStale
     ? { ...currentState, ...Object.fromEntries(reconciledFields.map(key => [key, nextState[key]])), _meta: enrichedMeta }
     : { ...nextState, _meta: enrichedMeta };
+  pruneResolvedHiddenTickets(finalState);
 
   fs.mkdirSync(path.dirname(DATA_PATH), { recursive: true });
   fs.writeFileSync(DATA_PATH, JSON.stringify(finalState, null, 2), 'utf8');
