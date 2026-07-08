@@ -2672,9 +2672,9 @@ th {
   <button class="chip" data-pf="Medium"> Med</button>
   <button class="chip" data-pf="Low"> Low</button>
   <div class="sep"></div>
-  <span class="filter-label">Agent:</span>
-  <select class="filter-sel" id="agent-filter"><option value="all">All agents</option></select>
-  <div class="sep"></div>
+  <span class="filter-label agent-filter-control">Agent:</span>
+  <select class="filter-sel agent-filter-control" id="agent-filter"><option value="all">All agents</option></select>
+  <div class="sep agent-filter-control"></div>
   <span class="filter-label">Company:</span>
   <select class="filter-sel" id="company-filter"><option value="all">All companies</option></select>
   <div class="sep"></div>
@@ -3211,12 +3211,27 @@ function normalizeAgentCode(value){
   const code=String(value||'').trim().toUpperCase();
   return ALL_AGENTS.includes(code)||code==='YOU'||code==='ADMIN'?code:'';
 }
-const currentUser=()=>normalizeAgentCode(document.getElementById('current-user')?.value) || 'ADMIN';
+function resolveUserAgentCode(user){
+  const candidates=[
+    user?.username,
+    user?.displayName,
+    String(user?.email||'').split('@')[0]
+  ];
+  for(const candidate of candidates){
+    const code=normalizeAgentCode(candidate);
+    if(code)return code;
+  }
+  return '';
+}
+const currentUser=()=>normalizeAgentCode(document.getElementById('current-user')?.value) || resolveUserAgentCode(currentSessionUser) || 'ADMIN';
 function currentUserIsAdmin(){
   return currentSessionUser?.role==='admin'||currentSessionUser?.role==='owner';
 }
 function currentUserCanViewAllTickets(){
-  return currentUserIsAdmin()||currentSessionUser?.role==='agent';
+  return currentUserIsAdmin();
+}
+function enforcedAgentFilter(){
+  return currentUserCanViewAllTickets() ? activeA : currentUser();
 }
 function ticketVisibleToCurrentUser(ticket){
   if(currentUserCanViewAllTickets()) return true;
@@ -3649,6 +3664,7 @@ function applyRestoredWorkspaceControls(){
   if(teamEl&&[...teamEl.options].some(o=>o.value===kpiTeamFilter))teamEl.value=kpiTeamFilter;
   const kpiAgentEl=document.getElementById('kpi-agent-filter');
   if(kpiAgentEl&&[...kpiAgentEl.options].some(o=>o.value===kpiAgentFilter))kpiAgentEl.value=kpiAgentFilter;
+  syncRoleRestrictedControls();
 }
 
 //  Jira badge count 
@@ -3713,6 +3729,15 @@ function setAdminOnlyNavigationVisible(isAdmin){
   document.querySelector('.account-users-link')?.classList.toggle('hidden', !isAdmin);
   document.querySelector('.audit-board-btn')?.classList.toggle('hidden', !isAdmin);
   document.getElementById('jira-settings-btn')?.classList.toggle('hidden', !isAdmin);
+}
+function syncRoleRestrictedControls(){
+  const canViewAll=currentUserCanViewAllTickets();
+  document.querySelectorAll('.agent-filter-control').forEach(el=>el.classList.toggle('hidden', !canViewAll));
+  if(!canViewAll){
+    activeA=currentUser();
+    const agentEl=document.getElementById('agent-filter');
+    if(agentEl)agentEl.value=activeA;
+  }
 }
 async function loadBuildVersion(){
   try{
@@ -4666,7 +4691,7 @@ async function buildAgentUI(){
 
   const optionValue = isPrivilegedUser
     ? 'ADMIN'
-    : String(loggedUser.username || 'USER').toUpperCase();
+    : (resolveUserAgentCode(loggedUser) || String(loggedUser.username || 'USER').toUpperCase());
 
   const sel=document.getElementById('current-user');
   const label=document.getElementById('current-user-label');
@@ -4686,7 +4711,7 @@ async function buildAgentUI(){
   }
 
   const isAdmin = isPrivilegedUser;
-  const canViewAllTickets = isAdmin || loggedUser.role === 'agent';
+  const canViewAllTickets = isAdmin;
   setAdminOnlyNavigationVisible(isAdmin);
 
   if (!canViewAllTickets) {
@@ -4703,6 +4728,7 @@ async function buildAgentUI(){
 
   const af=document.getElementById('agent-filter');
   af.innerHTML='<option value="all">All agents</option><optgroup label="Support">'+SUPPORT_AGENTS.map(a=>`<option>${a}</option>`).join('')+'</optgroup><optgroup label="CS">'+CS_AGENTS.map(a=>`<option>${a}</option>`).join('')+'</optgroup><option value="tagged">Tagged me</option>';
+  syncRoleRestrictedControls();
 
   const ctAgent=document.getElementById('ct-agent');
   if(ctAgent){
@@ -5006,14 +5032,16 @@ function makeCard(ticket,isNew=false){
 function renderBoard(){
   allTickets.sort((a,b)=>{const ta=new Date(a.email.receivedDateTime||0).getTime(),tb=new Date(b.email.receivedDateTime||0).getTime();return sortDesc?tb-ta:ta-tb;});
   rebuildTagged();
+  syncRoleRestrictedControls();
   document.getElementById('ticket-number-filter').value=activeTicketNumber;
+  const agentFilter=enforcedAgentFilter();
   STAGES.forEach(col=>{
     const tickets=allTickets.filter(t=>{
       if(ticketCategory[t.id]==='Spam')return false;
       if(!ticketVisibleToCurrentUser(t))return false;
       const p=ticketPriority[t.id]||t.priority;
       if(activeP!=='all'&&p!==activeP)return false;
-      if(!ticketMatchesAgentFilter(t,activeA))return false;
+      if(!ticketMatchesAgentFilter(t,agentFilter))return false;
       if(activeCompany!=='all'){const ce=ticketClientEmail[t.id];const hs=ce?hsCache[ce]:null;if(!hs||hs.companyName!==activeCompany)return false;}
       if(activeJira&&!ticketJira[t.id])return false; // Jira filter
       if(!ticketMatchesNumberQuery(t))return false;

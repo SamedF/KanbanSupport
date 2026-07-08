@@ -31,9 +31,6 @@ const M365_TENANT_ID = process.env.M365_TENANT_ID || '';
 const M365_CLIENT_ID = process.env.M365_CLIENT_ID || '';
 const M365_CLIENT_SECRET = process.env.M365_CLIENT_SECRET || '';
 const M365_REDIRECT_URI = process.env.M365_REDIRECT_URI || `http://localhost:${PORT}/auth/microsoft/callback`;
-<<<<<<< HEAD
-const M365_SCOPES = String(process.env.M365_SCOPES || 'offline_access openid profile email User.Read User.ReadBasic.All Mail.Read Mail.Read.Shared Mail.Send Chat.Create Chat.ReadWrite').trim();
-=======
 // Chat.Create/Chat.ReadWrite/User.ReadBasic.All intentionally excluded:
 // they're only needed by graphSendTeamsDirectMessage() (via
 // graphFindUserByEmail(), which looks up other users), and nothing currently
@@ -41,7 +38,6 @@ const M365_SCOPES = String(process.env.M365_SCOPES || 'offline_access openid pro
 // webhook instead. Requesting them anyway forced an admin-consent prompt for
 // permissions the app never actually uses.
 const M365_SCOPES = String(process.env.M365_SCOPES || 'offline_access openid profile email User.Read Mail.Read Mail.Read.Shared').trim();
->>>>>>> b6c563bfa37156a691884ec8c3bbdfa65d926472
 const SUPPORT_MAILBOX = String(process.env.SUPPORT_MAILBOX || 'helpdesk@quinta.im').trim().toLowerCase();
 const CONFIGURED_APP_BASE_URL = String(process.env.APP_BASE_URL || process.env.PUBLIC_BASE_URL || '').trim();
 const APP_BASE_URL = String(CONFIGURED_APP_BASE_URL || `http://localhost:${PORT}`).replace(/\/+$/, '');
