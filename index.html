@@ -3230,6 +3230,13 @@ function currentUserIsAdmin(){
 function currentUserCanViewAllTickets(){
   return currentUserIsAdmin();
 }
+function currentUserCanAssignTicket(ticket){
+  if(currentUserIsAdmin())return true;
+  const me=currentUserCSAgent();
+  if(!me||!ticket?.id)return false;
+  const csOwner=normalizeCSAgent(ensureTicketCSOwnerResolved(ticket.id,ticket.email)||ticketCSOwner[ticket.id]||'');
+  return csOwner===me;
+}
 function enforcedAgentFilter(){
   return currentUserCanViewAllTickets() ? activeA : currentUser();
 }
@@ -3569,7 +3576,7 @@ async function loadState(){
   normalizeStoredJiraLinks();
   normalizeLegacyAssignmentModes();
 }
-function normalizeLegacyAssignmentModes(){let changed=false;allTickets.forEach(t=>{const id=t.id;if(ticketCategory[id]==='Spam')return;const assignee=String(ticketAssignee[id]||'').trim();if(SUPPORT_AGENTS.includes(assignee)&&ticketAssignmentMode[id]!=='support'){ticketAssignmentMode[id]='support';changed=true;}else if(CS_AGENTS.includes(assignee)&&!ticketAssignmentMode[id]){ticketAssignmentMode[id]='cs';changed=true;}if(isSupportAssignedTicket(id)&&!ticketCSOwner[id]){const cs=resolveDefaultCSForTicket(id,t.email);if(cs){ticketCSOwner[id]=cs;changed=true;}}});if(changed)saveState('normalize_legacy_assignment_modes');}
+function normalizeLegacyAssignmentModes(){let changed=false;allTickets.forEach(t=>{const id=t.id;if(ticketCategory[id]==='Spam')return;const assignee=normalizeAgentCode(ticketAssignee[id]||'');if(CS_AGENTS.includes(assignee)){if(!ticketCSOwner[id])ticketCSOwner[id]=assignee;ticketAssignee[id]=leastLoadedSupportAgent();ticketAssignmentMode[id]='support';manualSupportOverride[id]=false;changed=true;}else if(SUPPORT_AGENTS.includes(assignee)&&ticketAssignmentMode[id]!=='support'){ticketAssignmentMode[id]='support';changed=true;}if(isSupportAssignedTicket(id)&&!ticketCSOwner[id]){const cs=resolveDefaultCSForTicket(id,t.email);if(cs){ticketCSOwner[id]=cs;changed=true;}}});if(changed)saveState('normalize_legacy_assignment_modes');}
 function saveReads(){saveState();}
 function saveHsCache(){saveState();}
 window.addEventListener('pagehide',flushStateWithBeacon);
@@ -3912,7 +3919,10 @@ document.getElementById('ct-submit').addEventListener('click',async()=>{
   if(clientEmail)ticketClientEmail[id]=clientEmail;
   ticketCategory[id]=category;
   if(subtype)ticketSubtype[id]=subtype;
-  ticketAssignee[id]=document.getElementById('ct-agent').value||SUPPORT_AGENTS[0];
+  ticketAssignee[id]=normalizeSupportAgent(document.getElementById('ct-agent').value)||leastLoadedSupportAgent();
+  ticketAssignmentMode[id]='support';
+  const creatorCS=currentUserCSAgent();
+  if(creatorCS)ticketCSOwner[id]=creatorCS;
   if(jiraKey)ticketJira[id]=jiraKey;
   allTickets.unshift(ticket);
   saveState();renderBoard();updateJiraBadge();
@@ -3965,6 +3975,10 @@ function ticketFilterAgentValues(ticket){
   const csOwner=normalizeAgentCode(ensureTicketCSOwnerResolved(id,ticket.email)||ticketCSOwner[id]||'');
   return{assignee,csOwner};
 }
+function normalizeSupportAgent(value){const code=normalizeAgentCode(value);return SUPPORT_AGENTS.includes(code)?code:'';}
+function normalizeCSAgent(value){const code=normalizeAgentCode(value);return CS_AGENTS.includes(code)?code:'';}
+function currentUserSupportAgent(){return normalizeSupportAgent(currentUser());}
+function currentUserCSAgent(){return normalizeCSAgent(currentUser());}
 function ticketMatchesAgentFilter(ticket,agentCode){
   if(agentCode==='all')return true;
   if(agentCode==='tagged')return taggedTickets.has(ticket.id);
@@ -4733,11 +4747,7 @@ async function buildAgentUI(){
   const ctAgent=document.getElementById('ct-agent');
   if(ctAgent){
     ctAgent.innerHTML =
-      `<optgroup label="Current user">
-        <option value="${esc(optionValue)}">${esc(displayName)}</option>
-      </optgroup>` +
-      '<optgroup label="Support">'+SUPPORT_AGENTS.map(a=>`<option value="${esc(a)}">${esc(a)}</option>`).join('')+'</optgroup>' +
-      '<optgroup label="CS">'+CS_AGENTS.map(a=>`<option value="${esc(a)}">${esc(a)}</option>`).join('')+'</optgroup>';
+      '<optgroup label="Support">'+SUPPORT_AGENTS.map(a=>`<option value="${esc(a)}">${esc(a)}</option>`).join('')+'</optgroup>';
   }
 
   const grid=document.getElementById('tag-grid');
@@ -4770,12 +4780,12 @@ async function buildAgentUI(){
 }
 const nextPriority=cur=>PRIORITIES[(PRIORITIES.indexOf(cur)+1)%PRIORITIES.length];
 function agentAssignMenuHtml(selected){
-  const renderGroup=(label,agents,isCs=false)=>`<div class="agent-assign-group">${label}</div>`+agents.map(a=>`
+  const renderGroup=(label,agents)=>`<div class="agent-assign-group">${label}</div>`+agents.map(a=>`
     <button class="agent-assign-option${a===selected?' active':''}" type="button" data-agent-pick="${esc(a)}">
-      <span>${esc(a)}${isCs?' CS':''}</span>
+      <span>${esc(a)}</span>
       <span class="agent-assign-dot" style="background:${agentColor(a)}"></span>
     </button>`).join('');
-  return renderGroup('Support',SUPPORT_AGENTS)+renderGroup('CS',CS_AGENTS,true);
+  return renderGroup('Support',SUPPORT_AGENTS);
 }
 
 function getAgentAssignMenuElement(wrap){
@@ -4834,14 +4844,14 @@ function positionAgentAssignMenu(wrap){
 
 function applyTicketAgentSelection(id,previousAgent,selected){
   if(!id||!selected)return;
-  if(CS_AGENTS.includes(selected)){
-    ticketCSOwner[id]=selected;
-    ticketAssignmentMode[id]='cs';
-  }else{
-    if(!ticketCSOwner[id]&&CS_AGENTS.includes(previousAgent))ticketCSOwner[id]=previousAgent;
-    ticketAssignmentMode[id]='support';
+  const supportAgent=normalizeSupportAgent(selected);
+  if(!supportAgent)return;
+  if(!ticketCSOwner[id]){
+    const cs=currentUserCSAgent();
+    if(cs)ticketCSOwner[id]=cs;
   }
-  ticketAssignee[id]=selected;
+  ticketAssignmentMode[id]='support';
+  ticketAssignee[id]=supportAgent;
   manualSupportOverride[id]=true;
   saveState('manual_agent_dropdown');
   updateWorkload();
@@ -4853,10 +4863,11 @@ function makeCard(ticket,isNew=false){
   const{email,id}=ticket;
   ensureTicketNumber(id);
   const priority=ticketPriority[id]||ticket.priority;
-  const agent=ticketAssignee[id]||leastLoadedCSAgent();
-  const csOwner=ensureTicketCSOwnerResolved(id,email)||(ticketAssignmentMode[id]==='cs'?agent:null);
+  const agent=normalizeSupportAgent(ticketAssignee[id])||leastLoadedSupportAgent();
+  if(ticketAssignee[id]!==agent)ticketAssignee[id]=agent;
+  const csOwner=ensureTicketCSOwnerResolved(id,email)||normalizeCSAgent(ticketCSOwner[id]||'');
   const showCSBadge=!!csOwner;
-  const isAdmin = currentUserIsAdmin();
+  const canAssign = currentUserCanAssignTicket(ticket);
   const cat=ticketCategory[id];
   const comments=ticketComments[id]||[];
   const isTagged=taggedTickets.has(id);
@@ -4950,7 +4961,7 @@ function makeCard(ticket,isNew=false){
         ${hsTicketBtn}
         <button class="open-email-btn" data-oe="${id}"> Open</button>
         <div class="agent-assign-wrap" data-agent-menu="${id}">
-          <button class="agent-assign-trigger" type="button" data-agent-trigger="${id}" title="${isAdmin ? 'Assigned agent' : 'Only admins can change the assigned agent'}"${isAdmin ? '' : ' disabled'}>
+          <button class="agent-assign-trigger" type="button" data-agent-trigger="${id}" title="${canAssign ? 'Assign support agent' : 'Only admins and the ticket CS can change support assignment'}"${canAssign ? '' : ' disabled'}>
             <span class="agent-assign-label">${esc(agent)}</span>
             <span class="agent-assign-chevron">v</span>
           </button>
@@ -4966,8 +4977,8 @@ function makeCard(ticket,isNew=false){
   const agentWrap=div.querySelector('[data-agent-menu]');
   div.querySelector('[data-agent-trigger]').addEventListener('click',e=>{
     e.stopPropagation();
-    if(!currentUserIsAdmin()){
-      showToast('Only admins can change the assigned agent','warn');
+    if(!currentUserCanAssignTicket(ticket)){
+      showToast('Only admins and the ticket CS can change support assignment','warn');
       return;
     }
     document.querySelectorAll('.agent-assign-wrap.open').forEach(w=>{
@@ -5001,8 +5012,8 @@ function makeCard(ticket,isNew=false){
   });
   agentWrap.querySelectorAll('[data-agent-pick]').forEach(btn=>btn.addEventListener('click',e=>{
     e.stopPropagation();
-    if(!currentUserIsAdmin()){
-      showToast('Only admins can change the assigned agent','warn');
+    if(!currentUserCanAssignTicket(ticket)){
+      showToast('Only admins and the ticket CS can change support assignment','warn');
       return;
     }
     const menu=getAgentAssignMenuElement(agentWrap);
