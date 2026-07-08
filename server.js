@@ -107,6 +107,8 @@ const CS_TEAMS_EMAIL_OVERRIDES = (() => {
     return {};
   }
 })();
+const SUPPORT_AGENT_CODES = new Set(['SGU','ZIO','SFA','MEZ','SHE','JBA','RMD']);
+const CS_AGENT_CODES = new Set(['VGU','NAO','MBH','TBR','IBE','SKE','BKH','JAT','VPO','RKH','AZA','GGO','WPH','JFC']);
 
 const APP_BUILD_VERSION = (
   process.env.RENDER_GIT_COMMIT ||
@@ -258,8 +260,9 @@ async function auditTicketChanges({
   }
 }
 function normalizeRole(role) {
-  const value = String(role || 'agent').trim().toLowerCase();
-  return ['owner', 'admin', 'agent', 'viewer'].includes(value) ? value : null;
+  const value = String(role || 'support').trim().toLowerCase();
+  if (value === 'agent' || value === 'viewer') return 'support';
+  return ['owner', 'admin', 'cs', 'support'].includes(value) ? value : null;
 }
 async function ownerAccountExists() {
   const count = await prisma.user.count({ where: { role: 'owner' } });
@@ -744,6 +747,15 @@ async function safeWriteState(state) {
   (Array.isArray(nextState.seenIds) ? nextState.seenIds : []).forEach(id => seenIdSet.add(id));
   nextState.seenIds = [...seenIdSet];
 
+  const mergeTicketMap = (field) => ({
+    ...((currentState[field] && typeof currentState[field] === 'object') ? currentState[field] : {}),
+    ...((nextState[field] && typeof nextState[field] === 'object') ? nextState[field] : {})
+  });
+  nextState.ticketAssignee = mergeTicketMap('ticketAssignee');
+  nextState.ticketCSOwner = mergeTicketMap('ticketCSOwner');
+  nextState.ticketAssignmentMode = mergeTicketMap('ticketAssignmentMode');
+  nextState.manualSupportOverride = mergeTicketMap('manualSupportOverride');
+
   // Whether a ticket has already had its "Resolved" Teams DM sent - a plain
   // boolean, reset only when the ticket leaves Resolved. Using the ticket's
   // touched-at timestamp as an idempotency key (as this used to) was fragile:
@@ -796,7 +808,7 @@ async function safeWriteState(state) {
   // A stale snapshot (e.g. from a lagging tab) must not blindly overwrite
   // fields it didn't correctly merge - keep the current state as the base and
   // only layer in the fields we've safely reconciled above by id/timestamp.
-  const reconciledFields = ['ticketState', 'ticketStageTouchedAt', 'ticketNumbers', 'ticketNumberCounter', 'allTickets', 'seenIds'];
+  const reconciledFields = ['ticketState', 'ticketStageTouchedAt', 'ticketNumbers', 'ticketNumberCounter', 'allTickets', 'seenIds', 'ticketAssignee', 'ticketCSOwner', 'ticketAssignmentMode', 'manualSupportOverride'];
   const finalState = isStale
     ? { ...currentState, ...Object.fromEntries(reconciledFields.map(key => [key, nextState[key]])), _meta: enrichedMeta }
     : { ...nextState, _meta: enrichedMeta };
@@ -847,6 +859,8 @@ async function hydrateStateFromDatabase(baseState = {}) {
   state.ticketCategory = (state.ticketCategory && typeof state.ticketCategory === 'object') ? state.ticketCategory : {};
   state.ticketSubtype = (state.ticketSubtype && typeof state.ticketSubtype === 'object') ? state.ticketSubtype : {};
   state.ticketAssignee = (state.ticketAssignee && typeof state.ticketAssignee === 'object') ? state.ticketAssignee : {};
+  state.ticketCSOwner = (state.ticketCSOwner && typeof state.ticketCSOwner === 'object') ? state.ticketCSOwner : {};
+  state.ticketAssignmentMode = (state.ticketAssignmentMode && typeof state.ticketAssignmentMode === 'object') ? state.ticketAssignmentMode : {};
   state.ticketComments = (state.ticketComments && typeof state.ticketComments === 'object') ? state.ticketComments : {};
   state.ticketClientEmail = (state.ticketClientEmail && typeof state.ticketClientEmail === 'object') ? state.ticketClientEmail : {};
   state.ticketCreatedAt = (state.ticketCreatedAt && typeof state.ticketCreatedAt === 'object') ? state.ticketCreatedAt : {};
@@ -891,6 +905,8 @@ async function hydrateStateFromDatabase(baseState = {}) {
     if (ticket.priority) state.ticketPriority[externalId] = ticket.priority;
     if (ticket.category) state.ticketCategory[externalId] = ticket.category;
     if (ticket.assignedAgent) state.ticketAssignee[externalId] = ticket.assignedAgent;
+    if (ticket.csAgent) state.ticketCSOwner[externalId] = ticket.csAgent;
+    if (ticket.assignedAgent || ticket.csAgent) state.ticketAssignmentMode[externalId] = 'support';
     if (ticket.senderEmail) state.ticketClientEmail[externalId] = ticket.senderEmail;
     if (ticket.createdAt) state.ticketCreatedAt[externalId] = ticket.createdAt.toISOString();
     if (ticket.jiraTicketKey) state.ticketJira[externalId] = ticket.jiraTicketKey;
@@ -1703,6 +1719,7 @@ async function upsertBoardTicketsToDatabase(state, req) {
   const ticketCategory = state.ticketCategory || {};
   const ticketSubtype = state.ticketSubtype || {};
   const ticketAssignee = state.ticketAssignee || {};
+  const ticketCSOwner = state.ticketCSOwner || {};
   const ticketClientEmail = state.ticketClientEmail || {};
   const ticketCreatedAt = state.ticketCreatedAt || {};
   const ticketJira = state.ticketJira || {};
@@ -1732,7 +1749,10 @@ async function upsertBoardTicketsToDatabase(state, req) {
     const status = normalizeBoardStatusForDb(ticketState[externalId] || 'new');
     const priority = String(ticketPriority[externalId] || item.priority || 'Normal').trim() || 'Normal';
     const category = String(ticketCategory[externalId] || ticketSubtype[externalId] || '').trim() || null;
-    const assignedAgent = String(ticketAssignee[externalId] || '').trim() || null;
+    const rawAssignedAgent = String(ticketAssignee[externalId] || '').trim().toUpperCase();
+    const rawCsAgent = String(ticketCSOwner[externalId] || '').trim().toUpperCase();
+    const assignedAgent = SUPPORT_AGENT_CODES.has(rawAssignedAgent) ? rawAssignedAgent : null;
+    const csAgent = CS_AGENT_CODES.has(rawCsAgent) ? rawCsAgent : (CS_AGENT_CODES.has(rawAssignedAgent) ? rawAssignedAgent : null);
     const createdAt = safeDateForDb(email.receivedDateTime || ticketCreatedAt[externalId]) || new Date();
     const body = String(email.bodyPreview || email.preview || email.summary || email.body || email.text || '').trim() || null;
     const companyName = extractCompanyNameFromEmail(senderEmail);
@@ -1754,6 +1774,7 @@ async function upsertBoardTicketsToDatabase(state, req) {
       && existingTicket.priority === priority
       && existingTicket.category === category
       && existingTicket.assignedAgent === assignedAgent
+      && existingTicket.csAgent === csAgent
       && existingTicket.hubspotTicketId === hubspotTicketId
       && existingTicket.jiraTicketKey === jiraTicketKey
       && existingTicket.body === body;
@@ -1774,6 +1795,7 @@ async function upsertBoardTicketsToDatabase(state, req) {
         priority,
         category,
         assignedAgent,
+        csAgent,
         source: 'outlook',
         emailMessageId: externalId,
         hubspotTicketId,
@@ -1792,6 +1814,7 @@ async function upsertBoardTicketsToDatabase(state, req) {
         priority,
         category,
         assignedAgent,
+        csAgent,
         source: 'outlook',
         emailMessageId: externalId,
         hubspotTicketId,
@@ -1817,7 +1840,7 @@ async function upsertBoardTicketsToDatabase(state, req) {
         userId: req.session?.userId || null,
         before: existingTicket,
         after: ticket,
-        fields: ['subject', 'senderEmail', 'companyName', 'status', 'priority', 'category', 'assignedAgent', 'hubspotTicketId', 'jiraTicketKey', 'body']
+        fields: ['subject', 'senderEmail', 'companyName', 'status', 'priority', 'category', 'assignedAgent', 'csAgent', 'hubspotTicketId', 'jiraTicketKey', 'body']
       });
     }
 
@@ -3033,7 +3056,7 @@ app.post('/api/admin/users', requireAdmin, async (req, res) => {
   try {
     const username = normalizeUsername(req.body?.username || '');
     const password = String(req.body?.password || '');
-    const role = normalizeRole(req.body?.role || 'agent');
+    const role = normalizeRole(req.body?.role || 'support');
     const displayName = String(req.body?.displayName || '').trim() || null;
     const email = normalizeEmailForDb(req.body?.email || '') || null;
 

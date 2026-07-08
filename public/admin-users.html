@@ -148,7 +148,12 @@
     }
 
     function roleOptionsHtml(includeOwner = true) {
-      return `${includeOwner ? '<option value="owner">Owner</option>' : ''}<option value="admin">Admin</option><option value="agent">Agent</option><option value="viewer">Viewer</option>`;
+      return `${includeOwner ? '<option value="owner">Owner</option>' : ''}<option value="admin">Admin</option><option value="cs">CS</option><option value="support">Support</option>`;
+    }
+
+    function roleLabel(role) {
+      const labels = { owner: 'Owner', admin: 'Admin', cs: 'CS', support: 'Support', agent: 'Support', viewer: 'Support' };
+      return labels[role] || role || 'Support';
     }
 
     function renderUsers() {
@@ -189,7 +194,7 @@
         name.textContent = user.displayName || user.username;
         const role = document.createElement('span');
         role.className = 'role';
-        role.textContent = user.role === 'owner' ? 'Owner' : user.role;
+        role.textContent = roleLabel(user.role);
         if (user.role === 'owner') {
           role.style.background = '#fef3c7';
           role.style.color = '#92400e';
@@ -218,7 +223,7 @@
         <div class="panel-header">
           <div>
             <h2>Create new user</h2>
-            <p>Add a new agent, admin, or viewer account.</p>
+            <p>Add a new CS, Support, or admin account.</p>
           </div>
         </div>
         <div class="form-grid">

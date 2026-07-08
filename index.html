@@ -2672,8 +2672,8 @@ th {
   <button class="chip" data-pf="Medium"> Med</button>
   <button class="chip" data-pf="Low"> Low</button>
   <div class="sep"></div>
-  <span class="filter-label agent-filter-control">Agent:</span>
-  <select class="filter-sel agent-filter-control" id="agent-filter"><option value="all">All agents</option></select>
+  <span class="filter-label agent-filter-control">Team:</span>
+  <select class="filter-sel agent-filter-control" id="agent-filter"><option value="all">All CS & Support</option></select>
   <div class="sep agent-filter-control"></div>
   <span class="filter-label">Company:</span>
   <select class="filter-sel" id="company-filter"><option value="all">All companies</option></select>
@@ -2766,11 +2766,11 @@ th {
       </select>
       <label for="kpi-team-filter" style="font-size:12px;color:#555;">Team</label>
       <select class="filter-sel" id="kpi-team-filter" style="max-width:170px;">
-        <option value="all">All agents</option>
+        <option value="all">All CS & Support</option>
         <option value="cs">CS only</option>
         <option value="support">Support only</option>
       </select>
-      <label for="kpi-agent-filter" style="font-size:12px;color:#555;">Agent</label>
+      <label for="kpi-agent-filter" style="font-size:12px;color:#555;">CS / Support</label>
       <select class="filter-sel" id="kpi-agent-filter" style="max-width:170px;">
         <option value="all">All</option>
       </select>
@@ -2784,7 +2784,7 @@ th {
       <div id="kpi-status-chart"></div>
     </div>
     <div style="background:#fff;border:1px solid #d7d7d7;border-radius:14px;padding:12px;box-shadow:0 6px 16px rgba(0,0,0,.06);">
-      <div style="font-family:Caladea,serif;font-size:24px;margin-bottom:8px;">Agent Workload by Status</div>
+      <div style="font-family:Caladea,serif;font-size:24px;margin-bottom:8px;">CS / Support Workload by Status</div>
       <div id="kpi-agent-chart"></div>
     </div>
   </div>
@@ -2818,7 +2818,7 @@ th {
             <tr style="text-align:left;border-bottom:1px solid #ddd;">
               <th style="padding:8px 10px;">Ticket</th>
               <th style="padding:8px 10px;">Company</th>
-              <th style="padding:8px 10px;">Agent</th>
+              <th style="padding:8px 10px;">Support</th>
               <th style="padding:8px 10px;">Jira</th>
             </tr>
           </thead>
@@ -2828,12 +2828,12 @@ th {
     </div>
   </div>
   <div style="background:#fff;border:1px solid #d7d7d7;border-radius:14px;padding:12px;box-shadow:0 6px 16px rgba(0,0,0,.06);">
-    <div style="font-family:Caladea,serif;font-size:24px;margin-bottom:8px;">Tickets by Agent (Status Breakdown)</div>
+    <div style="font-family:Caladea,serif;font-size:24px;margin-bottom:8px;">Tickets by CS / Support (Status Breakdown)</div>
     <div style="overflow:auto;">
       <table style="width:100%;border-collapse:collapse;font-size:12px;">
         <thead>
           <tr style="text-align:left;border-bottom:1px solid #ddd;">
-            <th style="padding:8px 10px;">Agent</th>
+            <th style="padding:8px 10px;">CS / Support</th>
             <th style="padding:8px 10px;">Total</th>
             <th style="padding:8px 10px;">New</th>
             <th style="padding:8px 10px;">In Progress</th>
@@ -3220,6 +3220,8 @@ function resolveUserAgentCode(user){
   for(const candidate of candidates){
     const code=normalizeAgentCode(candidate);
     if(code)return code;
+    const mapped=COOWNER_NAME_MAP[String(candidate||'').trim().toLowerCase()];
+    if(mapped&&normalizeAgentCode(mapped))return mapped;
   }
   return '';
 }
@@ -3227,25 +3229,35 @@ const currentUser=()=>normalizeAgentCode(document.getElementById('current-user')
 function currentUserIsAdmin(){
   return currentSessionUser?.role==='admin'||currentSessionUser?.role==='owner';
 }
+function currentUserRole(){
+  const role=String(currentSessionUser?.role||'support').trim().toLowerCase();
+  if(role==='agent'||role==='viewer')return'support';
+  return role;
+}
 function currentUserCanViewAllTickets(){
   return currentUserIsAdmin();
 }
 function currentUserCanAssignTicket(ticket){
   if(currentUserIsAdmin())return true;
-  const me=currentUserCSAgent();
-  if(!me||!ticket?.id)return false;
-  const csOwner=normalizeCSAgent(ensureTicketCSOwnerResolved(ticket.id,ticket.email)||ticketCSOwner[ticket.id]||'');
-  return csOwner===me;
+  return ticketVisibleToCurrentUser(ticket);
 }
 function enforcedAgentFilter(){
-  return currentUserCanViewAllTickets() ? activeA : currentUser();
+  if(currentUserCanViewAllTickets())return activeA;
+  const role=currentUserRole();
+  const me=currentUser();
+  if(role==='cs')return normalizeCSAgent(me)||me;
+  if(role==='support')return normalizeSupportAgent(me)||me;
+  return me;
 }
 function ticketVisibleToCurrentUser(ticket){
   if(currentUserCanViewAllTickets()) return true;
   const me = currentUser();
   if(!me) return false;
   const { assignee, csOwner } = ticketFilterAgentValues(ticket);
-  return assignee === me || csOwner === me;
+  const role=currentUserRole();
+  if(role==='cs')return csOwner === normalizeCSAgent(me);
+  if(role==='support')return assignee === normalizeSupportAgent(me);
+  return false;
 }
 
 let _saveTimer=null;
@@ -3513,7 +3525,9 @@ function mergeDatabaseTickets(dbTickets){
     }
     if(row.priority)ticketPriority[id]=row.priority;
     if(row.category)ticketCategory[id]=row.category;
-    if(row.assignedAgent)ticketAssignee[id]=row.assignedAgent;
+    if(row.assignedAgent)ticketAssignee[id]=normalizeSupportAgent(row.assignedAgent)||row.assignedAgent;
+    if(row.csAgent)ticketCSOwner[id]=normalizeCSAgent(row.csAgent)||row.csAgent;
+    if(row.assignedAgent||row.csAgent)ticketAssignmentMode[id]='support';
     if(row.senderEmail)ticketClientEmail[id]=String(row.senderEmail).toLowerCase();
     if(row.createdAt)ticketCreatedAt[id]=row.createdAt;
     if(row.jiraTicketKey){
@@ -3988,6 +4002,12 @@ function ticketMatchesAgentFilter(ticket,agentCode){
   return assignee===agentCode||csOwner===agentCode;
 }
 function renderKpiView(){
+  if(!currentUserCanViewAllTickets()){
+    const role=currentUserRole();
+    if(role==='cs')kpiTeamFilter='cs';
+    else if(role==='support')kpiTeamFilter='support';
+    kpiAgentFilter=enforcedAgentFilter();
+  }
   const bounds=getKpiBounds(kpiTimeFilter);
   const companyForTicket=t=>{const ce=ticketClientEmail[t.id]||getClientEmail(t.email);return ce&&hsCache[ce]?.companyName?hsCache[ce].companyName:null;};
   const ticketMatchesTeam=t=>{
@@ -4041,18 +4061,18 @@ function renderKpiView(){
     agentFilterEl.disabled = false;
     teamFilterEl.disabled = false;
   } else {
-    const me=currentUser();
-    const agentValue = me || 'all';
+    const agentValue = enforcedAgentFilter() || 'all';
     agentFilterEl.innerHTML=`<option value="${esc(agentValue)}">${esc(agentValue)}</option>`;
     agentFilterEl.value=agentValue;
+    kpiAgentFilter=agentValue;
     agentFilterEl.disabled = true;
     teamFilterEl.disabled = true;
   }
 
   document.getElementById('kpi-time-filter').value=kpiTimeFilter;
   document.getElementById('kpi-team-filter').value=kpiTeamFilter;
-  const teamLabel=kpiTeamFilter==='cs'?'CS only':(kpiTeamFilter==='support'?'Support only':'All agents');
-  const agentLabel=kpiAgentFilter==='all'?'All agents':kpiAgentFilter;
+  const teamLabel=kpiTeamFilter==='cs'?'CS only':(kpiTeamFilter==='support'?'Support only':'All CS & Support');
+  const agentLabel=kpiAgentFilter==='all'?'All CS & Support':kpiAgentFilter;
   document.getElementById('kpi-range-label').textContent=`Tickets considered: ${inRange.length} (non-spam)  ${fmtKpiRangeLabel(kpiTimeFilter,bounds)}  ${teamLabel}  ${agentLabel}`;
   document.getElementById('kpi-status-cards').innerHTML=`
     <div style="background:#fff;border:1px solid #d7d7d7;border-radius:12px;padding:12px;"><div style="font-size:12px;color:#666;">New</div><div style="font-family:Caladea,serif;font-size:30px;">${statusCounts.new}</div></div>
@@ -4698,7 +4718,8 @@ async function buildAgentUI(){
   } catch (_) {}
   currentSessionUser=loggedUser||currentSessionUser;
 
-  const isPrivilegedUser = loggedUser.role === 'admin' || loggedUser.role === 'owner';
+  const loggedRole = String(loggedUser.role || 'support').trim().toLowerCase();
+  const isPrivilegedUser = loggedRole === 'admin' || loggedRole === 'owner';
   const displayName = isPrivilegedUser
     ? 'You'
     : (loggedUser.username || 'User');
@@ -4729,19 +4750,12 @@ async function buildAgentUI(){
   setAdminOnlyNavigationVisible(isAdmin);
 
   if (!canViewAllTickets) {
-    const me = currentUser();
-    if (SUPPORT_AGENTS.includes(me)) {
-      kpiTeamFilter = 'support';
-    } else if (CS_AGENTS.includes(me)) {
-      kpiTeamFilter = 'cs';
-    } else {
-      kpiTeamFilter = 'all';
-    }
-    kpiAgentFilter = me || 'all';
+    kpiTeamFilter = currentUserRole()==='cs' ? 'cs' : 'support';
+    kpiAgentFilter = enforcedAgentFilter() || 'all';
   }
 
   const af=document.getElementById('agent-filter');
-  af.innerHTML='<option value="all">All agents</option><optgroup label="Support">'+SUPPORT_AGENTS.map(a=>`<option>${a}</option>`).join('')+'</optgroup><optgroup label="CS">'+CS_AGENTS.map(a=>`<option>${a}</option>`).join('')+'</optgroup><option value="tagged">Tagged me</option>';
+  af.innerHTML='<option value="all">All CS & Support</option><optgroup label="Support">'+SUPPORT_AGENTS.map(a=>`<option>${a}</option>`).join('')+'</optgroup><optgroup label="CS">'+CS_AGENTS.map(a=>`<option>${a}</option>`).join('')+'</optgroup><option value="tagged">Tagged me</option>';
   syncRoleRestrictedControls();
 
   const ctAgent=document.getElementById('ct-agent');
@@ -5093,7 +5107,7 @@ async function openEmailModal(ticket){
   const csOwner=ticketCSOwner[id]||null;
   const csMeta=csOwner?`  CS: ${esc(csOwner)}`:'';
   let metaHtml=isReply?`<span><strong>Client:</strong> ${esc(clientEmail)}</span><span><strong>Replied by:</strong> ${esc(email.sender)}</span>`:`<span><strong>From:</strong> ${esc(email.sender||'')}</span>`;
-  metaHtml+=`<span><strong>Received:</strong> ${fmtDate(email.receivedDateTime)}</span><span><strong>Agent:</strong> ${ticketAssignee[id]||''}${csMeta}</span>`;
+  metaHtml+=`<span><strong>Received:</strong> ${fmtDate(email.receivedDateTime)}</span><span><strong>Support:</strong> ${ticketAssignee[id]||''}${csMeta}</span>`;
   const sla=getSLAStatus(id,ticketPriority[id]||ticket.priority);
   if(sla)metaHtml+=`<span><strong>SLA:</strong> <span style="font-weight:600;color:${sla.overdue?'#dc2626':'#d97706'}"> ${sla.text}</span></span>`;
   const jiraKey=canonicalJiraKey(ticketJira[id]);
