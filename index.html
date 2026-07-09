@@ -5222,7 +5222,7 @@ async function checkForBrowserNotifications(){
     const ticketsById=new Map((Array.isArray(s.allTickets)?s.allTickets:[]).map(t=>[t.id,t]));
     const ticketLabel=id=>ticketsById.get(id)?.email?.subject||`Ticket ${id}`;
     Object.entries(next.ticketAssignee).forEach(([id,agent])=>{
-      if(normalizeAgentCode(agent)===me&&prev.ticketAssignee[id]!==agent)showBrowserNotification('Ticket assigned to you',ticketLabel(id));
+      if(prev.ticketAssignee[id]!==agent&&(normalizeAgentCode(agent)===me||currentUserIsAdmin()))showBrowserNotification(currentUserIsAdmin()&&normalizeAgentCode(agent)!==me?`Ticket assigned to ${agent||'unassigned'}`:'Ticket assigned to you',ticketLabel(id));
     });
     Object.entries(next.ticketState).forEach(([id,stage])=>{
       if(!prev.ticketState[id]||prev.ticketState[id]===stage)return;
@@ -5240,7 +5240,7 @@ async function checkForBrowserNotifications(){
       });
     });
     (Array.isArray(s.jiraAlerts)?s.jiraAlerts:[]).forEach(a=>{
-      if(!prev.jiraAlertKeys.has(a.key)&&a.recipient===me)showBrowserNotification('Jira update: '+(a.jiraKey||''),a.message||a.title||'');
+      if(!prev.jiraAlertKeys.has(a.key)&&(a.recipient===me||currentUserIsAdmin()))showBrowserNotification('Jira update: '+(a.jiraKey||''),a.message||a.title||'');
     });
   }
   notifySnapshot=next;
