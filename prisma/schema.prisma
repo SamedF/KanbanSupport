@@ -19,6 +19,21 @@ model User {
 
   comments     TicketComment[]
   events       TicketEvent[]
+  apiTokens    ApiToken[]
+}
+
+model ApiToken {
+  id         Int       @id @default(autoincrement())
+  userId     Int
+  tokenHash  String    @unique
+  label      String?
+  createdAt  DateTime  @default(now())
+  lastUsedAt DateTime?
+  revokedAt  DateTime?
+
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
 }
 
 model Ticket {
