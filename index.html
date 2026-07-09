@@ -5223,7 +5223,7 @@ async function checkForBrowserNotifications(){
       if(count<=prevCount)return;
       (s.ticketComments[id]||[]).slice(prevCount).forEach(c=>{
         const tags=(c.tags||[]).map(normalizeAgentCode).filter(Boolean);
-        const forMe=me==='YOU'?tags.length>0:tags.includes(me);
+        const forMe=currentUserIsAdmin()?tags.length>0:tags.includes(me);
         if(forMe)showBrowserNotification('New comment on '+ticketLabel(id),c.text||'');
       });
     });
@@ -5234,7 +5234,7 @@ async function checkForBrowserNotifications(){
   notifySnapshot=next;
 }
 
-function getMentions(user){const me=normalizeAgentCode(user);const isAdminUser=me==='YOU';const r=[];Object.entries(ticketComments).forEach(([tid,cs])=>{const t=allTickets.find(x=>x.id===tid);cs.forEach((c,ci)=>{const normalizedTags=Array.isArray(c.tags)?c.tags.map(normalizeAgentCode).filter(Boolean):[];const matches=isAdminUser?normalizedTags.length>0:normalizedTags.includes(me);if(matches)r.push({ticketId:tid,ci,comment:c,ticket:t,key:`${tid}:${ci}`});});});return r.sort((a,b)=>(b.comment.ts||0)-(a.comment.ts||0));}
+function getMentions(user){const me=normalizeAgentCode(user);const isAdminUser=currentUserIsAdmin();const r=[];Object.entries(ticketComments).forEach(([tid,cs])=>{const t=allTickets.find(x=>x.id===tid);cs.forEach((c,ci)=>{const normalizedTags=Array.isArray(c.tags)?c.tags.map(normalizeAgentCode).filter(Boolean):[];const matches=isAdminUser?normalizedTags.length>0:normalizedTags.includes(me);if(matches)r.push({ticketId:tid,ci,comment:c,ticket:t,key:`${tid}:${ci}`});});});return r.sort((a,b)=>(b.comment.ts||0)-(a.comment.ts||0));}
 function unreadMentionCountForTicket(ticketId,user=currentUser()){return getMentions(user).filter(m=>m.ticketId===String(ticketId)&&!readMentions.has(m.key)).length;}
 function unreadAlertCountForTicket(ticketId,user=currentUser()){return unreadMentionCountForTicket(ticketId,user)+unreadJiraAlertCountForTicket(ticketId,user);}
 function getAlertFeed(user=currentUser()){
