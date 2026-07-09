@@ -32,6 +32,7 @@ model Ticket {
   priority        String    @default("Normal")
   category        String?
   assignedAgent   String?
+  csAgent         String?
   source          String    @default("email")
   emailMessageId  String?
   hubspotTicketId String?
@@ -47,6 +48,8 @@ model Ticket {
 
   @@index([senderEmail])
   @@index([status])
+  @@index([assignedAgent])
+  @@index([csAgent])
   @@index([createdAt])
 }
 
