@@ -5228,7 +5228,7 @@ async function checkForBrowserNotifications(){
       if(!prev.ticketState[id]||prev.ticketState[id]===stage)return;
       const assignee=normalizeAgentCode(next.ticketAssignee[id]);
       const csOwner=normalizeAgentCode((s.ticketCSOwner||{})[id]);
-      if(assignee===me||csOwner===me)showBrowserNotification('Ticket moved to '+(COL_NAMES[normalizeTicketStage(stage)]||stage),ticketLabel(id));
+      if(assignee===me||csOwner===me||currentUserIsAdmin())showBrowserNotification('Ticket moved to '+(COL_NAMES[normalizeTicketStage(stage)]||stage),ticketLabel(id));
     });
     Object.entries(next.commentCounts).forEach(([id,count])=>{
       const prevCount=prev.commentCounts[id]||0;
