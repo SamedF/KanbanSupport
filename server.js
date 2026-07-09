@@ -157,6 +157,30 @@ function requireAdmin(req, res, next) {
   if (!isAdminRole(req.session.role)) return res.status(403).json({ error: 'admin_required' });
   return next();
 }
+function hashApiToken(rawToken) {
+  return crypto.createHash('sha256').update(String(rawToken || '')).digest('hex');
+}
+// Bearer-token auth for the MCP connector, independent of the cookie session
+// used by the browser app - each token maps 1:1 to an existing Kanban user,
+// so a tool call can never do more than that person could already do in the UI.
+async function requireApiToken(req, res, next) {
+  const header = String(req.headers.authorization || '');
+  const match = header.match(/^Bearer\s+(.+)$/i);
+  if (!match) return res.status(401).json({ error: 'missing_token' });
+  const tokenHash = hashApiToken(match[1].trim());
+  try {
+    const token = await prisma.apiToken.findUnique({ where: { tokenHash }, include: { user: true } });
+    if (!token || token.revokedAt || !token.user || token.user.isActive === false) {
+      return res.status(401).json({ error: 'invalid_token' });
+    }
+    req.apiUser = { id: token.user.id, username: token.user.username, role: token.user.role, displayName: token.user.displayName };
+    prisma.apiToken.update({ where: { id: token.id }, data: { lastUsedAt: new Date() } }).catch(() => null);
+    return next();
+  } catch (error) {
+    console.error('API token auth failed:', error.message || error);
+    return res.status(500).json({ error: 'auth_failed' });
+  }
+}
 function avatarFilenameForUserId(id) {
   if (!id) return null;
   try {
@@ -1150,6 +1174,20 @@ async function sendResolvedTeamsNotifications(items) {
   await sendResolvedWebhookNotifications(items);
 }
 
+// Atomic, DB-level claim for the Resolved Teams DM: a dedicated column
+// checked-and-set in a single UPDATE, not a JSON-file read-then-write (which
+// raced under concurrent saves and fired the same DM repeatedly). Shared by
+// the board-state sync path and the MCP ticket-update endpoint so both go
+// through the exact same claim.
+async function claimResolvedTeamsAlert({ ticketDbId, externalId, csAgent, category, subject, companyName, jiraTicketKey, assignedAgent, ticketNumber = null }) {
+  if (category === 'spam') return null;
+  const csOwnerForAlert = String(csAgent || '').trim().toUpperCase();
+  if (!csOwnerForAlert) return null;
+  const claimedRows = await prisma.$executeRaw`UPDATE "Ticket" SET "resolvedTeamsNotifiedAt" = NOW() WHERE id = ${ticketDbId} AND "resolvedTeamsNotifiedAt" IS NULL`;
+  if (claimedRows <= 0) return null;
+  return { ticketId: externalId, csOwner: csOwnerForAlert, ticketNumber, subject, companyName, jiraKey: jiraTicketKey, assignee: assignedAgent };
+}
+
 function mapMessage(msg) {
   const recipients = [
     ...(msg.toRecipients || []),
@@ -1817,28 +1855,19 @@ async function upsertBoardTicketsToDatabase(state, req) {
       }
     });
 
-    // Atomic, DB-level claim for the Resolved Teams DM: a dedicated column
-    // checked-and-set in a single UPDATE, not a JSON-file read-then-write.
-    // The JSON-file version raced under concurrent saves (multiple agents'
-    // tabs, or a poll cycle overlapping a user action) - each one could read
-    // "not yet notified" before any of them had written it back, so the same
-    // resolve event fired the DM repeatedly (as often as saves landed).
-    if (status === 'Resolved' && category !== 'spam') {
-      const csOwnerForAlert = String(csAgent || '').trim().toUpperCase();
-      if (csOwnerForAlert) {
-        const claimedRows = await prisma.$executeRaw`UPDATE "Ticket" SET "resolvedTeamsNotifiedAt" = NOW() WHERE id = ${ticket.id} AND "resolvedTeamsNotifiedAt" IS NULL`;
-        if (claimedRows > 0) {
-          pendingResolvedTeamsAlerts.push({
-            ticketId: externalId,
-            csOwner: csOwnerForAlert,
-            ticketNumber: state.ticketNumbers && state.ticketNumbers[externalId] ? String(state.ticketNumbers[externalId]) : null,
-            subject,
-            companyName,
-            jiraKey: jiraTicketKey,
-            assignee: assignedAgent
-          });
-        }
-      }
+    if (status === 'Resolved') {
+      const alert = await claimResolvedTeamsAlert({
+        ticketDbId: ticket.id,
+        externalId,
+        csAgent,
+        category,
+        subject,
+        companyName,
+        jiraTicketKey,
+        assignedAgent,
+        ticketNumber: state.ticketNumbers && state.ticketNumbers[externalId] ? String(state.ticketNumbers[externalId]) : null
+      });
+      if (alert) pendingResolvedTeamsAlerts.push(alert);
     }
 
     if (!existingTicket) {
@@ -2917,6 +2946,19 @@ app.get('/profile', requireAuth, (req, res) => {
               </div>
             </div>
           </div>
+
+          <div class="row">
+            <div class="label">Claude connector</div>
+            <div class="value">
+              <div id="mcpTokenStatus" style="font-size:13px;color:var(--muted);margin-bottom:8px;">Loading...</div>
+              <div id="mcpTokenReveal" class="hidden" style="margin-bottom:8px;">
+                <input id="mcpTokenValue" class="form-input" type="text" readonly style="font-family:monospace;font-size:12px;" />
+                <div style="font-size:12px;color:var(--muted);margin-top:4px;">Copy this now - it will not be shown again. Paste it as the Bearer token when adding the Support Kanban connector in Claude.</div>
+              </div>
+              <button class="btn btn-secondary" id="mcpGenerateBtn" type="button">Generate token</button>
+              <button class="btn btn-danger hidden" id="mcpRevokeBtn" type="button">Revoke token</button>
+            </div>
+          </div>
         </div>
 
         <div class="actions">
@@ -3062,7 +3104,45 @@ app.get('/profile', requireAuth, (req, res) => {
     document.getElementById('logoutBtn')?.addEventListener('click', logout);
     document.getElementById('logoutTopBtn')?.addEventListener('click', logout);
 
+    async function loadMcpTokenStatus() {
+      const res = await fetch('/api/mcp/token', { credentials: 'same-origin' });
+      const data = await res.json().catch(() => ({}));
+      const statusEl = document.getElementById('mcpTokenStatus');
+      const revokeBtn = document.getElementById('mcpRevokeBtn');
+      if (data.token) {
+        const when = new Date(data.token.createdAt).toLocaleDateString();
+        statusEl.textContent = 'Active token created ' + when + (data.token.lastUsedAt ? ', last used ' + new Date(data.token.lastUsedAt).toLocaleString() : ', not used yet');
+        revokeBtn?.classList.remove('hidden');
+      } else {
+        statusEl.textContent = 'No active token. Generate one to connect Claude to the Support Kanban board.';
+        revokeBtn?.classList.add('hidden');
+      }
+    }
+
+    document.getElementById('mcpGenerateBtn')?.addEventListener('click', async () => {
+      if (document.getElementById('mcpRevokeBtn') && !document.getElementById('mcpRevokeBtn').classList.contains('hidden')) {
+        if (!confirm('Generating a new token will revoke your current one and disconnect any Claude connector using it. Continue?')) return;
+      }
+      const res = await fetch('/api/mcp/token', { method: 'POST', credentials: 'same-origin' });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        alert(data.error || 'Unable to generate token.');
+        return;
+      }
+      document.getElementById('mcpTokenValue').value = data.token;
+      document.getElementById('mcpTokenReveal')?.classList.remove('hidden');
+      loadMcpTokenStatus();
+    });
+
+    document.getElementById('mcpRevokeBtn')?.addEventListener('click', async () => {
+      if (!confirm('Revoke your Claude connector token? Any connected Claude sessions will stop working until you generate a new one.')) return;
+      await fetch('/api/mcp/token', { method: 'DELETE', credentials: 'same-origin' });
+      document.getElementById('mcpTokenReveal')?.classList.add('hidden');
+      loadMcpTokenStatus();
+    });
+
     loadProfile();
+    loadMcpTokenStatus();
   </script>
 </body>
 </html>
@@ -3487,6 +3567,137 @@ app.get('/api/tickets/:id', requireAuth, async (req, res) => {
   });
   if (!ticket) return res.status(404).json({ error: 'ticket_not_found' });
   res.json({ ticket });
+});
+
+// --- Claude MCP connector -------------------------------------------------
+// Self-service token issuance (cookie-session authenticated, one active
+// token per user - regenerating revokes the previous one). The plaintext
+// token is only ever returned here, once; only its SHA-256 hash is stored.
+const mcpTokenLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 10, standardHeaders: true, legacyHeaders: false });
+app.get('/api/mcp/token', requireAuth, async (req, res) => {
+  const token = await prisma.apiToken.findFirst({
+    where: { userId: req.session.userId, revokedAt: null },
+    orderBy: { createdAt: 'desc' }
+  });
+  res.json({ token: token ? { createdAt: token.createdAt, lastUsedAt: token.lastUsedAt } : null });
+});
+app.post('/api/mcp/token', requireAuth, mcpTokenLimiter, async (req, res) => {
+  try {
+    await prisma.apiToken.updateMany({
+      where: { userId: req.session.userId, revokedAt: null },
+      data: { revokedAt: new Date() }
+    });
+    const rawToken = `kb_${crypto.randomBytes(32).toString('base64url')}`;
+    const created = await prisma.apiToken.create({
+      data: { userId: req.session.userId, tokenHash: hashApiToken(rawToken), label: 'Claude MCP connector' }
+    });
+    res.json({ token: rawToken, createdAt: created.createdAt });
+  } catch (error) {
+    console.error('Token generation failed:', error.message || error);
+    res.status(500).json({ error: 'token_generation_failed' });
+  }
+});
+app.delete('/api/mcp/token', requireAuth, async (req, res) => {
+  await prisma.apiToken.updateMany({
+    where: { userId: req.session.userId, revokedAt: null },
+    data: { revokedAt: new Date() }
+  });
+  res.json({ ok: true });
+});
+
+// Ticket API surface used by the standalone MCP server (mcp-server/), which
+// forwards the caller's own Bearer token straight through to these routes -
+// every tool call is scoped to exactly what that Kanban user can already do.
+const mcpApiLimiter = rateLimit({ windowMs: 60 * 1000, max: 60, standardHeaders: true, legacyHeaders: false });
+const MCP_TICKET_SELECT = {
+  id: true, externalId: true, subject: true, senderName: true, senderEmail: true, companyName: true,
+  status: true, priority: true, category: true, assignedAgent: true, csAgent: true, jiraTicketKey: true,
+  hubspotTicketId: true, createdAt: true, updatedAt: true, resolvedAt: true
+};
+const MCP_WRITABLE_STATUSES = new Set(['New', 'In Progress', 'Waiting on Us', 'Due for Test', 'Waiting on Contact', 'Resolved']);
+app.get('/api/mcp/tickets', requireApiToken, mcpApiLimiter, async (req, res) => {
+  const { status, assignee, q } = req.query;
+  const where = {};
+  if (status) where.status = String(status);
+  if (assignee) where.assignedAgent = String(assignee).trim().toUpperCase();
+  if (q) {
+    const term = String(q).trim();
+    where.OR = [
+      { subject: { contains: term, mode: 'insensitive' } },
+      { companyName: { contains: term, mode: 'insensitive' } },
+      { senderEmail: { contains: term, mode: 'insensitive' } }
+    ];
+  }
+  const limit = Math.min(Number(req.query.limit) || 50, 200);
+  const tickets = await prisma.ticket.findMany({ where, take: limit, orderBy: { updatedAt: 'desc' }, select: MCP_TICKET_SELECT });
+  res.json({ tickets });
+});
+app.get('/api/mcp/tickets/:id', requireApiToken, mcpApiLimiter, async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: 'invalid_ticket_id' });
+  const ticket = await prisma.ticket.findUnique({
+    where: { id },
+    include: { comments: { orderBy: { createdAt: 'asc' } } }
+  });
+  if (!ticket) return res.status(404).json({ error: 'ticket_not_found' });
+  res.json({ ticket });
+});
+app.post('/api/mcp/tickets/:id/comments', requireApiToken, mcpApiLimiter, async (req, res) => {
+  const id = Number(req.params.id);
+  const text = String(req.body?.text || '').trim();
+  if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: 'invalid_ticket_id' });
+  if (!text) return res.status(400).json({ error: 'text_required' });
+  const ticket = await prisma.ticket.findUnique({ where: { id } });
+  if (!ticket) return res.status(404).json({ error: 'ticket_not_found' });
+  const comment = await prisma.ticketComment.create({
+    data: { ticketId: id, userId: req.apiUser.id, comment: text, isInternal: true }
+  });
+  await createTicketAuditEvent({ ticketId: id, userId: req.apiUser.id, eventType: 'comment_added', newValue: text.slice(0, 200), metadata: { via: 'mcp' } });
+  res.json({ ok: true, comment });
+});
+app.patch('/api/mcp/tickets/:id', requireApiToken, mcpApiLimiter, async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: 'invalid_ticket_id' });
+  const existingTicket = await prisma.ticket.findUnique({ where: { id } });
+  if (!existingTicket) return res.status(404).json({ error: 'ticket_not_found' });
+
+  const data = {};
+  if (req.body?.status !== undefined) {
+    const status = String(req.body.status || '').trim();
+    if (!MCP_WRITABLE_STATUSES.has(status)) return res.status(400).json({ error: 'invalid_status' });
+    data.status = status;
+    data.resolvedAt = status === 'Resolved' ? new Date() : null;
+    if (status !== 'Resolved') data.resolvedTeamsNotifiedAt = null;
+  }
+  if (req.body?.assignedAgent !== undefined) data.assignedAgent = req.body.assignedAgent ? String(req.body.assignedAgent).trim().toUpperCase() : null;
+  if (req.body?.csAgent !== undefined) data.csAgent = req.body.csAgent ? String(req.body.csAgent).trim().toUpperCase() : null;
+  if (req.body?.priority !== undefined) data.priority = String(req.body.priority || 'Normal').trim();
+  if (!Object.keys(data).length) return res.status(400).json({ error: 'no_fields' });
+
+  const updated = await prisma.ticket.update({ where: { id }, data });
+  await auditTicketChanges({
+    ticketId: id,
+    userId: req.apiUser.id,
+    before: existingTicket,
+    after: updated,
+    fields: ['status', 'assignedAgent', 'csAgent', 'priority']
+  });
+
+  if (data.status === 'Resolved' && existingTicket.status !== 'Resolved') {
+    const alert = await claimResolvedTeamsAlert({
+      ticketDbId: updated.id,
+      externalId: updated.externalId || String(updated.id),
+      csAgent: updated.csAgent,
+      category: updated.category,
+      subject: updated.subject,
+      companyName: updated.companyName,
+      jiraTicketKey: updated.jiraTicketKey,
+      assignedAgent: updated.assignedAgent
+    });
+    if (alert) void sendResolvedTeamsNotifications([alert]).catch((error) => console.warn('Resolved Teams notification failed:', error?.message || error));
+  }
+
+  res.json({ ok: true, ticket: updated });
 });
 
 app.get('/api/state', requireAuth, async (req, res) => {
