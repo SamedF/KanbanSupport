@@ -19,6 +19,7 @@ const VERSIONS_DIR = path.join(__dirname, 'versions');
 const AVATAR_UPLOAD_DIR = path.join(__dirname, 'public', 'uploads', 'avatars');
 const MAX_BACKUPS = Number(process.env.STATE_BACKUP_KEEP || 50);
 const BACKUP_MIN_INTERVAL_MS = Number(process.env.STATE_BACKUP_MIN_INTERVAL_MS || 60_000);
+const RESOLVED_RETENTION_MS = Number(process.env.RESOLVED_RETENTION_MS || 72 * 60 * 60 * 1000);
 
 //const USERNAME = process.env.KANBAN_USER || 'admin';
 const SESSION_SECRET = process.env.SESSION_SECRET || 'change-this-session-secret';
@@ -39,6 +40,9 @@ const M365_REDIRECT_URI = process.env.M365_REDIRECT_URI || `http://localhost:${P
 // permissions the app never actually uses.
 const M365_SCOPES = String(process.env.M365_SCOPES || 'offline_access openid profile email User.Read Mail.Read Mail.Read.Shared').trim();
 const SUPPORT_MAILBOX = String(process.env.SUPPORT_MAILBOX || 'helpdesk@quinta.im').trim().toLowerCase();
+const CONFIGURED_APP_BASE_URL = String(process.env.APP_BASE_URL || process.env.PUBLIC_BASE_URL || '').trim();
+const APP_BASE_URL = String(CONFIGURED_APP_BASE_URL || `http://localhost:${PORT}`).replace(/\/+$/, '');
+const PASSWORD_RESET_TTL_MS = Number(process.env.PASSWORD_RESET_TTL_MS || 60 * 60 * 1000);
 const HUBSPOT_TOKEN = process.env.HUBSPOT_PRIVATE_APP_TOKEN || process.env.HUBSPOT_ACCESS_TOKEN || '';
 const HAS_STATIC_HUBSPOT_TOKEN = !!HUBSPOT_TOKEN && HUBSPOT_TOKEN.startsWith('pat-');
 const HUBSPOT_CLIENT_ID = process.env.HUBSPOT_CLIENT_ID || '';
@@ -104,6 +108,8 @@ const CS_TEAMS_EMAIL_OVERRIDES = (() => {
     return {};
   }
 })();
+const SUPPORT_AGENT_CODES = new Set(['SGU','ZIO','SFA','MEZ','SHE','JBA','RMD']);
+const CS_AGENT_CODES = new Set(['VGU','NAO','MBH','TBR','IBE','SKE','BKH','JAT','VPO','RKH','AZA','GGO','WPH','JFC']);
 
 const APP_BUILD_VERSION = (
   process.env.RENDER_GIT_COMMIT ||
@@ -140,6 +146,7 @@ app.use(session({
 }));
 
 const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 20, standardHeaders: true, legacyHeaders: false });
+const passwordResetLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 5, standardHeaders: true, legacyHeaders: false });
 
 function isAuthed(req) { return req.session && req.session.authenticated === true; }
 function requireAuth(req, res, next) { return isAuthed(req) ? next() : res.status(401).json({ error: 'unauthorized' }); }
@@ -254,8 +261,9 @@ async function auditTicketChanges({
   }
 }
 function normalizeRole(role) {
-  const value = String(role || 'agent').trim().toLowerCase();
-  return ['owner', 'admin', 'agent', 'viewer'].includes(value) ? value : null;
+  const value = String(role || 'support').trim().toLowerCase();
+  if (value === 'agent' || value === 'viewer') return 'support';
+  return ['owner', 'admin', 'cs', 'support'].includes(value) ? value : null;
 }
 async function ownerAccountExists() {
   const count = await prisma.user.count({ where: { role: 'owner' } });
@@ -280,6 +288,19 @@ function normalizeDbStatusForBoard(status) {
   if (value === 'resolved' || value === 'closed') return 'res';
   return 'new';
 }
+function resolvedAtFromState(state, ticketId) {
+  const touched = Number(state?.ticketStageTouchedAt?.[ticketId] || 0);
+  if (touched > 0) return touched;
+  const created = Date.parse(state?.ticketCreatedAt?.[ticketId] || '');
+  return Number.isFinite(created) ? created : 0;
+}
+function isResolvedHiddenInState(state, ticketId, now = Date.now()) {
+  if (normalizeBoardStatusForDb(state?.ticketState?.[ticketId] || 'new') !== 'Resolved') return false;
+  const meta = (state?.ticketResolutionMeta && typeof state.ticketResolutionMeta === 'object') ? state.ticketResolutionMeta[ticketId] : null;
+  if (meta?.confirmedAt) return true;
+  const resolvedAt = resolvedAtFromState(state, ticketId);
+  return !!resolvedAt && now - resolvedAt >= RESOLVED_RETENTION_MS;
+}
 function safeDateForDb(value) {
   if (!value) return null;
   const date = new Date(value);
@@ -288,6 +309,32 @@ function safeDateForDb(value) {
 function normalizeEmailForDb(value) {
   return String(value || '').trim().toLowerCase();
 }
+function passwordResetTokenHash(token) {
+  return crypto.createHash('sha256').update(String(token || '')).digest('hex');
+}
+function passwordResetExpiresAt() {
+  return new Date(Date.now() + PASSWORD_RESET_TTL_MS);
+}
+function publicBaseUrlForRequest(req) {
+  if (CONFIGURED_APP_BASE_URL) return APP_BASE_URL;
+  const host = String(req.get('host') || '').trim();
+  if (!host) return APP_BASE_URL;
+  return `${req.protocol}://${host}`.replace(/\/+$/, '');
+}
+async function ensurePasswordResetTable() {
+  await prisma.$executeRaw`
+    CREATE TABLE IF NOT EXISTS "PasswordResetToken" (
+      "id" SERIAL PRIMARY KEY,
+      "userId" INTEGER NOT NULL REFERENCES "User"("id") ON DELETE CASCADE,
+      "tokenHash" TEXT NOT NULL UNIQUE,
+      "expiresAt" TIMESTAMP(3) NOT NULL,
+      "usedAt" TIMESTAMP(3),
+      "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+  `;
+  await prisma.$executeRaw`CREATE INDEX IF NOT EXISTS "PasswordResetToken_userId_idx" ON "PasswordResetToken"("userId")`;
+  await prisma.$executeRaw`CREATE INDEX IF NOT EXISTS "PasswordResetToken_expiresAt_idx" ON "PasswordResetToken"("expiresAt")`;
+}
 function extractCompanyNameFromEmail(email) {
   const domain = normalizeEmailForDb(email).split('@').pop() || '';
   const first = domain.split('.')[0] || '';
@@ -295,6 +342,9 @@ function extractCompanyNameFromEmail(email) {
   return first.replace(/[-_]+/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
 }
 
+ensurePasswordResetTable().catch(error => {
+  console.warn('Password reset table setup failed:', error.message || error);
+});
 
 function safeReadState() {
   try {
@@ -711,6 +761,29 @@ async function safeWriteState(state) {
   (Array.isArray(nextState.seenIds) ? nextState.seenIds : []).forEach(id => seenIdSet.add(id));
   nextState.seenIds = [...seenIdSet];
 
+  const mergeTicketMap = (field) => ({
+    ...((currentState[field] && typeof currentState[field] === 'object') ? currentState[field] : {}),
+    ...((nextState[field] && typeof nextState[field] === 'object') ? nextState[field] : {})
+  });
+  nextState.ticketAssignee = mergeTicketMap('ticketAssignee');
+  nextState.ticketCSOwner = mergeTicketMap('ticketCSOwner');
+  nextState.ticketAssignmentMode = mergeTicketMap('ticketAssignmentMode');
+  nextState.manualSupportOverride = mergeTicketMap('manualSupportOverride');
+  nextState.ticketResolutionMeta = mergeTicketMap('ticketResolutionMeta');
+
+  const pruneResolvedHiddenTickets = (stateToPrune) => {
+    const nowForPrune = Date.now();
+    const hiddenIds = new Set(
+      (Array.isArray(stateToPrune.allTickets) ? stateToPrune.allTickets : [])
+        .filter(t => t && t.id && isResolvedHiddenInState(stateToPrune, String(t.id), nowForPrune))
+        .map(t => String(t.id))
+    );
+    if (!hiddenIds.size) return stateToPrune;
+    stateToPrune.allTickets = (Array.isArray(stateToPrune.allTickets) ? stateToPrune.allTickets : []).filter(t => !hiddenIds.has(String(t?.id || '')));
+    return stateToPrune;
+  };
+  pruneResolvedHiddenTickets(nextState);
+
   // Whether a ticket has already had its "Resolved" Teams DM sent - a plain
   // boolean, reset only when the ticket leaves Resolved. Using the ticket's
   // touched-at timestamp as an idempotency key (as this used to) was fragile:
@@ -763,10 +836,11 @@ async function safeWriteState(state) {
   // A stale snapshot (e.g. from a lagging tab) must not blindly overwrite
   // fields it didn't correctly merge - keep the current state as the base and
   // only layer in the fields we've safely reconciled above by id/timestamp.
-  const reconciledFields = ['ticketState', 'ticketStageTouchedAt', 'ticketNumbers', 'ticketNumberCounter', 'allTickets', 'seenIds'];
+  const reconciledFields = ['ticketState', 'ticketStageTouchedAt', 'ticketNumbers', 'ticketNumberCounter', 'allTickets', 'seenIds', 'ticketAssignee', 'ticketCSOwner', 'ticketAssignmentMode', 'manualSupportOverride', 'ticketResolutionMeta'];
   const finalState = isStale
     ? { ...currentState, ...Object.fromEntries(reconciledFields.map(key => [key, nextState[key]])), _meta: enrichedMeta }
     : { ...nextState, _meta: enrichedMeta };
+  pruneResolvedHiddenTickets(finalState);
 
   fs.mkdirSync(path.dirname(DATA_PATH), { recursive: true });
   fs.writeFileSync(DATA_PATH, JSON.stringify(finalState, null, 2), 'utf8');
@@ -814,6 +888,8 @@ async function hydrateStateFromDatabase(baseState = {}) {
   state.ticketCategory = (state.ticketCategory && typeof state.ticketCategory === 'object') ? state.ticketCategory : {};
   state.ticketSubtype = (state.ticketSubtype && typeof state.ticketSubtype === 'object') ? state.ticketSubtype : {};
   state.ticketAssignee = (state.ticketAssignee && typeof state.ticketAssignee === 'object') ? state.ticketAssignee : {};
+  state.ticketCSOwner = (state.ticketCSOwner && typeof state.ticketCSOwner === 'object') ? state.ticketCSOwner : {};
+  state.ticketAssignmentMode = (state.ticketAssignmentMode && typeof state.ticketAssignmentMode === 'object') ? state.ticketAssignmentMode : {};
   state.ticketComments = (state.ticketComments && typeof state.ticketComments === 'object') ? state.ticketComments : {};
   state.ticketClientEmail = (state.ticketClientEmail && typeof state.ticketClientEmail === 'object') ? state.ticketClientEmail : {};
   state.ticketCreatedAt = (state.ticketCreatedAt && typeof state.ticketCreatedAt === 'object') ? state.ticketCreatedAt : {};
@@ -858,6 +934,8 @@ async function hydrateStateFromDatabase(baseState = {}) {
     if (ticket.priority) state.ticketPriority[externalId] = ticket.priority;
     if (ticket.category) state.ticketCategory[externalId] = ticket.category;
     if (ticket.assignedAgent) state.ticketAssignee[externalId] = ticket.assignedAgent;
+    if (ticket.csAgent) state.ticketCSOwner[externalId] = ticket.csAgent;
+    if (ticket.assignedAgent || ticket.csAgent) state.ticketAssignmentMode[externalId] = 'support';
     if (ticket.senderEmail) state.ticketClientEmail[externalId] = ticket.senderEmail;
     if (ticket.createdAt) state.ticketCreatedAt[externalId] = ticket.createdAt.toISOString();
     if (ticket.jiraTicketKey) state.ticketJira[externalId] = ticket.jiraTicketKey;
@@ -941,6 +1019,30 @@ async function graphRequest(pathname, token, init = {}) {
 
 async function graphGet(pathname, token) {
   return graphRequest(pathname, token);
+}
+
+async function graphSendPasswordResetEmail(recipientEmail, resetUrl) {
+  const token = await graphDelegatedTokenFromStore();
+  const html = [
+    '<div style="font-family:Segoe UI,Arial,sans-serif;color:#0f172a;line-height:1.5;">',
+    '<h2 style="margin:0 0 12px;">Reset your Support Kanban password</h2>',
+    '<p>We received a request to reset your password.</p>',
+    `<p><a href="${escapeHtml(resetUrl)}" style="display:inline-block;background:#4f46e5;color:#ffffff;text-decoration:none;padding:10px 14px;border-radius:8px;font-weight:700;">Change password</a></p>`,
+    '<p>This link expires in 1 hour. If you did not request it, you can ignore this email.</p>',
+    '</div>'
+  ].join('');
+  await graphRequest('/me/sendMail', token, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      message: {
+        subject: 'Reset your Support Kanban password',
+        body: { contentType: 'HTML', content: html },
+        toRecipients: [{ emailAddress: { address: recipientEmail } }]
+      },
+      saveToSentItems: true
+    })
+  });
 }
 
 async function postJson(url, payload) {
@@ -1646,6 +1748,7 @@ async function upsertBoardTicketsToDatabase(state, req) {
   const ticketCategory = state.ticketCategory || {};
   const ticketSubtype = state.ticketSubtype || {};
   const ticketAssignee = state.ticketAssignee || {};
+  const ticketCSOwner = state.ticketCSOwner || {};
   const ticketClientEmail = state.ticketClientEmail || {};
   const ticketCreatedAt = state.ticketCreatedAt || {};
   const ticketJira = state.ticketJira || {};
@@ -1675,7 +1778,10 @@ async function upsertBoardTicketsToDatabase(state, req) {
     const status = normalizeBoardStatusForDb(ticketState[externalId] || 'new');
     const priority = String(ticketPriority[externalId] || item.priority || 'Normal').trim() || 'Normal';
     const category = String(ticketCategory[externalId] || ticketSubtype[externalId] || '').trim() || null;
-    const assignedAgent = String(ticketAssignee[externalId] || '').trim() || null;
+    const rawAssignedAgent = String(ticketAssignee[externalId] || '').trim().toUpperCase();
+    const rawCsAgent = String(ticketCSOwner[externalId] || '').trim().toUpperCase();
+    const assignedAgent = SUPPORT_AGENT_CODES.has(rawAssignedAgent) ? rawAssignedAgent : null;
+    const csAgent = CS_AGENT_CODES.has(rawCsAgent) ? rawCsAgent : (CS_AGENT_CODES.has(rawAssignedAgent) ? rawAssignedAgent : null);
     const createdAt = safeDateForDb(email.receivedDateTime || ticketCreatedAt[externalId]) || new Date();
     const body = String(email.bodyPreview || email.preview || email.summary || email.body || email.text || '').trim() || null;
     const companyName = extractCompanyNameFromEmail(senderEmail);
@@ -1697,6 +1803,7 @@ async function upsertBoardTicketsToDatabase(state, req) {
       && existingTicket.priority === priority
       && existingTicket.category === category
       && existingTicket.assignedAgent === assignedAgent
+      && existingTicket.csAgent === csAgent
       && existingTicket.hubspotTicketId === hubspotTicketId
       && existingTicket.jiraTicketKey === jiraTicketKey
       && existingTicket.body === body;
@@ -1717,6 +1824,7 @@ async function upsertBoardTicketsToDatabase(state, req) {
         priority,
         category,
         assignedAgent,
+        csAgent,
         source: 'outlook',
         emailMessageId: externalId,
         hubspotTicketId,
@@ -1735,6 +1843,7 @@ async function upsertBoardTicketsToDatabase(state, req) {
         priority,
         category,
         assignedAgent,
+        csAgent,
         source: 'outlook',
         emailMessageId: externalId,
         hubspotTicketId,
@@ -1760,7 +1869,7 @@ async function upsertBoardTicketsToDatabase(state, req) {
         userId: req.session?.userId || null,
         before: existingTicket,
         after: ticket,
-        fields: ['subject', 'senderEmail', 'companyName', 'status', 'priority', 'category', 'assignedAgent', 'hubspotTicketId', 'jiraTicketKey', 'body']
+        fields: ['subject', 'senderEmail', 'companyName', 'status', 'priority', 'category', 'assignedAgent', 'csAgent', 'hubspotTicketId', 'jiraTicketKey', 'body']
       });
     }
 
@@ -1794,7 +1903,199 @@ async function upsertBoardTicketsToDatabase(state, req) {
   return { count };
 }
 
+app.get('/favicon.svg', (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  res.type('image/svg+xml').sendFile(path.join(__dirname, 'public', 'favicon.svg'));
+});
+
+app.get('/favicon.ico', (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  res.redirect(302, '/favicon.svg?v=q-logo-tab-v3');
+});
+
 app.get('/login', (req, res) => isAuthed(req) ? res.redirect('/') : res.type('html').sendFile(path.join(__dirname, 'public', 'login.html')));
+
+function renderResetPasswordPage(token) {
+  const safeTokenJson = JSON.stringify(String(token || ''));
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <link rel="icon" type="image/svg+xml" sizes="any" href="/favicon.svg?v=q-logo-tab-v3" />
+  <link rel="shortcut icon" type="image/svg+xml" href="/favicon.svg?v=q-logo-tab-v3" />
+  <title>Reset Password</title>
+  <style>
+    body{font-family:Segoe UI,Arial,sans-serif;background:linear-gradient(135deg,#f8fafc,#e2e8f0);display:flex;min-height:100vh;align-items:center;justify-content:center;margin:0}
+    .card{background:#fff;padding:28px;border-radius:12px;box-shadow:0 12px 32px rgba(15,23,42,.12);width:min(390px,92vw)}
+    h1{margin:0 0 8px;font-size:20px;color:#1e293b}
+    p{margin:0 0 16px;color:#64748b;font-size:13px}
+    label{display:block;font-size:12px;color:#475569;font-weight:600;margin-bottom:6px}
+    input{width:100%;padding:10px;border:1px solid #cbd5e1;border-radius:8px;margin-bottom:12px;box-sizing:border-box}
+    button{width:100%;padding:10px;border:none;border-radius:8px;background:#4f46e5;color:#fff;font-weight:700;cursor:pointer}
+    button:disabled{opacity:.65;cursor:not-allowed}
+    a{color:#4f46e5;text-decoration:none;font-size:13px;font-weight:700}
+    .msg{margin-top:10px;font-size:12px;min-height:16px;color:#64748b}
+    .msg.err{color:#dc2626}
+    .msg.ok{color:#16a34a}
+  </style>
+</head>
+<body>
+  <form class="card" id="reset-form">
+    <h1>Reset password</h1>
+    <p>Choose a new password for your Support Kanban account.</p>
+    <label for="password">New password</label>
+    <input id="password" name="password" type="password" autocomplete="new-password" minlength="8" required />
+    <label for="confirm">Confirm password</label>
+    <input id="confirm" name="confirm" type="password" autocomplete="new-password" minlength="8" required />
+    <button id="submit-btn" type="submit">Change password</button>
+    <div class="msg" id="msg"></div>
+    <p style="margin-top:14px;margin-bottom:0;"><a href="/login">Back to sign in</a></p>
+  </form>
+  <script>
+    const resetToken = ${safeTokenJson};
+    const form = document.getElementById('reset-form');
+    const msg = document.getElementById('msg');
+    const btn = document.getElementById('submit-btn');
+    if (!resetToken) {
+      msg.textContent = 'This reset link is missing its token.';
+      msg.className = 'msg err';
+      btn.disabled = true;
+    }
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      msg.className = 'msg';
+      msg.textContent = '';
+      const password = document.getElementById('password').value;
+      const confirm = document.getElementById('confirm').value;
+      if (password.length < 8) {
+        msg.textContent = 'Password must be at least 8 characters.';
+        msg.className = 'msg err';
+        return;
+      }
+      if (password !== confirm) {
+        msg.textContent = 'Passwords do not match.';
+        msg.className = 'msg err';
+        return;
+      }
+      btn.disabled = true;
+      try {
+        const res = await fetch('/auth/reset-password', {
+          method: 'POST',
+          headers: {'Content-Type':'application/json'},
+          credentials: 'include',
+          body: JSON.stringify({ token: resetToken, password })
+        });
+        const out = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          msg.textContent = out.error === 'invalid_or_expired_token' ? 'This reset link is invalid or expired.' : 'Unable to change password.';
+          msg.className = 'msg err';
+          btn.disabled = false;
+          return;
+        }
+        msg.textContent = 'Password changed. You can sign in now.';
+        msg.className = 'msg ok';
+        setTimeout(() => { location.href = '/login'; }, 1200);
+      } catch (_) {
+        msg.textContent = 'Network error. Please try again.';
+        msg.className = 'msg err';
+        btn.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>`;
+}
+
+app.get('/reset-password', (req, res) => {
+  res.type('html').send(renderResetPasswordPage(req.query.token || ''));
+});
+
+app.post('/auth/forgot-password', passwordResetLimiter, async (req, res) => {
+  try {
+    const email = normalizeEmailForDb(req.body?.email || '');
+    if (!email || !email.includes('@')) return res.status(400).json({ error: 'invalid_email' });
+
+    const user = await prisma.user.findFirst({
+      where: { email, isActive: true }
+    });
+
+    if (!user) {
+      return res.status(404).json({ error: 'email_not_found' });
+    }
+
+    await ensurePasswordResetTable();
+    const token = crypto.randomBytes(32).toString('hex');
+    const tokenHash = passwordResetTokenHash(token);
+    const expiresAt = passwordResetExpiresAt();
+    const resetUrl = `${publicBaseUrlForRequest(req)}/reset-password?token=${encodeURIComponent(token)}`;
+
+    await prisma.$executeRaw`DELETE FROM "PasswordResetToken" WHERE "userId" = ${user.id} AND "usedAt" IS NULL`;
+    await prisma.$executeRaw`
+      INSERT INTO "PasswordResetToken" ("userId", "tokenHash", "expiresAt")
+      VALUES (${user.id}, ${tokenHash}, ${expiresAt})
+    `;
+
+    try {
+      await graphSendPasswordResetEmail(email, resetUrl);
+    } catch (mailError) {
+      await prisma.$executeRaw`DELETE FROM "PasswordResetToken" WHERE "tokenHash" = ${tokenHash}`;
+      console.error('Password reset email failed:', mailError);
+      return res.status(500).json({ error: 'send_email_failed' });
+    }
+
+    return res.json({ ok: true });
+  } catch (error) {
+    console.error('Forgot password failed:', error);
+    return res.status(500).json({ error: 'forgot_password_failed' });
+  }
+});
+
+app.post('/auth/reset-password', passwordResetLimiter, async (req, res) => {
+  try {
+    const token = String(req.body?.token || '').trim();
+    const password = String(req.body?.password || '');
+    if (!token) return res.status(400).json({ error: 'missing_token' });
+    if (password.length < 8) return res.status(400).json({ error: 'password_too_short' });
+
+    await ensurePasswordResetTable();
+    const tokenHash = passwordResetTokenHash(token);
+    const rows = await prisma.$queryRaw`
+      SELECT "id", "userId", "expiresAt", "usedAt"
+      FROM "PasswordResetToken"
+      WHERE "tokenHash" = ${tokenHash}
+      LIMIT 1
+    `;
+    const reset = Array.isArray(rows) ? rows[0] : null;
+
+    if (!reset || reset.usedAt || new Date(reset.expiresAt).getTime() < Date.now()) {
+      return res.status(400).json({ error: 'invalid_or_expired_token' });
+    }
+
+    const user = await prisma.user.findUnique({ where: { id: Number(reset.userId) } });
+    if (!user || user.isActive === false) {
+      return res.status(400).json({ error: 'invalid_or_expired_token' });
+    }
+
+    const passwordHash = await bcrypt.hash(password, 10);
+    await prisma.$transaction([
+      prisma.user.update({ where: { id: user.id }, data: { passwordHash } }),
+      prisma.$executeRaw`UPDATE "PasswordResetToken" SET "usedAt" = ${new Date()} WHERE "id" = ${Number(reset.id)}`
+    ]);
+
+    if (req.session) {
+      req.session.authenticated = false;
+      delete req.session.userId;
+      delete req.session.username;
+      delete req.session.role;
+    }
+
+    return res.json({ ok: true });
+  } catch (error) {
+    console.error('Reset password failed:', error);
+    return res.status(500).json({ error: 'reset_password_failed' });
+  }
+});
 
 app.post('/auth/login', authLimiter, async (req, res) => {
   try {
@@ -2130,6 +2431,8 @@ app.get('/profile', requireAuth, (req, res) => {
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="icon" type="image/svg+xml" sizes="any" href="/favicon.svg?v=q-logo-tab-v3" />
+  <link rel="shortcut icon" type="image/svg+xml" href="/favicon.svg?v=q-logo-tab-v3" />
   <title>Profile - Support Kanban</title>
   <style>
     :root {
@@ -2782,7 +3085,7 @@ app.post('/api/admin/users', requireAdmin, async (req, res) => {
   try {
     const username = normalizeUsername(req.body?.username || '');
     const password = String(req.body?.password || '');
-    const role = normalizeRole(req.body?.role || 'agent');
+    const role = normalizeRole(req.body?.role || 'support');
     const displayName = String(req.body?.displayName || '').trim() || null;
     const email = normalizeEmailForDb(req.body?.email || '') || null;
 
@@ -2968,6 +3271,8 @@ app.get('/audit/tickets', requireAdmin, (req, res) => {
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="icon" type="image/svg+xml" sizes="any" href="/favicon.svg?v=q-logo-tab-v3" />
+  <link rel="shortcut icon" type="image/svg+xml" href="/favicon.svg?v=q-logo-tab-v3" />
   <title>Ticket Audit Log</title>
   <style>
     body {

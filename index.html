@@ -23,6 +23,8 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+<link rel="icon" type="image/svg+xml" sizes="any" href="/favicon.svg?v=q-logo-tab-v3"/>
+<link rel="shortcut icon" type="image/svg+xml" href="/favicon.svg?v=q-logo-tab-v3"/>
 <title>Support Kanban  Quinta</title>
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Caladea:wght@700&family=Inter:wght@400;500;600;700;800;900&display=swap');
@@ -1151,20 +1153,33 @@ header {
 }
 
 .jira-link-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
   background: #f8fafc;
   border: 1px dashed #cbd5e1;
-  font-size: 10px;
-  font-weight: 800;
-  color: #94a3b8;
-  padding: 3px 8px;
+  padding: 2px;
   cursor: pointer;
+  line-height: 0;
   white-space: nowrap;
 }
 
 .jira-link-btn:hover {
   background: #eff6ff;
   border-color: #93c5fd;
-  color: #1d4ed8;
+}
+
+.jira-link-btn:focus-visible {
+  outline: 2px solid #93c5fd;
+  outline-offset: 2px;
+}
+
+.jira-link-icon {
+  width: 15px;
+  height: 15px;
+  display: block;
 }
 
 .manual-badge {
@@ -2657,9 +2672,9 @@ th {
   <button class="chip" data-pf="Medium"> Med</button>
   <button class="chip" data-pf="Low"> Low</button>
   <div class="sep"></div>
-  <span class="filter-label">Agent:</span>
-  <select class="filter-sel" id="agent-filter"><option value="all">All agents</option></select>
-  <div class="sep"></div>
+  <span class="filter-label agent-filter-control">Team:</span>
+  <select class="filter-sel agent-filter-control" id="agent-filter"><option value="all">All CS & Support</option></select>
+  <div class="sep agent-filter-control"></div>
   <span class="filter-label">Company:</span>
   <select class="filter-sel" id="company-filter"><option value="all">All companies</option></select>
   <div class="sep"></div>
@@ -2751,11 +2766,11 @@ th {
       </select>
       <label for="kpi-team-filter" style="font-size:12px;color:#555;">Team</label>
       <select class="filter-sel" id="kpi-team-filter" style="max-width:170px;">
-        <option value="all">All agents</option>
+        <option value="all">All CS & Support</option>
         <option value="cs">CS only</option>
         <option value="support">Support only</option>
       </select>
-      <label for="kpi-agent-filter" style="font-size:12px;color:#555;">Agent</label>
+      <label for="kpi-agent-filter" style="font-size:12px;color:#555;">CS / Support</label>
       <select class="filter-sel" id="kpi-agent-filter" style="max-width:170px;">
         <option value="all">All</option>
       </select>
@@ -2769,7 +2784,7 @@ th {
       <div id="kpi-status-chart"></div>
     </div>
     <div style="background:#fff;border:1px solid #d7d7d7;border-radius:14px;padding:12px;box-shadow:0 6px 16px rgba(0,0,0,.06);">
-      <div style="font-family:Caladea,serif;font-size:24px;margin-bottom:8px;">Agent Workload by Status</div>
+      <div style="font-family:Caladea,serif;font-size:24px;margin-bottom:8px;">CS / Support Workload by Status</div>
       <div id="kpi-agent-chart"></div>
     </div>
   </div>
@@ -2803,7 +2818,7 @@ th {
             <tr style="text-align:left;border-bottom:1px solid #ddd;">
               <th style="padding:8px 10px;">Ticket</th>
               <th style="padding:8px 10px;">Company</th>
-              <th style="padding:8px 10px;">Agent</th>
+              <th style="padding:8px 10px;">Support</th>
               <th style="padding:8px 10px;">Jira</th>
             </tr>
           </thead>
@@ -2813,12 +2828,12 @@ th {
     </div>
   </div>
   <div style="background:#fff;border:1px solid #d7d7d7;border-radius:14px;padding:12px;box-shadow:0 6px 16px rgba(0,0,0,.06);">
-    <div style="font-family:Caladea,serif;font-size:24px;margin-bottom:8px;">Tickets by Agent (Status Breakdown)</div>
+    <div style="font-family:Caladea,serif;font-size:24px;margin-bottom:8px;">Tickets by CS / Support (Status Breakdown)</div>
     <div style="overflow:auto;">
       <table style="width:100%;border-collapse:collapse;font-size:12px;">
         <thead>
           <tr style="text-align:left;border-bottom:1px solid #ddd;">
-            <th style="padding:8px 10px;">Agent</th>
+            <th style="padding:8px 10px;">CS / Support</th>
             <th style="padding:8px 10px;">Total</th>
             <th style="padding:8px 10px;">New</th>
             <th style="padding:8px 10px;">In Progress</th>
@@ -3083,6 +3098,7 @@ const INITIAL_SYNC_DAYS=14;
 const POLL_LOOKBACK_HOURS=96;
 const POLL_BACKFILL_BUFFER_HOURS=6;
 const JIRA_REFRESH_MS=60000;
+const RESOLVED_RETENTION_MS=72*60*60*1000;
 const hasCowork=typeof window!=='undefined'&&window.cowork&&typeof window.cowork.callMcpTool==='function';
 //  SLA 
 const SLA_HOURS={High:4,Medium:24,Low:48};
@@ -3120,6 +3136,7 @@ let ticketJira={};   // ticketId  Jira key (e.g. 'QT-1234') | null
 let ticketHubspotId={}; // ticketId -> HubSpot ticket ID
 let ticketStageTouchedAt={}; // ticketId -> last stage-change timestamp (ms)
 let ticketHasNewReply={}; // ticketId -> true while an unread reply is glowing on the card
+let ticketResolutionMeta={}; // ticketId -> CS confirmation / send-back metadata
 let spamSenders=new Set();
 let hsCache={},domainCompanyCache={},readMentions=new Set(),readJiraAlerts=new Set();
 let jiraAlerts=[],jiraStatusSnapshot={};
@@ -3196,16 +3213,53 @@ function normalizeAgentCode(value){
   const code=String(value||'').trim().toUpperCase();
   return ALL_AGENTS.includes(code)||code==='YOU'||code==='ADMIN'?code:'';
 }
-const currentUser=()=>normalizeAgentCode(document.getElementById('current-user')?.value) || 'ADMIN';
+function resolveUserAgentCode(user){
+  const candidates=[
+    user?.username,
+    user?.displayName,
+    String(user?.email||'').split('@')[0]
+  ];
+  for(const candidate of candidates){
+    const code=normalizeAgentCode(candidate);
+    if(code)return code;
+    const mapped=COOWNER_NAME_MAP[String(candidate||'').trim().toLowerCase()];
+    if(mapped&&normalizeAgentCode(mapped))return mapped;
+  }
+  return '';
+}
+const currentUser=()=>normalizeAgentCode(document.getElementById('current-user')?.value) || resolveUserAgentCode(currentSessionUser) || 'ADMIN';
 function currentUserIsAdmin(){
   return currentSessionUser?.role==='admin'||currentSessionUser?.role==='owner';
 }
+function currentUserRole(){
+  const role=String(currentSessionUser?.role||'support').trim().toLowerCase();
+  if(role==='agent'||role==='viewer')return'support';
+  return role;
+}
+function currentUserCanViewAllTickets(){
+  return currentUserIsAdmin();
+}
+function currentUserCanAssignTicket(ticket){
+  if(currentUserIsAdmin())return true;
+  return ticketVisibleToCurrentUser(ticket);
+}
+function enforcedAgentFilter(){
+  if(currentUserCanViewAllTickets())return activeA;
+  const role=currentUserRole();
+  const me=currentUser();
+  if(role==='cs')return normalizeCSAgent(me)||me;
+  if(role==='support')return normalizeSupportAgent(me)||me;
+  return me;
+}
 function ticketVisibleToCurrentUser(ticket){
-  if(currentUserIsAdmin()) return true;
+  if(currentUserCanViewAllTickets()) return true;
   const me = currentUser();
   if(!me) return false;
   const { assignee, csOwner } = ticketFilterAgentValues(ticket);
-  return assignee === me || csOwner === me;
+  const role=currentUserRole();
+  if(role==='cs')return csOwner === normalizeCSAgent(me);
+  if(role==='support')return assignee === normalizeSupportAgent(me);
+  return false;
 }
 
 let _saveTimer=null;
@@ -3272,7 +3326,7 @@ function buildStatePayload(reason){
   const snapshot={
     allTickets,
     seenIds:Object.keys(seen),
-    ticketState,ticketStageTouchedAt,ticketHasNewReply,ticketPriority,ticketCategory,ticketSubtype,ticketAssignee,ticketAssignmentMode,manualSupportOverride,ticketCSOwner,ticketComments,ticketClientEmail,ticketCreatedAt,ticketNumbers,ticketNumberCounter,ticketJira,ticketHubspotId,
+    ticketState,ticketStageTouchedAt,ticketHasNewReply,ticketResolutionMeta,ticketPriority,ticketCategory,ticketSubtype,ticketAssignee,ticketAssignmentMode,manualSupportOverride,ticketCSOwner,ticketComments,ticketClientEmail,ticketCreatedAt,ticketNumbers,ticketNumberCounter,ticketJira,ticketHubspotId,
     spamSenders:[...spamSenders],hsCache,domainCompanyCache,readMentions:[...readMentions],jiraAlerts,readJiraAlerts:[...readJiraAlerts],jiraStatusSnapshot,companyCustomProps,companyProfiles,companiesViewType,companyNetworkCache,companyFilters,coOwnerMappings,actionHistory,
     _meta:{clientSavedAt:now,clientVersion:stateVersion}
   };
@@ -3473,7 +3527,9 @@ function mergeDatabaseTickets(dbTickets){
     }
     if(row.priority)ticketPriority[id]=row.priority;
     if(row.category)ticketCategory[id]=row.category;
-    if(row.assignedAgent)ticketAssignee[id]=row.assignedAgent;
+    if(row.assignedAgent)ticketAssignee[id]=normalizeSupportAgent(row.assignedAgent)||row.assignedAgent;
+    if(row.csAgent)ticketCSOwner[id]=normalizeCSAgent(row.csAgent)||row.csAgent;
+    if(row.assignedAgent||row.csAgent)ticketAssignmentMode[id]='support';
     if(row.senderEmail)ticketClientEmail[id]=String(row.senderEmail).toLowerCase();
     if(row.createdAt)ticketCreatedAt[id]=row.createdAt;
     if(row.jiraTicketKey){
@@ -3503,6 +3559,7 @@ async function loadState(){
   if(s.ticketState){Object.entries(s.ticketState).forEach(([k,v])=>{ticketState[k]=normalizeTicketStage(v);});}
   if(s.ticketStageTouchedAt&&typeof s.ticketStageTouchedAt==='object')Object.assign(ticketStageTouchedAt,s.ticketStageTouchedAt);
   if(s.ticketHasNewReply&&typeof s.ticketHasNewReply==='object')Object.assign(ticketHasNewReply,s.ticketHasNewReply);
+  if(s.ticketResolutionMeta&&typeof s.ticketResolutionMeta==='object')Object.assign(ticketResolutionMeta,s.ticketResolutionMeta);
   if(s.ticketPriority)Object.assign(ticketPriority,s.ticketPriority);
   if(s.ticketCategory)Object.assign(ticketCategory,s.ticketCategory);if(s.ticketSubtype)Object.assign(ticketSubtype,s.ticketSubtype);
   if(s.ticketAssignee)Object.assign(ticketAssignee,s.ticketAssignee);
@@ -3536,7 +3593,7 @@ async function loadState(){
   normalizeStoredJiraLinks();
   normalizeLegacyAssignmentModes();
 }
-function normalizeLegacyAssignmentModes(){let changed=false;allTickets.forEach(t=>{const id=t.id;if(ticketCategory[id]==='Spam')return;const assignee=String(ticketAssignee[id]||'').trim();if(SUPPORT_AGENTS.includes(assignee)&&ticketAssignmentMode[id]!=='support'){ticketAssignmentMode[id]='support';changed=true;}else if(CS_AGENTS.includes(assignee)&&!ticketAssignmentMode[id]){ticketAssignmentMode[id]='cs';changed=true;}if(isSupportAssignedTicket(id)&&!ticketCSOwner[id]){const cs=resolveDefaultCSForTicket(id,t.email);if(cs){ticketCSOwner[id]=cs;changed=true;}}});if(changed)saveState('normalize_legacy_assignment_modes');}
+function normalizeLegacyAssignmentModes(){let changed=false;allTickets.forEach(t=>{const id=t.id;if(ticketCategory[id]==='Spam')return;const assignee=normalizeAgentCode(ticketAssignee[id]||'');if(CS_AGENTS.includes(assignee)){if(!ticketCSOwner[id])ticketCSOwner[id]=assignee;ticketAssignee[id]=leastLoadedSupportAgent();ticketAssignmentMode[id]='support';manualSupportOverride[id]=false;changed=true;}else if(SUPPORT_AGENTS.includes(assignee)&&ticketAssignmentMode[id]!=='support'){ticketAssignmentMode[id]='support';changed=true;}if(isSupportAssignedTicket(id)&&!ticketCSOwner[id]){const cs=resolveDefaultCSForTicket(id,t.email);if(cs){ticketCSOwner[id]=cs;changed=true;}}});if(changed)saveState('normalize_legacy_assignment_modes');}
 function saveReads(){saveState();}
 function saveHsCache(){saveState();}
 window.addEventListener('pagehide',flushStateWithBeacon);
@@ -3631,6 +3688,7 @@ function applyRestoredWorkspaceControls(){
   if(teamEl&&[...teamEl.options].some(o=>o.value===kpiTeamFilter))teamEl.value=kpiTeamFilter;
   const kpiAgentEl=document.getElementById('kpi-agent-filter');
   if(kpiAgentEl&&[...kpiAgentEl.options].some(o=>o.value===kpiAgentFilter))kpiAgentEl.value=kpiAgentFilter;
+  syncRoleRestrictedControls();
 }
 
 //  Jira badge count 
@@ -3695,6 +3753,15 @@ function setAdminOnlyNavigationVisible(isAdmin){
   document.querySelector('.account-users-link')?.classList.toggle('hidden', !isAdmin);
   document.querySelector('.audit-board-btn')?.classList.toggle('hidden', !isAdmin);
   document.getElementById('jira-settings-btn')?.classList.toggle('hidden', !isAdmin);
+}
+function syncRoleRestrictedControls(){
+  const canViewAll=currentUserCanViewAllTickets();
+  document.querySelectorAll('.agent-filter-control').forEach(el=>el.classList.toggle('hidden', !canViewAll));
+  if(!canViewAll){
+    activeA=currentUser();
+    const agentEl=document.getElementById('agent-filter');
+    if(agentEl)agentEl.value=activeA;
+  }
 }
 async function loadBuildVersion(){
   try{
@@ -3869,7 +3936,10 @@ document.getElementById('ct-submit').addEventListener('click',async()=>{
   if(clientEmail)ticketClientEmail[id]=clientEmail;
   ticketCategory[id]=category;
   if(subtype)ticketSubtype[id]=subtype;
-  ticketAssignee[id]=document.getElementById('ct-agent').value||SUPPORT_AGENTS[0];
+  ticketAssignee[id]=normalizeSupportAgent(document.getElementById('ct-agent').value)||leastLoadedSupportAgent();
+  ticketAssignmentMode[id]='support';
+  const creatorCS=currentUserCSAgent();
+  if(creatorCS)ticketCSOwner[id]=creatorCS;
   if(jiraKey)ticketJira[id]=jiraKey;
   allTickets.unshift(ticket);
   saveState();renderBoard();updateJiraBadge();
@@ -3922,6 +3992,10 @@ function ticketFilterAgentValues(ticket){
   const csOwner=normalizeAgentCode(ensureTicketCSOwnerResolved(id,ticket.email)||ticketCSOwner[id]||'');
   return{assignee,csOwner};
 }
+function normalizeSupportAgent(value){const code=normalizeAgentCode(value);return SUPPORT_AGENTS.includes(code)?code:'';}
+function normalizeCSAgent(value){const code=normalizeAgentCode(value);return CS_AGENTS.includes(code)?code:'';}
+function currentUserSupportAgent(){return normalizeSupportAgent(currentUser());}
+function currentUserCSAgent(){return normalizeCSAgent(currentUser());}
 function ticketMatchesAgentFilter(ticket,agentCode){
   if(agentCode==='all')return true;
   if(agentCode==='tagged')return taggedTickets.has(ticket.id);
@@ -3931,6 +4005,12 @@ function ticketMatchesAgentFilter(ticket,agentCode){
   return assignee===agentCode||csOwner===agentCode;
 }
 function renderKpiView(){
+  if(!currentUserCanViewAllTickets()){
+    const role=currentUserRole();
+    if(role==='cs')kpiTeamFilter='cs';
+    else if(role==='support')kpiTeamFilter='support';
+    kpiAgentFilter=enforcedAgentFilter();
+  }
   const bounds=getKpiBounds(kpiTimeFilter);
   const companyForTicket=t=>{const ce=ticketClientEmail[t.id]||getClientEmail(t.email);return ce&&hsCache[ce]?.companyName?hsCache[ce].companyName:null;};
   const ticketMatchesTeam=t=>{
@@ -3971,9 +4051,9 @@ function renderKpiView(){
   const uniqueCsCount=Object.keys(csCounts).filter(k=>k!=='Unassigned').length;
   const agentFilterEl=document.getElementById('kpi-agent-filter');
   const teamFilterEl=document.getElementById('kpi-team-filter');
-  const isAdmin = currentUserIsAdmin();
+  const canViewAllTickets = currentUserCanViewAllTickets();
 
-  if (isAdmin) {
+  if (canViewAllTickets) {
     const teamAgents=kpiTeamFilter==='cs'?CS_AGENTS:(kpiTeamFilter==='support'?SUPPORT_AGENTS:ALL_AGENTS);
     const uniqAgents=new Set(teamAgents);
     allTickets.forEach(t=>{const {assignee,csOwner}=ticketFilterAgentValues(t);const ag=kpiTeamFilter==='cs'?csOwner:assignee;if(!ag)return;if(kpiTeamFilter==='cs'&&!CS_AGENTS.includes(ag))return;if(kpiTeamFilter==='support'&&!SUPPORT_AGENTS.includes(ag))return;uniqAgents.add(ag);});
@@ -3984,18 +4064,18 @@ function renderKpiView(){
     agentFilterEl.disabled = false;
     teamFilterEl.disabled = false;
   } else {
-    const me=currentUser();
-    const agentValue = me || 'all';
+    const agentValue = enforcedAgentFilter() || 'all';
     agentFilterEl.innerHTML=`<option value="${esc(agentValue)}">${esc(agentValue)}</option>`;
     agentFilterEl.value=agentValue;
+    kpiAgentFilter=agentValue;
     agentFilterEl.disabled = true;
     teamFilterEl.disabled = true;
   }
 
   document.getElementById('kpi-time-filter').value=kpiTimeFilter;
   document.getElementById('kpi-team-filter').value=kpiTeamFilter;
-  const teamLabel=kpiTeamFilter==='cs'?'CS only':(kpiTeamFilter==='support'?'Support only':'All agents');
-  const agentLabel=kpiAgentFilter==='all'?'All agents':kpiAgentFilter;
+  const teamLabel=kpiTeamFilter==='cs'?'CS only':(kpiTeamFilter==='support'?'Support only':'All CS & Support');
+  const agentLabel=kpiAgentFilter==='all'?'All CS & Support':kpiAgentFilter;
   document.getElementById('kpi-range-label').textContent=`Tickets considered: ${inRange.length} (non-spam)  ${fmtKpiRangeLabel(kpiTimeFilter,bounds)}  ${teamLabel}  ${agentLabel}`;
   document.getElementById('kpi-status-cards').innerHTML=`
     <div style="background:#fff;border:1px solid #d7d7d7;border-radius:12px;padding:12px;"><div style="font-size:12px;color:#666;">New</div><div style="font-family:Caladea,serif;font-size:30px;">${statusCounts.new}</div></div>
@@ -4529,7 +4609,7 @@ function applyCompanyCSAssignments(){let changed=0;allTickets.forEach(t=>{if(tic
 
 async function findCompanyByDomain(email,excludeContactId){const domain=(email.split('@')[1]||'').toLowerCase();if(!domain||domain.includes('quinta')||['gmail.com','yahoo.com','hotmail.com','outlook.com','live.com'].includes(domain))return{companies:[],via:null};if(domain in domainCompanyCache)return domainCompanyCache[domain];const domRes=await window.cowork.callMcpTool(HS_SEARCH,{objectType:'companies',filterGroups:[{filters:[{propertyName:'domain',operator:'EQ',value:domain}]}],properties:['name','domain','createdate','co_owner','co-owner','coowner','co_owner_name','cs_owner','customer_success_owner','am_owner','account_manager','am'],sorts:[{propertyName:'createdate',direction:'ASCENDING'}],limit:5,chatInsights:HS_INSIGHTS});const domCos=hsResults(domRes);if(domCos.length){const v={companies:domCos,via:'domain'};domainCompanyCache[domain]=v;saveHsCache();return v;}const peerRes=await window.cowork.callMcpTool(HS_SEARCH,{objectType:'contacts',filterGroups:[{filters:[{propertyName:'email',operator:'CONTAINS_TOKEN',value:'@'+domain}]}],properties:['email'],limit:8,chatInsights:HS_INSIGHTS});const peers=hsResults(peerRes).filter(c=>c.properties?.email&&(!excludeContactId||c.id.toString()!==excludeContactId.toString()));for(const peer of peers.slice(0,4)){const pCoRes=await window.cowork.callMcpTool(HS_SEARCH,{objectType:'companies',filterGroups:[{associatedWith:[{objectType:'contacts',operator:'EQUAL',objectIds:[String(peer.id)]}]}],properties:['name','domain','createdate','co_owner','co-owner','coowner','co_owner_name','cs_owner','customer_success_owner','am_owner','account_manager','am'],sorts:[{propertyName:'createdate',direction:'ASCENDING'}],limit:5,chatInsights:HS_INSIGHTS});const pCos=hsResults(pCoRes);if(pCos.length){const v={companies:pCos,via:'domain-contact'};domainCompanyCache[domain]=v;saveHsCache();return v;}}const v={companies:[],via:null};domainCompanyCache[domain]=v;return v;}
 
-async function enrichWithHubSpot(){try{if(!hasCowork)return;const emailSet=new Set();allTickets.forEach(t=>{const ce=ticketClientEmail[t.id]||getClientEmail(t.email);if(ce){ticketClientEmail[t.id]=ce;if(shouldRefreshHubspotCacheEntry(ce))emailSet.add(ce);}});const emails=[...emailSet];if(!emails.length){await syncUnsyncedTicketsToHubspot();return;}const hsStatus=document.getElementById('hs-status');const hsProgress=document.getElementById('hs-progress');hsStatus.style.display='flex';const foundContacts=[];const notFoundEmails=[];const BATCH=50;for(let i=0;i<emails.length;i+=BATCH){const batch=emails.slice(i,i+BATCH);hsProgress.textContent=`Contacts ${Math.min(i+BATCH,emails.length)}/${emails.length}?`;const cRes=await window.cowork.callMcpTool(HS_SEARCH,{objectType:'contacts',filterGroups:[{filters:[{propertyName:'email',operator:'IN',values:batch}]}],properties:['email','firstname','lastname'],limit:BATCH,chatInsights:HS_INSIGHTS});if(cRes?.isError)throw new Error(cRes.error||'hubspot_error');const contacts=hsResults(cRes);batch.forEach(email=>{if(!contacts.find(c=>c.properties?.email?.toLowerCase()===email))notFoundEmails.push(email);});foundContacts.push(...contacts);}const CONCURRENT=5;for(let i=0;i<foundContacts.length;i+=CONCURRENT){const chunk=foundContacts.slice(i,i+CONCURRENT);hsProgress.textContent=`Companies ${Math.min(i+CONCURRENT,foundContacts.length)}/${foundContacts.length}?`;await Promise.all(chunk.map(async contact=>{const email=(contact.properties?.email||'').toLowerCase();if(!email)return;const contactName=[contact.properties?.firstname,contact.properties?.lastname].filter(Boolean).join(' ')||email;const coRes=await window.cowork.callMcpTool(HS_SEARCH,{objectType:'companies',filterGroups:[{associatedWith:[{objectType:'contacts',operator:'EQUAL',objectIds:[String(contact.id)]}]}],properties:['name','domain','createdate','co_owner','co-owner','coowner','co_owner_name','cs_owner','customer_success_owner','am_owner','account_manager','am'],sorts:[{propertyName:'createdate',direction:'ASCENDING'}],limit:10,chatInsights:HS_INSIGHTS});if(coRes?.isError)throw new Error(coRes.error||'hubspot_error');let companies=hsResults(coRes);let inferredVia=null;if(!companies.length){const fb=await findCompanyByDomain(email,contact.id);companies=fb.companies;inferredVia=fb.via;}const primary=pickPrimaryCompany(companies,email);hsCache[email]={contactId:contact.id,contactName,companyName:primary?.properties?.name||null,companyId:primary?.id||null,coOwner:extractBestCompanyCoOwner(companies,primary,email),contactUrl:`https://app.hubspot.com/contacts/25445053/record/0-1/${contact.id}`,companyUrl:primary?`https://app.hubspot.com/contacts/25445053/record/0-2/${primary.id}`:null,allCompanies:companies.map(c=>c.properties?.name).filter(Boolean),inferredVia};}));applyCompanyCSAssignments();saveHsCache();updateCompanyFilter();renderActiveView();}for(let i=0;i<notFoundEmails.length;i+=CONCURRENT){const chunk=notFoundEmails.slice(i,i+CONCURRENT);await Promise.all(chunk.map(async email=>{const fb=await findCompanyByDomain(email,null);if(fb.companies.length){const primary=pickPrimaryCompany(fb.companies,email);hsCache[email]={contactId:null,contactName:null,companyName:primary?.properties?.name||null,companyId:primary?.id||null,coOwner:extractBestCompanyCoOwner(fb.companies,primary,email),contactUrl:null,companyUrl:primary?`https://app.hubspot.com/contacts/25445053/record/0-2/${primary.id}`:null,allCompanies:fb.companies.map(c=>c.properties?.name).filter(Boolean),inferredVia:fb.via};}else{hsCache[email]=null;}}));applyCompanyCSAssignments();saveHsCache();updateCompanyFilter();renderActiveView();}scheduleCompanyNetworkSync([...collectCompanyIdsFromHsCache()]);await syncUnsyncedTicketsToHubspot();hsStatus.style.display='none';}catch(e){const hsStatus=document.getElementById('hs-status');const hsProgress=document.getElementById('hs-progress');hsStatus.style.display='flex';const msg=String(e?.message||e||'').toLowerCase();if(msg.includes('hubspot_not_connected')){hsProgress.innerHTML='HubSpot not connected. <a href="/auth/hubspot/start" style="color:#4f46e5;font-weight:700;">Connect now</a>';return;}hsProgress.textContent='HubSpot sync error';}}
+async function enrichWithHubSpot(){try{if(!hasCowork)return;const emailSet=new Set();allTickets.forEach(t=>{const ce=ticketClientEmail[t.id]||getClientEmail(t.email);if(ce){ticketClientEmail[t.id]=ce;if(shouldRefreshHubspotCacheEntry(ce))emailSet.add(ce);}});const emails=[...emailSet];if(!emails.length){await syncUnsyncedTicketsToHubspot();document.getElementById('hs-status').style.display='none';return;}const hsStatus=document.getElementById('hs-status');const hsProgress=document.getElementById('hs-progress');hsStatus.style.display='flex';const foundContacts=[];const notFoundEmails=[];const BATCH=50;for(let i=0;i<emails.length;i+=BATCH){const batch=emails.slice(i,i+BATCH);hsProgress.textContent=`Contacts ${Math.min(i+BATCH,emails.length)}/${emails.length}?`;const cRes=await window.cowork.callMcpTool(HS_SEARCH,{objectType:'contacts',filterGroups:[{filters:[{propertyName:'email',operator:'IN',values:batch}]}],properties:['email','firstname','lastname'],limit:BATCH,chatInsights:HS_INSIGHTS});if(cRes?.isError)throw new Error(cRes.error||'hubspot_error');const contacts=hsResults(cRes);batch.forEach(email=>{if(!contacts.find(c=>c.properties?.email?.toLowerCase()===email))notFoundEmails.push(email);});foundContacts.push(...contacts);}const CONCURRENT=5;for(let i=0;i<foundContacts.length;i+=CONCURRENT){const chunk=foundContacts.slice(i,i+CONCURRENT);hsProgress.textContent=`Companies ${Math.min(i+CONCURRENT,foundContacts.length)}/${foundContacts.length}?`;await Promise.all(chunk.map(async contact=>{const email=(contact.properties?.email||'').toLowerCase();if(!email)return;const contactName=[contact.properties?.firstname,contact.properties?.lastname].filter(Boolean).join(' ')||email;const coRes=await window.cowork.callMcpTool(HS_SEARCH,{objectType:'companies',filterGroups:[{associatedWith:[{objectType:'contacts',operator:'EQUAL',objectIds:[String(contact.id)]}]}],properties:['name','domain','createdate','co_owner','co-owner','coowner','co_owner_name','cs_owner','customer_success_owner','am_owner','account_manager','am'],sorts:[{propertyName:'createdate',direction:'ASCENDING'}],limit:10,chatInsights:HS_INSIGHTS});if(coRes?.isError)throw new Error(coRes.error||'hubspot_error');let companies=hsResults(coRes);let inferredVia=null;if(!companies.length){const fb=await findCompanyByDomain(email,contact.id);companies=fb.companies;inferredVia=fb.via;}const primary=pickPrimaryCompany(companies,email);hsCache[email]={contactId:contact.id,contactName,companyName:primary?.properties?.name||null,companyId:primary?.id||null,coOwner:extractBestCompanyCoOwner(companies,primary,email),contactUrl:`https://app.hubspot.com/contacts/25445053/record/0-1/${contact.id}`,companyUrl:primary?`https://app.hubspot.com/contacts/25445053/record/0-2/${primary.id}`:null,allCompanies:companies.map(c=>c.properties?.name).filter(Boolean),inferredVia};}));applyCompanyCSAssignments();saveHsCache();updateCompanyFilter();renderActiveView();}for(let i=0;i<notFoundEmails.length;i+=CONCURRENT){const chunk=notFoundEmails.slice(i,i+CONCURRENT);await Promise.all(chunk.map(async email=>{const fb=await findCompanyByDomain(email,null);if(fb.companies.length){const primary=pickPrimaryCompany(fb.companies,email);hsCache[email]={contactId:null,contactName:null,companyName:primary?.properties?.name||null,companyId:primary?.id||null,coOwner:extractBestCompanyCoOwner(fb.companies,primary,email),contactUrl:null,companyUrl:primary?`https://app.hubspot.com/contacts/25445053/record/0-2/${primary.id}`:null,allCompanies:fb.companies.map(c=>c.properties?.name).filter(Boolean),inferredVia:fb.via};}else{hsCache[email]=null;}}));applyCompanyCSAssignments();saveHsCache();updateCompanyFilter();renderActiveView();}scheduleCompanyNetworkSync([...collectCompanyIdsFromHsCache()]);await syncUnsyncedTicketsToHubspot();hsStatus.style.display='none';}catch(e){const hsStatus=document.getElementById('hs-status');const hsProgress=document.getElementById('hs-progress');hsStatus.style.display='flex';const msg=String(e?.message||e||'').toLowerCase();if(msg.includes('hubspot_not_connected')){hsProgress.innerHTML='HubSpot not connected. <a href="/auth/hubspot/start" style="color:#4f46e5;font-weight:700;">Connect now</a>';return;}hsProgress.textContent='HubSpot sync error';}}
 
 function updateCompanyFilter(){const companies=new Map();allTickets.filter(t=>ticketCategory[t.id]!=='Spam').forEach(t=>{const ce=ticketClientEmail[t.id];const hs=ce?hsCache[ce]:null;if(hs?.companyName)companies.set(hs.companyName,true);});const sel=document.getElementById('company-filter');const cur=sel.value;sel.innerHTML='<option value="all">All companies</option>';[...companies.keys()].sort((a,b)=>a.localeCompare(b)).forEach(name=>{const cnt=allTickets.filter(t=>ticketCategory[t.id]!=='Spam'&&(()=>{const ce=ticketClientEmail[t.id];return ce&&hsCache[ce]?.companyName===name;})()).length;const o=document.createElement('option');o.value=name;o.textContent=name+' ('+cnt+')';if(name===cur)o.selected=true;sel.appendChild(o);});}
 async function syncTicketToHubspot(ticket,opts={}){
@@ -4641,14 +4721,15 @@ async function buildAgentUI(){
   } catch (_) {}
   currentSessionUser=loggedUser||currentSessionUser;
 
-  const isPrivilegedUser = loggedUser.role === 'admin' || loggedUser.role === 'owner';
+  const loggedRole = String(loggedUser.role || 'support').trim().toLowerCase();
+  const isPrivilegedUser = loggedRole === 'admin' || loggedRole === 'owner';
   const displayName = isPrivilegedUser
     ? 'You'
     : (loggedUser.username || 'User');
 
   const optionValue = isPrivilegedUser
     ? 'ADMIN'
-    : String(loggedUser.username || 'USER').toUpperCase();
+    : (resolveUserAgentCode(loggedUser) || String(loggedUser.username || 'USER').toUpperCase());
 
   const sel=document.getElementById('current-user');
   const label=document.getElementById('current-user-label');
@@ -4668,31 +4749,22 @@ async function buildAgentUI(){
   }
 
   const isAdmin = isPrivilegedUser;
+  const canViewAllTickets = isAdmin;
   setAdminOnlyNavigationVisible(isAdmin);
 
-  if (!isAdmin) {
-    const me = currentUser();
-    if (SUPPORT_AGENTS.includes(me)) {
-      kpiTeamFilter = 'support';
-    } else if (CS_AGENTS.includes(me)) {
-      kpiTeamFilter = 'cs';
-    } else {
-      kpiTeamFilter = 'all';
-    }
-    kpiAgentFilter = me || 'all';
+  if (!canViewAllTickets) {
+    kpiTeamFilter = currentUserRole()==='cs' ? 'cs' : 'support';
+    kpiAgentFilter = enforcedAgentFilter() || 'all';
   }
 
   const af=document.getElementById('agent-filter');
-  af.innerHTML='<option value="all">All agents</option><optgroup label="Support">'+SUPPORT_AGENTS.map(a=>`<option>${a}</option>`).join('')+'</optgroup><optgroup label="CS">'+CS_AGENTS.map(a=>`<option>${a}</option>`).join('')+'</optgroup><option value="tagged">Tagged me</option>';
+  af.innerHTML='<option value="all">All CS & Support</option><optgroup label="Support">'+SUPPORT_AGENTS.map(a=>`<option>${a}</option>`).join('')+'</optgroup><optgroup label="CS">'+CS_AGENTS.map(a=>`<option>${a}</option>`).join('')+'</optgroup><option value="tagged">Tagged me</option>';
+  syncRoleRestrictedControls();
 
   const ctAgent=document.getElementById('ct-agent');
   if(ctAgent){
     ctAgent.innerHTML =
-      `<optgroup label="Current user">
-        <option value="${esc(optionValue)}">${esc(displayName)}</option>
-      </optgroup>` +
-      '<optgroup label="Support">'+SUPPORT_AGENTS.map(a=>`<option value="${esc(a)}">${esc(a)}</option>`).join('')+'</optgroup>' +
-      '<optgroup label="CS">'+CS_AGENTS.map(a=>`<option value="${esc(a)}">${esc(a)}</option>`).join('')+'</optgroup>';
+      '<optgroup label="Support">'+SUPPORT_AGENTS.map(a=>`<option value="${esc(a)}">${esc(a)}</option>`).join('')+'</optgroup>';
   }
 
   const grid=document.getElementById('tag-grid');
@@ -4725,12 +4797,12 @@ async function buildAgentUI(){
 }
 const nextPriority=cur=>PRIORITIES[(PRIORITIES.indexOf(cur)+1)%PRIORITIES.length];
 function agentAssignMenuHtml(selected){
-  const renderGroup=(label,agents,isCs=false)=>`<div class="agent-assign-group">${label}</div>`+agents.map(a=>`
+  const renderGroup=(label,agents)=>`<div class="agent-assign-group">${label}</div>`+agents.map(a=>`
     <button class="agent-assign-option${a===selected?' active':''}" type="button" data-agent-pick="${esc(a)}">
-      <span>${esc(a)}${isCs?' CS':''}</span>
+      <span>${esc(a)}</span>
       <span class="agent-assign-dot" style="background:${agentColor(a)}"></span>
     </button>`).join('');
-  return renderGroup('Support',SUPPORT_AGENTS)+renderGroup('CS',CS_AGENTS,true);
+  return renderGroup('Support',SUPPORT_AGENTS);
 }
 
 function getAgentAssignMenuElement(wrap){
@@ -4789,14 +4861,14 @@ function positionAgentAssignMenu(wrap){
 
 function applyTicketAgentSelection(id,previousAgent,selected){
   if(!id||!selected)return;
-  if(CS_AGENTS.includes(selected)){
-    ticketCSOwner[id]=selected;
-    ticketAssignmentMode[id]='cs';
-  }else{
-    if(!ticketCSOwner[id]&&CS_AGENTS.includes(previousAgent))ticketCSOwner[id]=previousAgent;
-    ticketAssignmentMode[id]='support';
+  const supportAgent=normalizeSupportAgent(selected);
+  if(!supportAgent)return;
+  if(!ticketCSOwner[id]){
+    const cs=currentUserCSAgent();
+    if(cs)ticketCSOwner[id]=cs;
   }
-  ticketAssignee[id]=selected;
+  ticketAssignmentMode[id]='support';
+  ticketAssignee[id]=supportAgent;
   manualSupportOverride[id]=true;
   saveState('manual_agent_dropdown');
   updateWorkload();
@@ -4804,14 +4876,61 @@ function applyTicketAgentSelection(id,previousAgent,selected){
 }
 
 function clearNewReplyGlow(id){if(!ticketHasNewReply[id])return;delete ticketHasNewReply[id];saveState('new_reply_seen');renderBoard();}
+function resolvedAtForTicket(id){
+  const touched=Number(ticketStageTouchedAt[id]||0);
+  if(touched>0)return touched;
+  const created=Date.parse(ticketCreatedAt[id]||'');
+  return Number.isFinite(created)?created:0;
+}
+function isResolvedTicketHidden(id,now=Date.now()){
+  if(normalizeTicketStage(ticketState[id]||'new')!=='res')return false;
+  const meta=ticketResolutionMeta[id]||{};
+  if(meta.confirmedAt)return true;
+  const resolvedAt=resolvedAtForTicket(id);
+  return !!resolvedAt&&now-resolvedAt>=RESOLVED_RETENTION_MS;
+}
+function resolvedReviewHtml(id,csOwner){
+  if(normalizeTicketStage(ticketState[id]||'new')!=='res')return'';
+  const meta=ticketResolutionMeta[id]||{};
+  const resolvedAt=resolvedAtForTicket(id);
+  const remaining=Math.max(0,RESOLVED_RETENTION_MS-(Date.now()-resolvedAt));
+  const hoursLeft=Math.ceil(remaining/(60*60*1000));
+  const role=String(currentSessionUser?.role||'').toLowerCase();
+  const canReview=role==='admin'||role==='owner'||normalizeCSAgent(currentUser())===normalizeCSAgent(csOwner);
+  const status=meta.sentBackAt?'Sent back by CS':`Auto-hides in ${hoursLeft||1}h unless CS sends it back`;
+  const actions=canReview?`<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px;"><button class="btn-primary" data-res-confirm="${id}" style="font-size:10px;padding:4px 8px;">Confirm resolved</button><button class="btn-out" data-res-sendback="${id}" style="font-size:10px;padding:4px 8px;">Send back</button></div>`:'';
+  return`<div style="margin-top:7px;padding:7px 8px;border:1px solid #bbf7d0;border-radius:8px;background:#f0fdf4;color:#166534;font-size:10px;line-height:1.35;"><strong>CS review</strong><div>${esc(status)}</div>${actions}</div>`;
+}
+function confirmTicketResolved(id){
+  ticketResolutionMeta[id]={...(ticketResolutionMeta[id]||{}),confirmedAt:Date.now(),confirmedBy:currentUser()};
+  saveState('resolved_confirmed_by_cs');
+  renderBoard();
+  showToast('Resolved ticket confirmed and hidden','ok');
+}
+async function sendResolvedTicketBack(id){
+  const note=prompt('Add a note for why this ticket is being sent back:');
+  if(note===null)return;
+  const text=String(note||'').trim();
+  if(!text){showToast('A send-back note is required','warn');return;}
+  ticketState[id]='inp';
+  ticketStageTouchedAt[id]=Date.now();
+  ticketResolutionMeta[id]={...(ticketResolutionMeta[id]||{}),sentBackAt:Date.now(),sentBackBy:currentUser(),sendBackNote:text};
+  postTicketComment(id,`CS sent back from Resolved: ${text}`,[ticketAssignee[id]].filter(Boolean));
+  const saved=await saveState('resolved_sent_back_by_cs');
+  renderActiveView();
+  const rs=await syncTicketStatusToHubspot(id,'inp');
+  if(!rs?.ok&&rs?.reason!=='missing_hubspot_ticket_id')showToast(`HubSpot status sync failed: ${rs?.error||rs?.reason}`);
+  showToast(saved?'Ticket sent back to In Progress':'Ticket sent back locally; save pending',saved?'ok':'warn');
+}
 function makeCard(ticket,isNew=false){
   const{email,id}=ticket;
   ensureTicketNumber(id);
   const priority=ticketPriority[id]||ticket.priority;
-  const agent=ticketAssignee[id]||leastLoadedCSAgent();
-  const csOwner=ensureTicketCSOwnerResolved(id,email)||(ticketAssignmentMode[id]==='cs'?agent:null);
+  const agent=normalizeSupportAgent(ticketAssignee[id])||leastLoadedSupportAgent();
+  if(ticketAssignee[id]!==agent)ticketAssignee[id]=agent;
+  const csOwner=ensureTicketCSOwnerResolved(id,email)||normalizeCSAgent(ticketCSOwner[id]||'');
   const showCSBadge=!!csOwner;
-  const isAdmin = currentUserIsAdmin();
+  const canAssign = currentUserCanAssignTicket(ticket);
   const cat=ticketCategory[id];
   const comments=ticketComments[id]||[];
   const isTagged=taggedTickets.has(id);
@@ -4852,7 +4971,7 @@ function makeCard(ticket,isNew=false){
   const jiraHref=(jiraKey&&JIRA_URL)?`${JIRA_URL}${encodeURIComponent(jiraKey)}`:'#';
   const jiraBtn=jiraKey
     ?`<a class="jira-badge-card" data-jira-open="${id}" href="${jiraHref}" ${JIRA_URL?'target="_blank"':''} title="Jira: ${esc(jiraKey)}"> ${esc(jiraKey)}</a>`
-    :`<button class="jira-link-btn" data-jira-open="${id}" title="Link to Jira ticket"></button>`;
+    :`<button class="jira-link-btn" data-jira-open="${id}" title="Link to Jira ticket" aria-label="Link to Jira ticket"><img class="jira-link-icon" src="/assets/jira-logo.svg" alt="" aria-hidden="true"></button>`;
   const jiraLinkedQt=(jiraInfo?.linkedIssues||[]).filter(x=>String(x.key||'').startsWith('QT-'));
   const jiraLinkedHtml=jiraLinkedQt.length?jiraLinkedQt.slice(0,2).map(x=>`<span style="display:inline-flex;align-items:center;gap:4px;border:1px solid #c7d2fe;border-radius:999px;padding:1px 7px;background:#eef2ff;color:#3730a3;">${esc(x.key)} <span style="color:#64748b;">${esc(x.status||'')}</span></span>`).join(' '):'<span style="color:#94a3b8;">No QT linked</span>';
   const jiraCommentHtml=jiraInfo?.comments?.length?jiraInfo.comments.slice(-2).reverse().map(c=>`<div style="margin-top:3px;"><strong>${esc(c.author||'Unknown')}:</strong> ${esc(c.body||'').slice(0,140)}</div>`).join(''):'<div style="color:#94a3b8;margin-top:3px;">No Jira comments</div>';
@@ -4873,6 +4992,7 @@ function makeCard(ticket,isNew=false){
   const hsIsSyncing=hubspotTicketSyncInFlight.has(id);
   const hsFailed=hubspotTicketSyncFailed.has(id);
   const hsBlockReason=getHubspotSyncBlockReason(ticket);
+  const resolvedHtml=resolvedReviewHtml(id,csOwner);
   const hsTicketBtn=hsTicketId
     ?`<button class="btn-out" data-hs-open="${id}" style="font-size:10px;padding:2px 7px;" title="See ticket on HubSpot">See on HubSpot</button>`
     :(hsIsSyncing
@@ -4896,7 +5016,7 @@ function makeCard(ticket,isNew=false){
     </div>
     <div class="card-summary">${esc(email.summary||'No preview.')}</div>
     <div class="card-controls"><select class="cat-select" data-cat="${id}">${catOpts}</select><select class="cat-select" data-sub="${id}">${subOpts||'<option value="">No subtype</option>'}</select></div>
-    ${slaBadgeHtml}${hsHtml}${jiraDetailsHtml}
+    ${slaBadgeHtml}${hsHtml}${jiraDetailsHtml}${resolvedHtml}
     <div class="card-footer">
       ${senderHtml}
       <div class="card-actions">
@@ -4905,7 +5025,7 @@ function makeCard(ticket,isNew=false){
         ${hsTicketBtn}
         <button class="open-email-btn" data-oe="${id}"> Open</button>
         <div class="agent-assign-wrap" data-agent-menu="${id}">
-          <button class="agent-assign-trigger" type="button" data-agent-trigger="${id}" title="${isAdmin ? 'Assigned agent' : 'Only admins can change the assigned agent'}"${isAdmin ? '' : ' disabled'}>
+          <button class="agent-assign-trigger" type="button" data-agent-trigger="${id}" title="${canAssign ? 'Assign support agent' : 'Only admins and the ticket CS can change support assignment'}"${canAssign ? '' : ' disabled'}>
             <span class="agent-assign-label">${esc(agent)}</span>
             <span class="agent-assign-chevron">v</span>
           </button>
@@ -4921,8 +5041,8 @@ function makeCard(ticket,isNew=false){
   const agentWrap=div.querySelector('[data-agent-menu]');
   div.querySelector('[data-agent-trigger]').addEventListener('click',e=>{
     e.stopPropagation();
-    if(!currentUserIsAdmin()){
-      showToast('Only admins can change the assigned agent','warn');
+    if(!currentUserCanAssignTicket(ticket)){
+      showToast('Only admins and the ticket CS can change support assignment','warn');
       return;
     }
     document.querySelectorAll('.agent-assign-wrap.open').forEach(w=>{
@@ -4956,8 +5076,8 @@ function makeCard(ticket,isNew=false){
   });
   agentWrap.querySelectorAll('[data-agent-pick]').forEach(btn=>btn.addEventListener('click',e=>{
     e.stopPropagation();
-    if(!currentUserIsAdmin()){
-      showToast('Only admins can change the assigned agent','warn');
+    if(!currentUserCanAssignTicket(ticket)){
+      showToast('Only admins and the ticket CS can change support assignment','warn');
       return;
     }
     const menu=getAgentAssignMenuElement(agentWrap);
@@ -4978,6 +5098,8 @@ function makeCard(ticket,isNew=false){
   div.querySelector('[data-inline-toggle]')?.addEventListener('click',ev=>{ev.stopPropagation();inlineCommentOpen[id]=!inlineOpen;if(inlineCommentOpen[id]){markAlertFeedReadForTicket(id,currentUser());clearNewReplyGlow(id);}renderBoard();});
   div.querySelector('[data-inline-bell]')?.addEventListener('click',ev=>{ev.stopPropagation();inlineCommentOpen[id]=true;markAlertFeedReadForTicket(id,currentUser());clearNewReplyGlow(id);renderBoard();});
   div.querySelector('[data-inline-modal]')?.addEventListener('click',ev=>{ev.stopPropagation();clearNewReplyGlow(id);openComModal(ticket);});
+  div.querySelector('[data-res-confirm]')?.addEventListener('click',ev=>{ev.stopPropagation();confirmTicketResolved(id);});
+  div.querySelector('[data-res-sendback]')?.addEventListener('click',ev=>{ev.stopPropagation();sendResolvedTicketBack(id);});
   div.querySelector('[data-inline-text]')?.addEventListener('input',ev=>{inlineCommentDrafts[id]=ev.target.value;});
   div.querySelectorAll('[data-inline-tag]').forEach(btn=>btn.addEventListener('click',ev=>{ev.stopPropagation();toggleInlineTag(id,btn.dataset.inlineTag);renderBoard();}));
   div.querySelector('[data-inline-post]')?.addEventListener('click',ev=>{ev.stopPropagation();const text=String(inlineCommentDrafts[id]||'').trim();if(!text)return;const tags=inlineSelectedTags(id);if(!postTicketComment(id,text,tags))return;inlineCommentDrafts[id]='';inlineTagDrafts[id]=[];inlineCommentOpen[id]=true;renderBoard();});
@@ -4987,17 +5109,20 @@ function makeCard(ticket,isNew=false){
 function renderBoard(){
   allTickets.sort((a,b)=>{const ta=new Date(a.email.receivedDateTime||0).getTime(),tb=new Date(b.email.receivedDateTime||0).getTime();return sortDesc?tb-ta:ta-tb;});
   rebuildTagged();
+  syncRoleRestrictedControls();
   document.getElementById('ticket-number-filter').value=activeTicketNumber;
+  const agentFilter=enforcedAgentFilter();
   STAGES.forEach(col=>{
     const tickets=allTickets.filter(t=>{
       if(ticketCategory[t.id]==='Spam')return false;
       if(!ticketVisibleToCurrentUser(t))return false;
       const p=ticketPriority[t.id]||t.priority;
       if(activeP!=='all'&&p!==activeP)return false;
-      if(!ticketMatchesAgentFilter(t,activeA))return false;
+      if(!ticketMatchesAgentFilter(t,agentFilter))return false;
       if(activeCompany!=='all'){const ce=ticketClientEmail[t.id];const hs=ce?hsCache[ce]:null;if(!hs||hs.companyName!==activeCompany)return false;}
       if(activeJira&&!ticketJira[t.id])return false; // Jira filter
       if(!ticketMatchesNumberQuery(t))return false;
+      if(isResolvedTicketHidden(t.id))return false;
       return normalizeTicketStage(ticketState[t.id]||'new')===col;
     });
     const el=document.getElementById('col-'+col);const icons={new:'N',inp:'IP',wus:'WU',dft:'T',wct:'WC',res:'R'};
@@ -5025,7 +5150,7 @@ function clearStaleTicketSearchInput(){const el=document.getElementById('ticket-
 window.addEventListener('pageshow',clearStaleTicketSearchInput);
 window.addEventListener('load',()=>{clearStaleTicketSearchInput();setTimeout(clearStaleTicketSearchInput,300);setTimeout(clearStaleTicketSearchInput,1500);});
 document.getElementById('current-user').addEventListener('change',()=>{renderBoard();updateMentionsBadge();});
-document.querySelectorAll('.col-body').forEach(col=>{col.addEventListener('dragover',e=>{e.preventDefault();col.classList.add('drag-over');});col.addEventListener('dragleave',()=>col.classList.remove('drag-over'));col.addEventListener('drop',async e=>{e.preventDefault();col.classList.remove('drag-over');const id=e.dataTransfer.getData('ticketId');if(!id)return;const prevCol=normalizeTicketStage(ticketState[id]||'new');const newCol=normalizeTicketStage(col.dataset.col);if(prevCol===newCol)return;ticketState[id]=newCol;ticketStageTouchedAt[id]=Date.now();renderActiveView();col.classList.add('just-received');setTimeout(()=>col.classList.remove('just-received'),600);const saved=await saveState('ticket_stage_move');if(saved)showToast(' Moved to '+COL_NAMES[newCol]+'  saved','move');else showToast('Stage updated locally but save is still pending');const rs=await syncTicketStatusToHubspot(id,newCol);if(!rs?.ok&&rs?.reason!=='missing_hubspot_ticket_id'){showToast(`HubSpot status sync failed: ${rs?.error||rs?.reason}`);}});});
+document.querySelectorAll('.col-body').forEach(col=>{col.addEventListener('dragover',e=>{e.preventDefault();col.classList.add('drag-over');});col.addEventListener('dragleave',()=>col.classList.remove('drag-over'));col.addEventListener('drop',async e=>{e.preventDefault();col.classList.remove('drag-over');const id=e.dataTransfer.getData('ticketId');if(!id)return;const prevCol=normalizeTicketStage(ticketState[id]||'new');const newCol=normalizeTicketStage(col.dataset.col);if(prevCol===newCol)return;ticketState[id]=newCol;ticketStageTouchedAt[id]=Date.now();if(newCol==='res')ticketResolutionMeta[id]={resolvedAt:ticketStageTouchedAt[id],resolvedBy:currentUser()};else delete ticketResolutionMeta[id];renderActiveView();col.classList.add('just-received');setTimeout(()=>col.classList.remove('just-received'),600);const saved=await saveState('ticket_stage_move');if(saved)showToast(' Moved to '+COL_NAMES[newCol]+'  saved','move');else showToast('Stage updated locally but save is still pending');const rs=await syncTicketStatusToHubspot(id,newCol);if(!rs?.ok&&rs?.reason!=='missing_hubspot_ticket_id'){showToast(`HubSpot status sync failed: ${rs?.error||rs?.reason}`);}});});
 document.querySelectorAll('[data-close]').forEach(b=>{b.addEventListener('click',()=>document.getElementById(b.dataset.close).classList.remove('open'));});
 document.querySelectorAll('.modal-bg').forEach(bg=>{bg.addEventListener('click',e=>{if(e.target===bg)bg.classList.remove('open');});});
 
@@ -5035,7 +5160,7 @@ async function openEmailModal(ticket){
   const csOwner=ticketCSOwner[id]||null;
   const csMeta=csOwner?`  CS: ${esc(csOwner)}`:'';
   let metaHtml=isReply?`<span><strong>Client:</strong> ${esc(clientEmail)}</span><span><strong>Replied by:</strong> ${esc(email.sender)}</span>`:`<span><strong>From:</strong> ${esc(email.sender||'')}</span>`;
-  metaHtml+=`<span><strong>Received:</strong> ${fmtDate(email.receivedDateTime)}</span><span><strong>Agent:</strong> ${ticketAssignee[id]||''}${csMeta}</span>`;
+  metaHtml+=`<span><strong>Received:</strong> ${fmtDate(email.receivedDateTime)}</span><span><strong>Support:</strong> ${ticketAssignee[id]||''}${csMeta}</span>`;
   const sla=getSLAStatus(id,ticketPriority[id]||ticket.priority);
   if(sla)metaHtml+=`<span><strong>SLA:</strong> <span style="font-weight:600;color:${sla.overdue?'#dc2626':'#d97706'}"> ${sla.text}</span></span>`;
   const jiraKey=canonicalJiraKey(ticketJira[id]);
@@ -5069,7 +5194,47 @@ function addInternalComment(ticketId,text,tags){if(!postTicketComment(ticketId,t
 document.getElementById('com-post').addEventListener('click',()=>{const text=document.getElementById('com-input').value.trim();if(!text||!comTicketId)return;const tags=[...selectedTags];if(!postTicketComment(comTicketId,text,tags))return;document.getElementById('com-input').value='';selectedTags.clear();document.querySelectorAll('.tag-chip').forEach(c=>c.classList.remove('selected'));if(comTicketId)renderThread(comTicketId);});
 document.getElementById('com-debug-expert').addEventListener('click',async()=>{if(!comTicketId)return;const btn=document.getElementById('com-debug-expert');const ticket=allTickets.find(t=>t.id===comTicketId);if(!ticket)return;const assignee=ticketAssignee[comTicketId]||null;btn.disabled=true;btn.textContent='Analyzing';try{const ce=ticketClientEmail[comTicketId]||getClientEmail(ticket.email)||null;const hs=ce?hsCache[ce]:null;const resp=await fetch('/api/debug-expert',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({ticketId:comTicketId,email:ticket.email,assignee,companyName:hs?.companyName||null})});const out=await resp.json().catch(()=>({}));if(!resp.ok){showToast(`Debug Expert failed: ${out?.error||resp.status}`);return;}const parts=[];parts.push('Debug Expert proposed solution');if(out?.summary)parts.push(out.summary);if(Array.isArray(out?.steps)&&out.steps.length){parts.push('Recommended steps:');out.steps.slice(0,6).forEach((s,i)=>parts.push(`${i+1}. ${s}`));}if(Array.isArray(out?.articles)&&out.articles.length){parts.push('Relevant HubSpot KB articles:');out.articles.slice(0,5).forEach(a=>parts.push(`- ${a.title}${a.url?` (${a.url})`:''}`));}if(Array.isArray(out?.attachmentFindings)&&out.attachmentFindings.length){parts.push('Attachment findings:');out.attachmentFindings.slice(0,5).forEach(a=>parts.push(`- ${a}`));}const tags=assignee?[assignee]:[];addInternalComment(comTicketId,parts.join('\n'),tags);showToast(assignee?`Debug proposal posted and tagged ${assignee}`:'Debug proposal posted','ok');}catch(e){showToast(`Debug Expert error: ${String(e?.message||e)}`);}finally{btn.disabled=false;btn.textContent='Debug Expert';}});
 
-function getMentions(user){const me=normalizeAgentCode(user);const r=[];Object.entries(ticketComments).forEach(([tid,cs])=>{const t=allTickets.find(x=>x.id===tid);cs.forEach((c,ci)=>{if(Array.isArray(c.tags)&&c.tags.map(normalizeAgentCode).includes(me))r.push({ticketId:tid,ci,comment:c,ticket:t,key:`${tid}:${ci}`});});});return r.sort((a,b)=>(b.comment.ts||0)-(a.comment.ts||0));}
+//  Browser push notifications
+let notifySnapshot=null;
+function requestNotificationPermission(){if(typeof Notification==='undefined')return;if(Notification.permission==='default'){Notification.requestPermission().catch(()=>{});}}
+function showBrowserNotification(title,body){if(typeof Notification==='undefined'||Notification.permission!=='granted')return;try{new Notification(title,{body:String(body||'').slice(0,200)});}catch(_){}}
+function snapshotForNotify(s){return{ticketAssignee:{...(s.ticketAssignee||{})},ticketState:{...(s.ticketState||{})},commentCounts:Object.fromEntries(Object.entries(s.ticketComments||{}).map(([id,cs])=>[id,Array.isArray(cs)?cs.length:0])),jiraAlertKeys:new Set((Array.isArray(s.jiraAlerts)?s.jiraAlerts:[]).map(a=>a.key))};}
+async function checkForBrowserNotifications(){
+  if(typeof Notification==='undefined'||Notification.permission!=='granted')return;
+  const s=await apiGetState();
+  if(!s)return;
+  const me=currentUser();
+  const next=snapshotForNotify(s);
+  const prev=notifySnapshot;
+  if(prev){
+    const ticketsById=new Map((Array.isArray(s.allTickets)?s.allTickets:[]).map(t=>[t.id,t]));
+    const ticketLabel=id=>ticketsById.get(id)?.email?.subject||`Ticket ${id}`;
+    Object.entries(next.ticketAssignee).forEach(([id,agent])=>{
+      if(normalizeAgentCode(agent)===me&&prev.ticketAssignee[id]!==agent)showBrowserNotification('Ticket assigned to you',ticketLabel(id));
+    });
+    Object.entries(next.ticketState).forEach(([id,stage])=>{
+      if(!prev.ticketState[id]||prev.ticketState[id]===stage)return;
+      const assignee=normalizeAgentCode(next.ticketAssignee[id]);
+      const csOwner=normalizeAgentCode((s.ticketCSOwner||{})[id]);
+      if(assignee===me||csOwner===me)showBrowserNotification('Ticket moved to '+(COL_NAMES[normalizeTicketStage(stage)]||stage),ticketLabel(id));
+    });
+    Object.entries(next.commentCounts).forEach(([id,count])=>{
+      const prevCount=prev.commentCounts[id]||0;
+      if(count<=prevCount)return;
+      (s.ticketComments[id]||[]).slice(prevCount).forEach(c=>{
+        const tags=(c.tags||[]).map(normalizeAgentCode).filter(Boolean);
+        const forMe=me==='YOU'?tags.length>0:tags.includes(me);
+        if(forMe)showBrowserNotification('New comment on '+ticketLabel(id),c.text||'');
+      });
+    });
+    (Array.isArray(s.jiraAlerts)?s.jiraAlerts:[]).forEach(a=>{
+      if(!prev.jiraAlertKeys.has(a.key)&&a.recipient===me)showBrowserNotification('Jira update: '+(a.jiraKey||''),a.message||a.title||'');
+    });
+  }
+  notifySnapshot=next;
+}
+
+function getMentions(user){const me=normalizeAgentCode(user);const isAdminUser=me==='YOU';const r=[];Object.entries(ticketComments).forEach(([tid,cs])=>{const t=allTickets.find(x=>x.id===tid);cs.forEach((c,ci)=>{const normalizedTags=Array.isArray(c.tags)?c.tags.map(normalizeAgentCode).filter(Boolean):[];const matches=isAdminUser?normalizedTags.length>0:normalizedTags.includes(me);if(matches)r.push({ticketId:tid,ci,comment:c,ticket:t,key:`${tid}:${ci}`});});});return r.sort((a,b)=>(b.comment.ts||0)-(a.comment.ts||0));}
 function unreadMentionCountForTicket(ticketId,user=currentUser()){return getMentions(user).filter(m=>m.ticketId===String(ticketId)&&!readMentions.has(m.key)).length;}
 function unreadAlertCountForTicket(ticketId,user=currentUser()){return unreadMentionCountForTicket(ticketId,user)+unreadJiraAlertCountForTicket(ticketId,user);}
 function getAlertFeed(user=currentUser()){
@@ -5080,7 +5245,7 @@ function getAlertFeed(user=currentUser()){
 function updateMentionsBadge(){const u=getAlertFeed(currentUser()).filter(x=>x.isUnread).length;const badge=document.getElementById('mentions-badge');const btn=document.getElementById('mentions-btn');if(u>0){badge.textContent=u>99?'99+':u;badge.style.display='flex';btn.classList.add('has-mentions');}else{badge.style.display='none';btn.classList.remove('has-mentions');}}
 function markAlertFeedReadForTicket(ticketId,user=currentUser()){getMentions(user).filter(m=>m.ticketId===String(ticketId)).forEach(m=>readMentions.add(m.key));getJiraAlerts(user).filter(a=>a.ticketId===String(ticketId)).forEach(a=>readJiraAlerts.add(a.key));saveReads();}
 function renderMentions(){const me=currentUser();const feed=getAlertFeed(me);const unread=feed.filter(x=>x.isUnread).length;document.getElementById('mentions-title').textContent=' My Alerts  '+me;document.getElementById('mentions-info').textContent=feed.length+' alert'+(feed.length!==1?'s':'')+'  '+(unread>0?unread+' unread':'all read');const list=document.getElementById('mentions-list');if(!feed.length){list.innerHTML='<div class="mentions-empty" style="text-align:center;padding:40px 20px;color:#94a3b8;"><div style="font-size:36px;margin-bottom:10px;"></div><div>No alerts yet</div></div>';return;}list.innerHTML='';feed.forEach(item=>{const ticket=item.ticket||allTickets.find(t=>t.id===item.ticketId)||null;const isUnread=item.isUnread;const card=document.createElement('div');card.className='mention-card'+(isUnread?' unread':'');const ttl=ticket?.email?.subject||'(deleted)';const ce=ticket?ticketClientEmail[ticket.id]:null;const hs=ce?hsCache[ce]:null;const coInfo=hs?.companyName?'   '+hs.companyName+(hs.inferredVia?' ~':''):'';const col=normalizeTicketStage(ticketState[item.ticketId]||'new');const colLabel={new:' New',inp:' In Progress',wus:' Waiting On Us',dft:' Due for test',wct:' Waiting On Contact',res:' Resolved'}[col]||' New';if(item.type==='mention'){const {comment,key}=item;const tagHtml=(comment.tags||[]).filter(t=>t!==CLIENT_TAG).map(t=>`<span class="mention-tag" style="background:${agentColor(t)}">@${t}</span>`).join('');const bg=ALL_AGENTS.includes(comment.author)?agentColor(comment.author):'#64748b';card.innerHTML=`<div class="mention-card-top"><div><div class="mention-ticket">${esc(ttl)}</div><div style="font-size:10px;color:#94a3b8;">${colLabel}${coInfo}</div></div><span class="mention-time">${fmtTime(comment.ts)}</span></div><div class="mention-from"><span class="mention-from-avatar" style="background:${bg}">${esc(comment.author)}</span><strong>${esc(comment.author)}</strong> tagged you</div>${tagHtml?`<div class="mention-tags">${tagHtml}</div>`:''}<div class="mention-comment">${esc(comment.text)}</div><div class="mention-footer">${isUnread?`<button class="btn-mention-mark" data-key="${esc(key)}">Mark read</button>`:''} ${ticket?`<button class="btn-mention-view">View thread </button>`:''}</div>`;card.querySelector('.btn-mention-mark')?.addEventListener('click',()=>{readMentions.add(key);saveReads();renderMentions();updateMentionsBadge();});card.querySelector('.btn-mention-view')?.addEventListener('click',()=>{readMentions.add(key);saveReads();document.getElementById('mentions-modal').classList.remove('open');if(ticket)openComModal(ticket);updateMentionsBadge();});card.addEventListener('click',()=>{if(isUnread){readMentions.add(key);saveReads();card.classList.remove('unread');updateMentionsBadge();}});}else{const alert=item.alert;card.innerHTML=`<div class="mention-card-top"><div><div class="mention-ticket">${esc(ttl)}</div><div style="font-size:10px;color:#94a3b8;">${colLabel}${coInfo}</div></div><span class="mention-time">${fmtTime(alert.ts)}</span></div><div class="mention-from"><span class="mention-from-avatar" style="background:#0ea5e9;">J</span><strong>${esc(alert.title||'Jira update')}</strong></div><div class="mention-comment">${esc(alert.message||'')}</div><div class="mention-footer">${isUnread?`<button class="btn-mention-mark" data-jira-key="${esc(alert.key)}">Mark read</button>`:''} ${ticket?`<button class="btn-mention-view">Open ticket</button>`:''}</div>`;card.querySelector('[data-jira-key]')?.addEventListener('click',()=>{readJiraAlerts.add(alert.key);saveReads();renderMentions();updateMentionsBadge();});card.querySelector('.btn-mention-view')?.addEventListener('click',()=>{readJiraAlerts.add(alert.key);saveReads();document.getElementById('mentions-modal').classList.remove('open');if(ticket)openEmailModal(ticket);updateMentionsBadge();});card.addEventListener('click',()=>{if(isUnread){readJiraAlerts.add(alert.key);saveReads();card.classList.remove('unread');updateMentionsBadge();}});}list.appendChild(card);});}
-document.getElementById('mentions-btn').addEventListener('click',()=>{renderMentions();document.getElementById('mentions-modal').classList.add('open');setTimeout(()=>{getMentions(currentUser()).forEach(m=>{readMentions.add(m.key);});readAllJiraAlertsForUser(currentUser());saveReads();updateMentionsBadge();},2000);});
+document.getElementById('mentions-btn').addEventListener('click',()=>{requestNotificationPermission();renderMentions();document.getElementById('mentions-modal').classList.add('open');setTimeout(()=>{getMentions(currentUser()).forEach(m=>{readMentions.add(m.key);});readAllJiraAlertsForUser(currentUser());saveReads();updateMentionsBadge();},2000);});
 document.getElementById('mark-all-read').addEventListener('click',()=>{getMentions(currentUser()).forEach(m=>{readMentions.add(m.key);});readAllJiraAlertsForUser(currentUser());saveReads();renderMentions();updateMentionsBadge();});
 document.getElementById('account-btn').addEventListener('click',e=>{e.stopPropagation();document.getElementById('account-panel').classList.toggle('open');});
 document.addEventListener('click',e=>{const panel=document.getElementById('account-panel');const menu=e.target.closest('.account-menu');if(!menu&&panel.classList.contains('open'))panel.classList.remove('open');});
@@ -5240,6 +5405,9 @@ async function poll(){if(!hasCowork){startCountdown();return;}const res=await fe
     document.getElementById('meta').textContent='Secure web mode active (manual tickets + board workflow available)';
     updateCompanyFilter();restoreLastWorkspaceSession();updateSpamBadge();updateJiraBadge();
     await refreshLinkedJiraIssues(true);
+    requestNotificationPermission();
+    notifySnapshot=snapshotForNotify({ticketAssignee,ticketState,ticketComments,jiraAlerts,allTickets,ticketCSOwner});
+    setInterval(checkForBrowserNotifications,30000);
     setInterval(refreshSLABadges,60000);
     setInterval(()=>refreshLinkedJiraIssues(true),JIRA_REFRESH_MS);
     window.addEventListener('focus',()=>{void refreshLinkedJiraIssues(true);});
@@ -5259,6 +5427,9 @@ async function poll(){if(!hasCowork){startCountdown();return;}const res=await fe
   updateCompanyFilter();restoreLastWorkspaceSession();updateSpamBadge();updateJiraBadge();startCountdown();
   await refreshLinkedJiraIssues(true);
   enrichWithHubSpot();
+  requestNotificationPermission();
+  notifySnapshot=snapshotForNotify({ticketAssignee,ticketState,ticketComments,jiraAlerts,allTickets,ticketCSOwner});
+  setInterval(checkForBrowserNotifications,30000);
   scheduleCompanyNetworkSync([...collectCompanyIdsFromHsCache()]);
   setInterval(()=>scheduleCompanyNetworkSync([...collectCompanyIdsFromHsCache()]),120000);
   setInterval(()=>syncUnsyncedTicketsToHubspot(),45000);
