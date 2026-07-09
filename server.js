@@ -3605,9 +3605,11 @@ app.delete('/api/mcp/token', requireAuth, async (req, res) => {
   res.json({ ok: true });
 });
 
-// Ticket API surface used by the standalone MCP server (mcp-server/), which
-// forwards the caller's own Bearer token straight through to these routes -
-// every tool call is scoped to exactly what that Kanban user can already do.
+// Ticket API surface backing the Claude MCP connector - reached either via
+// the plain REST routes below (used by the standalone mcp-server/ service,
+// which forwards the caller's own Bearer token straight through) or directly
+// via the in-process /mcp route further down. Both paths call the same
+// mcp*() functions so there's exactly one implementation of each operation.
 const mcpApiLimiter = rateLimit({ windowMs: 60 * 1000, max: 60, standardHeaders: true, legacyHeaders: false });
 const MCP_TICKET_SELECT = {
   id: true, externalId: true, subject: true, senderName: true, senderEmail: true, companyName: true,
@@ -3615,8 +3617,8 @@ const MCP_TICKET_SELECT = {
   hubspotTicketId: true, createdAt: true, updatedAt: true, resolvedAt: true
 };
 const MCP_WRITABLE_STATUSES = new Set(['New', 'In Progress', 'Waiting on Us', 'Due for Test', 'Waiting on Contact', 'Resolved']);
-app.get('/api/mcp/tickets', requireApiToken, mcpApiLimiter, async (req, res) => {
-  const { status, assignee, q } = req.query;
+
+async function mcpListTickets({ status, assignee, q, limit }) {
   const where = {};
   if (status) where.status = String(status);
   if (assignee) where.assignedAgent = String(assignee).trim().toUpperCase();
@@ -3628,60 +3630,48 @@ app.get('/api/mcp/tickets', requireApiToken, mcpApiLimiter, async (req, res) => 
       { senderEmail: { contains: term, mode: 'insensitive' } }
     ];
   }
-  const limit = Math.min(Number(req.query.limit) || 50, 200);
-  const tickets = await prisma.ticket.findMany({ where, take: limit, orderBy: { updatedAt: 'desc' }, select: MCP_TICKET_SELECT });
-  res.json({ tickets });
-});
-app.get('/api/mcp/tickets/:id', requireApiToken, mcpApiLimiter, async (req, res) => {
-  const id = Number(req.params.id);
-  if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: 'invalid_ticket_id' });
-  const ticket = await prisma.ticket.findUnique({
-    where: { id },
-    include: { comments: { orderBy: { createdAt: 'asc' } } }
-  });
-  if (!ticket) return res.status(404).json({ error: 'ticket_not_found' });
-  res.json({ ticket });
-});
-app.post('/api/mcp/tickets/:id/comments', requireApiToken, mcpApiLimiter, async (req, res) => {
-  const id = Number(req.params.id);
-  const text = String(req.body?.text || '').trim();
-  if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: 'invalid_ticket_id' });
-  if (!text) return res.status(400).json({ error: 'text_required' });
+  const take = Math.min(Number(limit) || 50, 200);
+  return prisma.ticket.findMany({ where, take, orderBy: { updatedAt: 'desc' }, select: MCP_TICKET_SELECT });
+}
+
+async function mcpGetTicket(id) {
+  if (!Number.isInteger(id) || id <= 0) throw Object.assign(new Error('invalid_ticket_id'), { status: 400 });
+  const ticket = await prisma.ticket.findUnique({ where: { id }, include: { comments: { orderBy: { createdAt: 'asc' } } } });
+  if (!ticket) throw Object.assign(new Error('ticket_not_found'), { status: 404 });
+  return ticket;
+}
+
+async function mcpAddComment(apiUser, id, rawText) {
+  const text = String(rawText || '').trim();
+  if (!Number.isInteger(id) || id <= 0) throw Object.assign(new Error('invalid_ticket_id'), { status: 400 });
+  if (!text) throw Object.assign(new Error('text_required'), { status: 400 });
   const ticket = await prisma.ticket.findUnique({ where: { id } });
-  if (!ticket) return res.status(404).json({ error: 'ticket_not_found' });
-  const comment = await prisma.ticketComment.create({
-    data: { ticketId: id, userId: req.apiUser.id, comment: text, isInternal: true }
-  });
-  await createTicketAuditEvent({ ticketId: id, userId: req.apiUser.id, eventType: 'comment_added', newValue: text.slice(0, 200), metadata: { via: 'mcp' } });
-  res.json({ ok: true, comment });
-});
-app.patch('/api/mcp/tickets/:id', requireApiToken, mcpApiLimiter, async (req, res) => {
-  const id = Number(req.params.id);
-  if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: 'invalid_ticket_id' });
+  if (!ticket) throw Object.assign(new Error('ticket_not_found'), { status: 404 });
+  const comment = await prisma.ticketComment.create({ data: { ticketId: id, userId: apiUser.id, comment: text, isInternal: true } });
+  await createTicketAuditEvent({ ticketId: id, userId: apiUser.id, eventType: 'comment_added', newValue: text.slice(0, 200), metadata: { via: 'mcp' } });
+  return comment;
+}
+
+async function mcpUpdateTicket(apiUser, id, fields) {
+  if (!Number.isInteger(id) || id <= 0) throw Object.assign(new Error('invalid_ticket_id'), { status: 400 });
   const existingTicket = await prisma.ticket.findUnique({ where: { id } });
-  if (!existingTicket) return res.status(404).json({ error: 'ticket_not_found' });
+  if (!existingTicket) throw Object.assign(new Error('ticket_not_found'), { status: 404 });
 
   const data = {};
-  if (req.body?.status !== undefined) {
-    const status = String(req.body.status || '').trim();
-    if (!MCP_WRITABLE_STATUSES.has(status)) return res.status(400).json({ error: 'invalid_status' });
+  if (fields?.status !== undefined) {
+    const status = String(fields.status || '').trim();
+    if (!MCP_WRITABLE_STATUSES.has(status)) throw Object.assign(new Error('invalid_status'), { status: 400 });
     data.status = status;
     data.resolvedAt = status === 'Resolved' ? new Date() : null;
     if (status !== 'Resolved') data.resolvedTeamsNotifiedAt = null;
   }
-  if (req.body?.assignedAgent !== undefined) data.assignedAgent = req.body.assignedAgent ? String(req.body.assignedAgent).trim().toUpperCase() : null;
-  if (req.body?.csAgent !== undefined) data.csAgent = req.body.csAgent ? String(req.body.csAgent).trim().toUpperCase() : null;
-  if (req.body?.priority !== undefined) data.priority = String(req.body.priority || 'Normal').trim();
-  if (!Object.keys(data).length) return res.status(400).json({ error: 'no_fields' });
+  if (fields?.assignedAgent !== undefined) data.assignedAgent = fields.assignedAgent ? String(fields.assignedAgent).trim().toUpperCase() : null;
+  if (fields?.csAgent !== undefined) data.csAgent = fields.csAgent ? String(fields.csAgent).trim().toUpperCase() : null;
+  if (fields?.priority !== undefined) data.priority = String(fields.priority || 'Normal').trim();
+  if (!Object.keys(data).length) throw Object.assign(new Error('no_fields'), { status: 400 });
 
   const updated = await prisma.ticket.update({ where: { id }, data });
-  await auditTicketChanges({
-    ticketId: id,
-    userId: req.apiUser.id,
-    before: existingTicket,
-    after: updated,
-    fields: ['status', 'assignedAgent', 'csAgent', 'priority']
-  });
+  await auditTicketChanges({ ticketId: id, userId: apiUser.id, before: existingTicket, after: updated, fields: ['status', 'assignedAgent', 'csAgent', 'priority'] });
 
   if (data.status === 'Resolved' && existingTicket.status !== 'Resolved') {
     const alert = await claimResolvedTeamsAlert({
@@ -3697,7 +3687,132 @@ app.patch('/api/mcp/tickets/:id', requireApiToken, mcpApiLimiter, async (req, re
     if (alert) void sendResolvedTeamsNotifications([alert]).catch((error) => console.warn('Resolved Teams notification failed:', error?.message || error));
   }
 
-  res.json({ ok: true, ticket: updated });
+  return updated;
+}
+
+function mcpHttpErrorStatus(error) {
+  return Number.isInteger(error?.status) ? error.status : 500;
+}
+
+app.get('/api/mcp/tickets', requireApiToken, mcpApiLimiter, async (req, res) => {
+  const tickets = await mcpListTickets(req.query);
+  res.json({ tickets });
+});
+app.get('/api/mcp/tickets/:id', requireApiToken, mcpApiLimiter, async (req, res) => {
+  try {
+    const ticket = await mcpGetTicket(Number(req.params.id));
+    res.json({ ticket });
+  } catch (error) {
+    res.status(mcpHttpErrorStatus(error)).json({ error: error.message });
+  }
+});
+app.post('/api/mcp/tickets/:id/comments', requireApiToken, mcpApiLimiter, async (req, res) => {
+  try {
+    const comment = await mcpAddComment(req.apiUser, Number(req.params.id), req.body?.text);
+    res.json({ ok: true, comment });
+  } catch (error) {
+    res.status(mcpHttpErrorStatus(error)).json({ error: error.message });
+  }
+});
+app.patch('/api/mcp/tickets/:id', requireApiToken, mcpApiLimiter, async (req, res) => {
+  try {
+    const updated = await mcpUpdateTicket(req.apiUser, Number(req.params.id), req.body || {});
+    res.json({ ok: true, ticket: updated });
+  } catch (error) {
+    res.status(mcpHttpErrorStatus(error)).json({ error: error.message });
+  }
+});
+
+// In-process MCP protocol endpoint - the same Bearer token used above, but
+// speaking actual MCP (JSON-RPC over Streamable HTTP) so it can be added as
+// a Claude custom connector directly, with no separate service to deploy.
+const TICKET_STATUS_ENUM = ['New', 'In Progress', 'Waiting on Us', 'Due for Test', 'Waiting on Contact', 'Resolved'];
+let mcpSdkModules = null;
+async function loadMcpSdk() {
+  if (!mcpSdkModules) {
+    const [{ McpServer }, { StreamableHTTPServerTransport }, { z }] = await Promise.all([
+      import('@modelcontextprotocol/sdk/server/mcp.js'),
+      import('@modelcontextprotocol/sdk/server/streamableHttp.js'),
+      import('zod')
+    ]);
+    mcpSdkModules = { McpServer, StreamableHTTPServerTransport, z };
+  }
+  return mcpSdkModules;
+}
+function mcpTextResult(value) {
+  return { content: [{ type: 'text', text: typeof value === 'string' ? value : JSON.stringify(value, null, 2) }] };
+}
+function mcpErrorResult(error) {
+  return { content: [{ type: 'text', text: error?.message || String(error) }], isError: true };
+}
+function buildKanbanMcpServer(apiUser, { McpServer, z }) {
+  const server = new McpServer({ name: 'support-kanban', version: '1.0.0' });
+
+  server.registerTool(
+    'list_tickets',
+    {
+      title: 'List support tickets',
+      description: 'List/search tickets on the Support Kanban board. Filter by status, assignee, or a free-text search term.',
+      inputSchema: {
+        status: z.enum(TICKET_STATUS_ENUM).optional(),
+        assignee: z.string().optional().describe('Agent trigram, e.g. MBH'),
+        q: z.string().optional().describe('Free-text search over subject, company name, and sender email'),
+        limit: z.number().int().min(1).max(200).optional()
+      }
+    },
+    async (args) => {
+      try { return mcpTextResult(await mcpListTickets(args)); } catch (error) { return mcpErrorResult(error); }
+    }
+  );
+
+  server.registerTool(
+    'get_ticket',
+    { title: 'Get ticket detail', description: 'Get full detail for one ticket, including its comments.', inputSchema: { ticketId: z.number().int().positive() } },
+    async ({ ticketId }) => {
+      try { return mcpTextResult(await mcpGetTicket(ticketId)); } catch (error) { return mcpErrorResult(error); }
+    }
+  );
+
+  server.registerTool(
+    'add_comment',
+    { title: 'Add a comment to a ticket', description: 'Add an internal comment to a ticket.', inputSchema: { ticketId: z.number().int().positive(), text: z.string().min(1) } },
+    async ({ ticketId, text }) => {
+      try { return mcpTextResult(await mcpAddComment(apiUser, ticketId, text)); } catch (error) { return mcpErrorResult(error); }
+    }
+  );
+
+  server.registerTool(
+    'update_ticket',
+    {
+      title: 'Update a ticket',
+      description: 'Move a ticket to a new stage, (re)assign it, or change its priority. Only send the fields you want to change.',
+      inputSchema: {
+        ticketId: z.number().int().positive(),
+        status: z.enum(TICKET_STATUS_ENUM).optional(),
+        assignedAgent: z.string().optional().describe('Agent trigram to assign, or empty string to unassign'),
+        csAgent: z.string().optional().describe('CS owner trigram, or empty string to clear'),
+        priority: z.enum(['Low', 'Normal', 'High', 'Urgent']).optional()
+      }
+    },
+    async ({ ticketId, ...fields }) => {
+      try { return mcpTextResult(await mcpUpdateTicket(apiUser, ticketId, fields)); } catch (error) { return mcpErrorResult(error); }
+    }
+  );
+
+  return server;
+}
+app.post('/mcp', requireApiToken, mcpApiLimiter, async (req, res) => {
+  try {
+    const sdk = await loadMcpSdk();
+    const server = buildKanbanMcpServer(req.apiUser, sdk);
+    const transport = new sdk.StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+    res.on('close', () => { transport.close(); server.close(); });
+    await server.connect(transport);
+    await transport.handleRequest(req, res, req.body);
+  } catch (error) {
+    console.error('MCP request failed:', error);
+    if (!res.headersSent) res.status(500).json({ jsonrpc: '2.0', error: { code: -32603, message: 'Internal server error' }, id: null });
+  }
 });
 
 app.get('/api/state', requireAuth, async (req, res) => {
