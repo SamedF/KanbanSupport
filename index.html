@@ -3025,13 +3025,25 @@ if(window.location.protocol==='file:'){
 if(!window.cowork||typeof window.cowork.callMcpTool!=='function'){
   window.cowork={
     callMcpTool:async(tool,args={})=>{
-      const res=await fetch('/api/mcp-proxy',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({tool,args})});
-      if(!res.ok){
-        let msg='proxy_error';
-        try{const j=await res.json();msg=j.error||msg;}catch(_){}
-        return{isError:true,error:msg};
+      // A 502/503/504 here is the ingress/proxy dropping a request, not the
+      // underlying integration (Outlook/HubSpot) actually failing - retry a
+      // couple of times with backoff before surfacing it as a real error,
+      // since a single transient gateway hiccup was showing up as a
+      // misleading "sync error" for an integration that's actually fine.
+      const RETRYABLE_STATUS=new Set([502,503,504]);
+      for(let attempt=0;attempt<3;attempt++){
+        try{
+          const res=await fetch('/api/mcp-proxy',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({tool,args})});
+          if(res.ok)return res.json();
+          if(RETRYABLE_STATUS.has(res.status)&&attempt<2){await new Promise(r=>setTimeout(r,500*(attempt+1)));continue;}
+          let msg='proxy_error';
+          try{const j=await res.json();msg=j.error||msg;}catch(_){}
+          return{isError:true,error:msg};
+        }catch(e){
+          if(attempt<2){await new Promise(r=>setTimeout(r,500*(attempt+1)));continue;}
+          return{isError:true,error:String(e?.message||e)};
+        }
       }
-      return res.json();
     }
   };
 }
