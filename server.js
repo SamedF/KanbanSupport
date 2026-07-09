@@ -784,54 +784,17 @@ async function safeWriteState(state) {
   };
   pruneResolvedHiddenTickets(nextState);
 
-  // Whether a ticket has already had its "Resolved" Teams DM sent - a plain
-  // boolean, reset only when the ticket leaves Resolved. Using the ticket's
-  // touched-at timestamp as an idempotency key (as this used to) was fragile:
-  // that timestamp can legitimately drift for reasons unrelated to the
-  // resolve event itself (e.g. a later comment bumping the DB row), which
-  // made an already-notified ticket look "not yet notified" again and
-  // re-sent the DM for a ticket that had been sitting in Resolved for a while.
-  const previousTeamsMeta = (currentMeta.teamsResolvedNotified && typeof currentMeta.teamsResolvedNotified === 'object') ? currentMeta.teamsResolvedNotified : {};
-  const teamsResolvedNotified = { ...previousTeamsMeta };
-  const ticketsById = new Map(
-    (Array.isArray(nextState.allTickets) ? nextState.allTickets : [])
-      .filter(ticket => ticket && ticket.id)
-      .map(ticket => [String(ticket.id), ticket])
-  );
-  const pendingResolvedTeamsAlerts = [];
-  stageIds.forEach((ticketId) => {
-    const nextStage = normalizeBoardStatusForDb(mergedStages[ticketId] || 'new');
-    const prevStage = normalizeBoardStatusForDb(currentStages[ticketId] || 'new');
-    const category = String((nextState.ticketCategory && nextState.ticketCategory[ticketId]) || '').trim().toLowerCase();
-    if (nextStage !== 'Resolved' || category === 'spam') {
-      delete teamsResolvedNotified[ticketId];
-      return;
-    }
-    if (prevStage === 'Resolved' || teamsResolvedNotified[ticketId]) return; // already resolved and/or already notified - nothing new happened
-    const csOwner = String((nextState.ticketCSOwner && nextState.ticketCSOwner[ticketId]) || '').trim().toUpperCase();
-    if (!csOwner) return;
-    const ticket = ticketsById.get(ticketId) || null;
-    pendingResolvedTeamsAlerts.push({
-      ticketId,
-      csOwner,
-      ticketNumber: nextState.ticketNumbers && nextState.ticketNumbers[ticketId] ? String(nextState.ticketNumbers[ticketId]) : null,
-      subject: String(ticket?.email?.subject || '(no subject)').trim(),
-      companyName: String((nextState.hsCache && nextState.ticketClientEmail && nextState.ticketClientEmail[ticketId] && nextState.hsCache[nextState.ticketClientEmail[ticketId]]?.companyName) || '').trim() || null,
-      jiraKey: String((nextState.ticketJira && nextState.ticketJira[ticketId]) || '').trim() || null,
-      assignee: String((nextState.ticketAssignee && nextState.ticketAssignee[ticketId]) || '').trim() || null
-    });
-    // Mark as notified synchronously, before the webhook even fires. Any save
-    // that lands while the webhook call is still in flight (very likely -
-    // every drag/comment/poll triggers a save) would otherwise re-read this
-    // same "not yet notified" state from disk and queue a second send.
-    teamsResolvedNotified[ticketId] = true;
-  });
-
+  // The "Resolved" Teams DM is no longer tracked here at all - it moved to
+  // an atomic, DB-level claim in upsertBoardTicketsToDatabase (a dedicated
+  // Ticket.resolvedTeamsNotifiedAt column, checked-and-set in one UPDATE).
+  // Tracking it in this JSON file via read-then-write raced under concurrent
+  // saves (multiple agents' tabs, or a poll cycle overlapping a user action):
+  // each one could read "not yet notified" before any of them had written it
+  // back, so the same resolve event fired the DM repeatedly.
   const now = Date.now();
   const enrichedMeta = {
     ...(isStale ? currentMeta : incomingMeta),
-    serverSavedAt: now,
-    teamsResolvedNotified
+    serverSavedAt: now
   };
   // A stale snapshot (e.g. from a lagging tab) must not blindly overwrite
   // fields it didn't correctly merge - keep the current state as the base and
@@ -854,13 +817,7 @@ async function safeWriteState(state) {
     backupCreated = true;
   }
 
-  if (pendingResolvedTeamsAlerts.length) {
-    void sendResolvedTeamsNotifications(pendingResolvedTeamsAlerts).catch((error) => {
-      console.warn('Resolved Teams notifications failed:', error?.message || error);
-    });
-  }
-
-  return { saved: true, partial: isStale, backupCreated, resolvedTeamsAlertsQueued: pendingResolvedTeamsAlerts.length, state: finalState };
+  return { saved: true, partial: isStale, backupCreated, state: finalState };
 }
 async function hydrateStateFromDatabase(baseState = {}) {
   const state = (baseState && typeof baseState === 'object') ? JSON.parse(JSON.stringify(baseState)) : {};
@@ -1766,6 +1723,7 @@ async function upsertBoardTicketsToDatabase(state, req) {
   const existingByExternalId = new Map(existingTickets.map(t => [t.externalId, t]));
 
   let count = 0;
+  const pendingResolvedTeamsAlerts = [];
 
   for (const item of allTickets) {
     if (!item || !item.id) continue;
@@ -1850,9 +1808,38 @@ async function upsertBoardTicketsToDatabase(state, req) {
         jiraTicketKey,
         body,
         emailRaw: email,
-        resolvedAt: status === 'Resolved' ? new Date() : null
+        resolvedAt: status === 'Resolved' ? new Date() : null,
+        // Leave untouched (undefined) while staying Resolved - the atomic
+        // claim above owns setting it. Reset to null on leaving Resolved so
+        // a genuine future re-resolve (e.g. after a CS "send back") can
+        // notify again instead of being silently claimed forever.
+        resolvedTeamsNotifiedAt: status === 'Resolved' ? undefined : null
       }
     });
+
+    // Atomic, DB-level claim for the Resolved Teams DM: a dedicated column
+    // checked-and-set in a single UPDATE, not a JSON-file read-then-write.
+    // The JSON-file version raced under concurrent saves (multiple agents'
+    // tabs, or a poll cycle overlapping a user action) - each one could read
+    // "not yet notified" before any of them had written it back, so the same
+    // resolve event fired the DM repeatedly (as often as saves landed).
+    if (status === 'Resolved' && category !== 'spam') {
+      const csOwnerForAlert = String(csAgent || '').trim().toUpperCase();
+      if (csOwnerForAlert) {
+        const claimedRows = await prisma.$executeRaw`UPDATE "Ticket" SET "resolvedTeamsNotifiedAt" = NOW() WHERE id = ${ticket.id} AND "resolvedTeamsNotifiedAt" IS NULL`;
+        if (claimedRows > 0) {
+          pendingResolvedTeamsAlerts.push({
+            ticketId: externalId,
+            csOwner: csOwnerForAlert,
+            ticketNumber: state.ticketNumbers && state.ticketNumbers[externalId] ? String(state.ticketNumbers[externalId]) : null,
+            subject,
+            companyName,
+            jiraKey: jiraTicketKey,
+            assignee: assignedAgent
+          });
+        }
+      }
+    }
 
     if (!existingTicket) {
       await createTicketAuditEvent({
@@ -1900,7 +1887,13 @@ async function upsertBoardTicketsToDatabase(state, req) {
     }).catch(() => null);
   }
 
-  return { count };
+  if (pendingResolvedTeamsAlerts.length) {
+    void sendResolvedTeamsNotifications(pendingResolvedTeamsAlerts).catch((error) => {
+      console.warn('Resolved Teams notifications failed:', error?.message || error);
+    });
+  }
+
+  return { count, resolvedTeamsAlertsQueued: pendingResolvedTeamsAlerts.length };
 }
 
 app.get('/favicon.svg', (req, res) => {
