@@ -927,7 +927,8 @@ async function hydrateStateFromDatabase(baseState = {}) {
         comment: comment.comment,
         ts: comment.createdAt?.toISOString?.() || new Date().toISOString(),
         createdAt: comment.createdAt?.toISOString?.() || new Date().toISOString(),
-        isInternal: comment.isInternal !== false
+        isInternal: comment.isInternal !== false,
+        tags: Array.isArray(comment.tags) ? comment.tags : []
       }));
     }
   }
@@ -1788,7 +1789,7 @@ async function upsertBoardTicketsToDatabase(state, req) {
     const comments = Array.isArray(ticketComments[externalId]) ? ticketComments[externalId] : [];
     const existingCommentTexts = new Set((existingTicket?.comments || []).map(c => c.comment));
     const newComments = comments
-      .map(c => ({ text: String(c?.text || c?.comment || '').trim(), ts: c?.ts || c?.createdAt }))
+      .map(c => ({ text: String(c?.text || c?.comment || '').trim(), ts: c?.ts || c?.createdAt, tags: Array.isArray(c?.tags) ? c.tags.map(t => String(t)).filter(Boolean) : [] }))
       .filter(c => c.text && !existingCommentTexts.has(c.text));
 
     const fieldsUnchanged = existingTicket
@@ -1896,6 +1897,7 @@ async function upsertBoardTicketsToDatabase(state, req) {
           userId: req?.session?.userId || null,
           comment: comment.text,
           isInternal: true,
+          tags: comment.tags,
           createdAt: safeDateForDb(comment.ts) || new Date()
         }
       });
