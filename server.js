@@ -3803,7 +3803,7 @@ function buildKanbanMcpServer(apiUser, { McpServer, z }) {
 
   return server;
 }
-app.post('/mcp', requireApiToken, mcpApiLimiter, async (req, res) => {
+async function handleMcpRequest(req, res) {
   try {
     const sdk = await loadMcpSdk();
     const server = buildKanbanMcpServer(req.apiUser, sdk);
@@ -3815,7 +3815,16 @@ app.post('/mcp', requireApiToken, mcpApiLimiter, async (req, res) => {
     console.error('MCP request failed:', error);
     if (!res.headersSent) res.status(500).json({ jsonrpc: '2.0', error: { code: -32603, message: 'Internal server error' }, id: null });
   }
-});
+}
+app.post('/mcp', requireApiToken, mcpApiLimiter, handleMcpRequest);
+// Same endpoint, different path - kept distinct from /mcp because Claude's
+// connector UI deduplicates custom connectors by URL. The org already has a
+// "Quinta Support Kanban" connector registered at /mcp configured for OAuth
+// (which this app doesn't implement), so any plugin pointing back at that
+// same URL inherits that broken OAuth requirement instead of using its own
+// Bearer-token header. This path lets the personal-token plugin connect
+// without colliding with that org-level registration.
+app.post('/mcp-plugin', requireApiToken, mcpApiLimiter, handleMcpRequest);
 
 app.get('/api/state', requireAuth, async (req, res) => {
   try {
