@@ -128,7 +128,26 @@ if (IS_PRODUCTION && SESSION_SECRET === 'change-this-session-secret') {
   throw new Error('Refusing to start in production with the default SESSION_SECRET.');
 }
 
-app.use(helmet({ contentSecurityPolicy: false }));
+// script-src/style-src keep 'unsafe-inline' - this app relies on inline
+// <script> blocks across many server-rendered pages (login, profile,
+// reset-password, admin/users, index.html itself), and removing that would
+// need a much larger nonce-based refactor that isn't safe to attempt
+// untested right before a prod deploy. The other directives (object-src,
+// base-uri, frame-ancestors) are free wins with zero behavior change.
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      scriptSrc: ["'self'", "'unsafe-inline'"],
+      styleSrc: ["'self'", "'unsafe-inline'"],
+      imgSrc: ["'self'", 'data:', 'https:'],
+      connectSrc: ["'self'", 'https:'],
+      objectSrc: ["'none'"],
+      baseUri: ["'self'"],
+      frameAncestors: ["'self'"]
+    }
+  }
+}));
 app.use(express.json({ limit: '4mb' }));
 fs.mkdirSync(AVATAR_UPLOAD_DIR, { recursive: true });
 // The default express-session MemoryStore keeps every session in the Node
@@ -1940,7 +1959,12 @@ app.get('/favicon.ico', (req, res) => {
 app.get('/login', (req, res) => isAuthed(req) ? res.redirect('/') : res.type('html').sendFile(path.join(__dirname, 'public', 'login.html')));
 
 function renderResetPasswordPage(token) {
-  const safeTokenJson = JSON.stringify(String(token || ''));
+  // Base64-encode (not JSON.stringify) before embedding in the inline
+  // <script> block: JSON.stringify does not escape "</script>", so a raw
+  // ?token=</script><script>...</script> could break out of the block and
+  // execute attacker JS. Base64 output only ever contains [A-Za-z0-9+/=],
+  // which can never form that sequence.
+  const base64TokenJson = JSON.stringify(Buffer.from(String(token || ''), 'utf8').toString('base64'));
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -1977,7 +2001,11 @@ function renderResetPasswordPage(token) {
     <p style="margin-top:14px;margin-bottom:0;"><a href="/login">Back to sign in</a></p>
   </form>
   <script>
-    const resetToken = ${safeTokenJson};
+    // safeTokenJson is a JSON string literal - JSON.stringify does not escape
+    // "</script>", so a raw ?token=</script><script>...</script> could break
+    // out of this block. Base64-encode it and decode at runtime instead of
+    // embedding the raw JSON, so the script body can never contain "</script".
+    const resetToken = atob(${base64TokenJson});
     const form = document.getElementById('reset-form');
     const msg = document.getElementById('msg');
     const btn = document.getElementById('submit-btn');
