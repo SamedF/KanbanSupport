@@ -75,6 +75,7 @@ model TicketComment {
   userId     Int?
   comment    String
   isInternal Boolean  @default(true)
+  tags       String[] @default([])
   createdAt  DateTime @default(now())
 
   ticket     Ticket   @relation(fields: [ticketId], references: [id], onDelete: Cascade)
