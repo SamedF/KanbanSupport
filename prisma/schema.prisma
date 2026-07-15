@@ -17,9 +17,10 @@ model User {
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
-  comments     TicketComment[]
-  events       TicketEvent[]
-  apiTokens    ApiToken[]
+  comments      TicketComment[]
+  events        TicketEvent[]
+  apiTokens     ApiToken[]
+  oauthAuthCodes OAuthAuthCode[]
 }
 
 model ApiToken {
@@ -32,6 +33,42 @@ model ApiToken {
   revokedAt  DateTime?
 
   user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+// Dynamically registered per RFC 7591 - each Claude connector instance
+// (personal or org-wide) self-registers once and gets its own clientId,
+// bound to the exact redirectUris it registered with. authorize/token both
+// strictly enforce that binding, so a registered client can never be used
+// to redirect anywhere except where it originally declared.
+model OAuthClient {
+  id           Int      @id @default(autoincrement())
+  clientId     String   @unique
+  clientName   String?
+  redirectUris String[]
+  createdAt    DateTime @default(now())
+
+  authCodes    OAuthAuthCode[]
+}
+
+// Short-lived, single-use authorization code (PKCE, S256 only). Hashed at
+// rest like ApiToken/password-reset tokens - the raw code only ever exists
+// in the redirect URL and the immediate token-exchange request.
+model OAuthAuthCode {
+  id                  Int       @id @default(autoincrement())
+  codeHash            String    @unique
+  clientId            Int
+  userId              Int
+  redirectUri          String
+  codeChallenge        String
+  codeChallengeMethod  String
+  expiresAt            DateTime
+  usedAt               DateTime?
+  createdAt            DateTime  @default(now())
+
+  client               OAuthClient @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  user                 User        @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
 }
