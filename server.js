@@ -908,6 +908,10 @@ async function hydrateStateFromDatabase(baseState = {}) {
   state.ticketCreatedAt = (state.ticketCreatedAt && typeof state.ticketCreatedAt === 'object') ? state.ticketCreatedAt : {};
   state.ticketJira = (state.ticketJira && typeof state.ticketJira === 'object') ? state.ticketJira : {};
   state.ticketHubspotId = (state.ticketHubspotId && typeof state.ticketHubspotId === 'object') ? state.ticketHubspotId : {};
+  // Postgres (Ticket.displayNumber) is the source of truth for this, not
+  // whatever the client last sent - always overwritten below so the board
+  // and MCP tools can never drift apart on what a ticket's number is.
+  state.ticketNumbers = (state.ticketNumbers && typeof state.ticketNumbers === 'object') ? state.ticketNumbers : {};
 
   for (const ticket of tickets) {
     const externalId = String(ticket.externalId || ticket.emailMessageId || ticket.id);
@@ -953,6 +957,7 @@ async function hydrateStateFromDatabase(baseState = {}) {
     if (ticket.createdAt) state.ticketCreatedAt[externalId] = ticket.createdAt.toISOString();
     if (ticket.jiraTicketKey) state.ticketJira[externalId] = ticket.jiraTicketKey;
     if (ticket.hubspotTicketId) state.ticketHubspotId[externalId] = ticket.hubspotTicketId;
+    if (ticket.displayNumber) state.ticketNumbers[externalId] = ticket.displayNumber;
     if (Array.isArray(ticket.comments) && ticket.comments.length) {
       state.ticketComments[externalId] = ticket.comments.map(comment => ({
         text: comment.comment,
@@ -3655,30 +3660,25 @@ app.delete('/api/mcp/token', requireAuth, async (req, res) => {
 // mcp*() functions so there's exactly one implementation of each operation.
 const mcpApiLimiter = rateLimit({ windowMs: 60 * 1000, max: 60, standardHeaders: true, legacyHeaders: false });
 const MCP_TICKET_SELECT = {
-  id: true, externalId: true, subject: true, senderName: true, senderEmail: true, companyName: true,
+  id: true, externalId: true, displayNumber: true, subject: true, senderName: true, senderEmail: true, companyName: true,
   status: true, priority: true, category: true, assignedAgent: true, csAgent: true, jiraTicketKey: true,
   hubspotTicketId: true, createdAt: true, updatedAt: true, resolvedAt: true
 };
 const MCP_WRITABLE_STATUSES = new Set(['New', 'In Progress', 'Waiting on Us', 'Due for Test', 'Waiting on Contact', 'Resolved']);
 
-// The board shows agents a short display number (e.g. "#0042", assigned
-// client-side in index.html's ensureTicketNumber and only ever persisted in
-// the ephemeral board-state file, never in Postgres) - completely different
-// from Ticket.id (the DB primary key) and externalId (a long Outlook message
-// ID). MCP tools used to only expose the DB id, so Claude had no way to know
-// it wasn't the number agents actually mean when they say "ticket 42". This
-// looks it up from the same state file the board itself reads, so it always
-// matches what's currently shown on screen.
-function ticketDisplayNumberFor(externalId) {
-  const state = safeReadState();
-  const numbers = (state.ticketNumbers && typeof state.ticketNumbers === 'object') ? state.ticketNumbers : {};
-  const n = Number(numbers[String(externalId || '')] || 0);
-  return n > 0 ? `#${String(n).padStart(4, '0')}` : null;
-}
+// The board shows agents a short display number (e.g. "#0042") - completely
+// different from Ticket.id (the DB primary key) and externalId (a long
+// Outlook message ID). MCP tools used to only expose the DB id, so Claude
+// had no way to know it wasn't the number agents actually mean when they say
+// "ticket 42". Ticket.displayNumber is Postgres-assigned (its own sequence,
+// atomic, survives restarts) - hydrateStateFromDatabase seeds it into the
+// same ticketNumbers map the board's own ensureTicketNumber() already reads,
+// so the board and MCP always agree on the same number with no frontend
+// changes needed.
 function withMcpTicketNumber(ticket) {
   if (!ticket) return ticket;
-  const { id, ...rest } = ticket;
-  return { ticketNumber: ticketDisplayNumberFor(ticket.externalId), internalId: id, ...rest };
+  const { id, displayNumber, ...rest } = ticket;
+  return { ticketNumber: displayNumber ? `#${String(displayNumber).padStart(4, '0')}` : null, internalId: id, ...rest };
 }
 
 async function mcpListTickets({ status, assignee, q, limit }) {

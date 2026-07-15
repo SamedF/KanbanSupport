@@ -95,6 +95,11 @@ model Ticket {
   updatedAt       DateTime  @updatedAt
   resolvedAt      DateTime?
   resolvedTeamsNotifiedAt DateTime?
+  // The short "#0042"-style number agents actually use to refer to a
+  // ticket - durable (Postgres-assigned via its own sequence, backfilled
+  // for existing rows), unlike the old client-only ephemeral counter this
+  // replaces. Not the @id - that stays the internal DB primary key.
+  displayNumber   Int?      @unique
 
   comments        TicketComment[]
   events          TicketEvent[]
