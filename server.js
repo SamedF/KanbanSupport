@@ -128,7 +128,27 @@ if (IS_PRODUCTION && SESSION_SECRET === 'change-this-session-secret') {
   throw new Error('Refusing to start in production with the default SESSION_SECRET.');
 }
 
-app.use(helmet({ contentSecurityPolicy: false }));
+// script-src/style-src keep 'unsafe-inline' - this app relies on inline
+// <script> blocks across many server-rendered pages (login, profile,
+// reset-password, admin/users, index.html itself), and removing that would
+// need a much larger nonce-based refactor that isn't safe to attempt
+// untested right before a prod deploy. The other directives (object-src,
+// base-uri, frame-ancestors) are free wins with zero behavior change.
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      scriptSrc: ["'self'", "'unsafe-inline'"],
+      styleSrc: ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
+      fontSrc: ["'self'", 'https://fonts.gstatic.com'],
+      imgSrc: ["'self'", 'data:', 'https:'],
+      connectSrc: ["'self'", 'https:'],
+      objectSrc: ["'none'"],
+      baseUri: ["'self'"],
+      frameAncestors: ["'self'"]
+    }
+  }
+}));
 app.use(express.json({ limit: '4mb' }));
 fs.mkdirSync(AVATAR_UPLOAD_DIR, { recursive: true });
 // The default express-session MemoryStore keeps every session in the Node
@@ -156,6 +176,30 @@ function requireAdmin(req, res, next) {
   if (!isAuthed(req)) return res.status(401).json({ error: 'unauthorized' });
   if (!isAdminRole(req.session.role)) return res.status(403).json({ error: 'admin_required' });
   return next();
+}
+function hashApiToken(rawToken) {
+  return crypto.createHash('sha256').update(String(rawToken || '')).digest('hex');
+}
+// Bearer-token auth for the MCP connector, independent of the cookie session
+// used by the browser app - each token maps 1:1 to an existing Kanban user,
+// so a tool call can never do more than that person could already do in the UI.
+async function requireApiToken(req, res, next) {
+  const header = String(req.headers.authorization || '');
+  const match = header.match(/^Bearer\s+(.+)$/i);
+  if (!match) return res.status(401).json({ error: 'missing_token' });
+  const tokenHash = hashApiToken(match[1].trim());
+  try {
+    const token = await prisma.apiToken.findUnique({ where: { tokenHash }, include: { user: true } });
+    if (!token || token.revokedAt || !token.user || token.user.isActive === false) {
+      return res.status(401).json({ error: 'invalid_token' });
+    }
+    req.apiUser = { id: token.user.id, username: token.user.username, role: token.user.role, displayName: token.user.displayName };
+    prisma.apiToken.update({ where: { id: token.id }, data: { lastUsedAt: new Date() } }).catch(() => null);
+    return next();
+  } catch (error) {
+    console.error('API token auth failed:', error.message || error);
+    return res.status(500).json({ error: 'auth_failed' });
+  }
 }
 function avatarFilenameForUserId(id) {
   if (!id) return null;
@@ -784,54 +828,17 @@ async function safeWriteState(state) {
   };
   pruneResolvedHiddenTickets(nextState);
 
-  // Whether a ticket has already had its "Resolved" Teams DM sent - a plain
-  // boolean, reset only when the ticket leaves Resolved. Using the ticket's
-  // touched-at timestamp as an idempotency key (as this used to) was fragile:
-  // that timestamp can legitimately drift for reasons unrelated to the
-  // resolve event itself (e.g. a later comment bumping the DB row), which
-  // made an already-notified ticket look "not yet notified" again and
-  // re-sent the DM for a ticket that had been sitting in Resolved for a while.
-  const previousTeamsMeta = (currentMeta.teamsResolvedNotified && typeof currentMeta.teamsResolvedNotified === 'object') ? currentMeta.teamsResolvedNotified : {};
-  const teamsResolvedNotified = { ...previousTeamsMeta };
-  const ticketsById = new Map(
-    (Array.isArray(nextState.allTickets) ? nextState.allTickets : [])
-      .filter(ticket => ticket && ticket.id)
-      .map(ticket => [String(ticket.id), ticket])
-  );
-  const pendingResolvedTeamsAlerts = [];
-  stageIds.forEach((ticketId) => {
-    const nextStage = normalizeBoardStatusForDb(mergedStages[ticketId] || 'new');
-    const prevStage = normalizeBoardStatusForDb(currentStages[ticketId] || 'new');
-    const category = String((nextState.ticketCategory && nextState.ticketCategory[ticketId]) || '').trim().toLowerCase();
-    if (nextStage !== 'Resolved' || category === 'spam') {
-      delete teamsResolvedNotified[ticketId];
-      return;
-    }
-    if (prevStage === 'Resolved' || teamsResolvedNotified[ticketId]) return; // already resolved and/or already notified - nothing new happened
-    const csOwner = String((nextState.ticketCSOwner && nextState.ticketCSOwner[ticketId]) || '').trim().toUpperCase();
-    if (!csOwner) return;
-    const ticket = ticketsById.get(ticketId) || null;
-    pendingResolvedTeamsAlerts.push({
-      ticketId,
-      csOwner,
-      ticketNumber: nextState.ticketNumbers && nextState.ticketNumbers[ticketId] ? String(nextState.ticketNumbers[ticketId]) : null,
-      subject: String(ticket?.email?.subject || '(no subject)').trim(),
-      companyName: String((nextState.hsCache && nextState.ticketClientEmail && nextState.ticketClientEmail[ticketId] && nextState.hsCache[nextState.ticketClientEmail[ticketId]]?.companyName) || '').trim() || null,
-      jiraKey: String((nextState.ticketJira && nextState.ticketJira[ticketId]) || '').trim() || null,
-      assignee: String((nextState.ticketAssignee && nextState.ticketAssignee[ticketId]) || '').trim() || null
-    });
-    // Mark as notified synchronously, before the webhook even fires. Any save
-    // that lands while the webhook call is still in flight (very likely -
-    // every drag/comment/poll triggers a save) would otherwise re-read this
-    // same "not yet notified" state from disk and queue a second send.
-    teamsResolvedNotified[ticketId] = true;
-  });
-
+  // The "Resolved" Teams DM is no longer tracked here at all - it moved to
+  // an atomic, DB-level claim in upsertBoardTicketsToDatabase (a dedicated
+  // Ticket.resolvedTeamsNotifiedAt column, checked-and-set in one UPDATE).
+  // Tracking it in this JSON file via read-then-write raced under concurrent
+  // saves (multiple agents' tabs, or a poll cycle overlapping a user action):
+  // each one could read "not yet notified" before any of them had written it
+  // back, so the same resolve event fired the DM repeatedly.
   const now = Date.now();
   const enrichedMeta = {
     ...(isStale ? currentMeta : incomingMeta),
-    serverSavedAt: now,
-    teamsResolvedNotified
+    serverSavedAt: now
   };
   // A stale snapshot (e.g. from a lagging tab) must not blindly overwrite
   // fields it didn't correctly merge - keep the current state as the base and
@@ -854,13 +861,7 @@ async function safeWriteState(state) {
     backupCreated = true;
   }
 
-  if (pendingResolvedTeamsAlerts.length) {
-    void sendResolvedTeamsNotifications(pendingResolvedTeamsAlerts).catch((error) => {
-      console.warn('Resolved Teams notifications failed:', error?.message || error);
-    });
-  }
-
-  return { saved: true, partial: isStale, backupCreated, resolvedTeamsAlertsQueued: pendingResolvedTeamsAlerts.length, state: finalState };
+  return { saved: true, partial: isStale, backupCreated, state: finalState };
 }
 async function hydrateStateFromDatabase(baseState = {}) {
   const state = (baseState && typeof baseState === 'object') ? JSON.parse(JSON.stringify(baseState)) : {};
@@ -946,7 +947,8 @@ async function hydrateStateFromDatabase(baseState = {}) {
         comment: comment.comment,
         ts: comment.createdAt?.toISOString?.() || new Date().toISOString(),
         createdAt: comment.createdAt?.toISOString?.() || new Date().toISOString(),
-        isInternal: comment.isInternal !== false
+        isInternal: comment.isInternal !== false,
+        tags: Array.isArray(comment.tags) ? comment.tags : []
       }));
     }
   }
@@ -1191,6 +1193,20 @@ async function sendResolvedWebhookNotifications(items) {
 async function sendResolvedTeamsNotifications(items) {
   if (!Array.isArray(items) || !items.length) return;
   await sendResolvedWebhookNotifications(items);
+}
+
+// Atomic, DB-level claim for the Resolved Teams DM: a dedicated column
+// checked-and-set in a single UPDATE, not a JSON-file read-then-write (which
+// raced under concurrent saves and fired the same DM repeatedly). Shared by
+// the board-state sync path and the MCP ticket-update endpoint so both go
+// through the exact same claim.
+async function claimResolvedTeamsAlert({ ticketDbId, externalId, csAgent, category, subject, companyName, jiraTicketKey, assignedAgent, ticketNumber = null }) {
+  if (category === 'spam') return null;
+  const csOwnerForAlert = String(csAgent || '').trim().toUpperCase();
+  if (!csOwnerForAlert) return null;
+  const claimedRows = await prisma.$executeRaw`UPDATE "Ticket" SET "resolvedTeamsNotifiedAt" = NOW() WHERE id = ${ticketDbId} AND "resolvedTeamsNotifiedAt" IS NULL`;
+  if (claimedRows <= 0) return null;
+  return { ticketId: externalId, csOwner: csOwnerForAlert, ticketNumber, subject, companyName, jiraKey: jiraTicketKey, assignee: assignedAgent };
 }
 
 function mapMessage(msg) {
@@ -1766,6 +1782,7 @@ async function upsertBoardTicketsToDatabase(state, req) {
   const existingByExternalId = new Map(existingTickets.map(t => [t.externalId, t]));
 
   let count = 0;
+  const pendingResolvedTeamsAlerts = [];
 
   for (const item of allTickets) {
     if (!item || !item.id) continue;
@@ -1792,7 +1809,7 @@ async function upsertBoardTicketsToDatabase(state, req) {
     const comments = Array.isArray(ticketComments[externalId]) ? ticketComments[externalId] : [];
     const existingCommentTexts = new Set((existingTicket?.comments || []).map(c => c.comment));
     const newComments = comments
-      .map(c => ({ text: String(c?.text || c?.comment || '').trim(), ts: c?.ts || c?.createdAt }))
+      .map(c => ({ text: String(c?.text || c?.comment || '').trim(), ts: c?.ts || c?.createdAt, tags: Array.isArray(c?.tags) ? c.tags.map(t => String(t)).filter(Boolean) : [] }))
       .filter(c => c.text && !existingCommentTexts.has(c.text));
 
     const fieldsUnchanged = existingTicket
@@ -1850,9 +1867,29 @@ async function upsertBoardTicketsToDatabase(state, req) {
         jiraTicketKey,
         body,
         emailRaw: email,
-        resolvedAt: status === 'Resolved' ? new Date() : null
+        resolvedAt: status === 'Resolved' ? new Date() : null,
+        // Leave untouched (undefined) while staying Resolved - the atomic
+        // claim above owns setting it. Reset to null on leaving Resolved so
+        // a genuine future re-resolve (e.g. after a CS "send back") can
+        // notify again instead of being silently claimed forever.
+        resolvedTeamsNotifiedAt: status === 'Resolved' ? undefined : null
       }
     });
+
+    if (status === 'Resolved') {
+      const alert = await claimResolvedTeamsAlert({
+        ticketDbId: ticket.id,
+        externalId,
+        csAgent,
+        category,
+        subject,
+        companyName,
+        jiraTicketKey,
+        assignedAgent,
+        ticketNumber: state.ticketNumbers && state.ticketNumbers[externalId] ? String(state.ticketNumbers[externalId]) : null
+      });
+      if (alert) pendingResolvedTeamsAlerts.push(alert);
+    }
 
     if (!existingTicket) {
       await createTicketAuditEvent({
@@ -1880,6 +1917,7 @@ async function upsertBoardTicketsToDatabase(state, req) {
           userId: req?.session?.userId || null,
           comment: comment.text,
           isInternal: true,
+          tags: comment.tags,
           createdAt: safeDateForDb(comment.ts) || new Date()
         }
       });
@@ -1900,7 +1938,13 @@ async function upsertBoardTicketsToDatabase(state, req) {
     }).catch(() => null);
   }
 
-  return { count };
+  if (pendingResolvedTeamsAlerts.length) {
+    void sendResolvedTeamsNotifications(pendingResolvedTeamsAlerts).catch((error) => {
+      console.warn('Resolved Teams notifications failed:', error?.message || error);
+    });
+  }
+
+  return { count, resolvedTeamsAlertsQueued: pendingResolvedTeamsAlerts.length };
 }
 
 app.get('/favicon.svg', (req, res) => {
@@ -1916,7 +1960,12 @@ app.get('/favicon.ico', (req, res) => {
 app.get('/login', (req, res) => isAuthed(req) ? res.redirect('/') : res.type('html').sendFile(path.join(__dirname, 'public', 'login.html')));
 
 function renderResetPasswordPage(token) {
-  const safeTokenJson = JSON.stringify(String(token || ''));
+  // Base64-encode (not JSON.stringify) before embedding in the inline
+  // <script> block: JSON.stringify does not escape "</script>", so a raw
+  // ?token=</script><script>...</script> could break out of the block and
+  // execute attacker JS. Base64 output only ever contains [A-Za-z0-9+/=],
+  // which can never form that sequence.
+  const base64TokenJson = JSON.stringify(Buffer.from(String(token || ''), 'utf8').toString('base64'));
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -1953,7 +2002,11 @@ function renderResetPasswordPage(token) {
     <p style="margin-top:14px;margin-bottom:0;"><a href="/login">Back to sign in</a></p>
   </form>
   <script>
-    const resetToken = ${safeTokenJson};
+    // safeTokenJson is a JSON string literal - JSON.stringify does not escape
+    // "</script>", so a raw ?token=</script><script>...</script> could break
+    // out of this block. Base64-encode it and decode at runtime instead of
+    // embedding the raw JSON, so the script body can never contain "</script".
+    const resetToken = atob(${base64TokenJson});
     const form = document.getElementById('reset-form');
     const msg = document.getElementById('msg');
     const btn = document.getElementById('submit-btn');
@@ -2924,6 +2977,19 @@ app.get('/profile', requireAuth, (req, res) => {
               </div>
             </div>
           </div>
+
+          <div class="row">
+            <div class="label">Claude connector</div>
+            <div class="value">
+              <div id="mcpTokenStatus" style="font-size:13px;color:var(--muted);margin-bottom:8px;">Loading...</div>
+              <div id="mcpTokenReveal" class="hidden" style="margin-bottom:8px;">
+                <input id="mcpTokenValue" class="form-input" type="text" readonly style="font-family:monospace;font-size:12px;" />
+                <div style="font-size:12px;color:var(--muted);margin-top:4px;">Copy this now - it will not be shown again. Paste it as the Bearer token when adding the Support Kanban connector in Claude.</div>
+              </div>
+              <button class="btn btn-secondary" id="mcpGenerateBtn" type="button">Generate token</button>
+              <button class="btn btn-danger hidden" id="mcpRevokeBtn" type="button">Revoke token</button>
+            </div>
+          </div>
         </div>
 
         <div class="actions">
@@ -3069,7 +3135,45 @@ app.get('/profile', requireAuth, (req, res) => {
     document.getElementById('logoutBtn')?.addEventListener('click', logout);
     document.getElementById('logoutTopBtn')?.addEventListener('click', logout);
 
+    async function loadMcpTokenStatus() {
+      const res = await fetch('/api/mcp/token', { credentials: 'same-origin' });
+      const data = await res.json().catch(() => ({}));
+      const statusEl = document.getElementById('mcpTokenStatus');
+      const revokeBtn = document.getElementById('mcpRevokeBtn');
+      if (data.token) {
+        const when = new Date(data.token.createdAt).toLocaleDateString();
+        statusEl.textContent = 'Active token created ' + when + (data.token.lastUsedAt ? ', last used ' + new Date(data.token.lastUsedAt).toLocaleString() : ', not used yet');
+        revokeBtn?.classList.remove('hidden');
+      } else {
+        statusEl.textContent = 'No active token. Generate one to connect Claude to the Support Kanban board.';
+        revokeBtn?.classList.add('hidden');
+      }
+    }
+
+    document.getElementById('mcpGenerateBtn')?.addEventListener('click', async () => {
+      if (document.getElementById('mcpRevokeBtn') && !document.getElementById('mcpRevokeBtn').classList.contains('hidden')) {
+        if (!confirm('Generating a new token will revoke your current one and disconnect any Claude connector using it. Continue?')) return;
+      }
+      const res = await fetch('/api/mcp/token', { method: 'POST', credentials: 'same-origin' });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        alert(data.error || 'Unable to generate token.');
+        return;
+      }
+      document.getElementById('mcpTokenValue').value = data.token;
+      document.getElementById('mcpTokenReveal')?.classList.remove('hidden');
+      loadMcpTokenStatus();
+    });
+
+    document.getElementById('mcpRevokeBtn')?.addEventListener('click', async () => {
+      if (!confirm('Revoke your Claude connector token? Any connected Claude sessions will stop working until you generate a new one.')) return;
+      await fetch('/api/mcp/token', { method: 'DELETE', credentials: 'same-origin' });
+      document.getElementById('mcpTokenReveal')?.classList.add('hidden');
+      loadMcpTokenStatus();
+    });
+
     loadProfile();
+    loadMcpTokenStatus();
   </script>
 </body>
 </html>
@@ -3495,6 +3599,261 @@ app.get('/api/tickets/:id', requireAuth, async (req, res) => {
   if (!ticket) return res.status(404).json({ error: 'ticket_not_found' });
   res.json({ ticket });
 });
+
+// --- Claude MCP connector -------------------------------------------------
+// Self-service token issuance (cookie-session authenticated, one active
+// token per user - regenerating revokes the previous one). The plaintext
+// token is only ever returned here, once; only its SHA-256 hash is stored.
+const mcpTokenLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 10, standardHeaders: true, legacyHeaders: false });
+app.get('/api/mcp/token', requireAuth, async (req, res) => {
+  const token = await prisma.apiToken.findFirst({
+    where: { userId: req.session.userId, revokedAt: null },
+    orderBy: { createdAt: 'desc' }
+  });
+  res.json({ token: token ? { createdAt: token.createdAt, lastUsedAt: token.lastUsedAt } : null });
+});
+app.post('/api/mcp/token', requireAuth, mcpTokenLimiter, async (req, res) => {
+  try {
+    await prisma.apiToken.updateMany({
+      where: { userId: req.session.userId, revokedAt: null },
+      data: { revokedAt: new Date() }
+    });
+    const rawToken = `kb_${crypto.randomBytes(32).toString('base64url')}`;
+    const created = await prisma.apiToken.create({
+      data: { userId: req.session.userId, tokenHash: hashApiToken(rawToken), label: 'Claude MCP connector' }
+    });
+    res.json({ token: rawToken, createdAt: created.createdAt });
+  } catch (error) {
+    console.error('Token generation failed:', error.message || error);
+    res.status(500).json({ error: 'token_generation_failed' });
+  }
+});
+app.delete('/api/mcp/token', requireAuth, async (req, res) => {
+  await prisma.apiToken.updateMany({
+    where: { userId: req.session.userId, revokedAt: null },
+    data: { revokedAt: new Date() }
+  });
+  res.json({ ok: true });
+});
+
+// Ticket API surface backing the Claude MCP connector - reached either via
+// the plain REST routes below (used by the standalone mcp-server/ service,
+// which forwards the caller's own Bearer token straight through) or directly
+// via the in-process /mcp route further down. Both paths call the same
+// mcp*() functions so there's exactly one implementation of each operation.
+const mcpApiLimiter = rateLimit({ windowMs: 60 * 1000, max: 60, standardHeaders: true, legacyHeaders: false });
+const MCP_TICKET_SELECT = {
+  id: true, externalId: true, subject: true, senderName: true, senderEmail: true, companyName: true,
+  status: true, priority: true, category: true, assignedAgent: true, csAgent: true, jiraTicketKey: true,
+  hubspotTicketId: true, createdAt: true, updatedAt: true, resolvedAt: true
+};
+const MCP_WRITABLE_STATUSES = new Set(['New', 'In Progress', 'Waiting on Us', 'Due for Test', 'Waiting on Contact', 'Resolved']);
+
+async function mcpListTickets({ status, assignee, q, limit }) {
+  const where = {};
+  if (status) where.status = String(status);
+  if (assignee) where.assignedAgent = String(assignee).trim().toUpperCase();
+  if (q) {
+    const term = String(q).trim();
+    where.OR = [
+      { subject: { contains: term, mode: 'insensitive' } },
+      { companyName: { contains: term, mode: 'insensitive' } },
+      { senderEmail: { contains: term, mode: 'insensitive' } }
+    ];
+  }
+  const take = Math.min(Number(limit) || 50, 200);
+  return prisma.ticket.findMany({ where, take, orderBy: { updatedAt: 'desc' }, select: MCP_TICKET_SELECT });
+}
+
+async function mcpGetTicket(id) {
+  if (!Number.isInteger(id) || id <= 0) throw Object.assign(new Error('invalid_ticket_id'), { status: 400 });
+  const ticket = await prisma.ticket.findUnique({ where: { id }, include: { comments: { orderBy: { createdAt: 'asc' } } } });
+  if (!ticket) throw Object.assign(new Error('ticket_not_found'), { status: 404 });
+  return ticket;
+}
+
+async function mcpAddComment(apiUser, id, rawText) {
+  const text = String(rawText || '').trim();
+  if (!Number.isInteger(id) || id <= 0) throw Object.assign(new Error('invalid_ticket_id'), { status: 400 });
+  if (!text) throw Object.assign(new Error('text_required'), { status: 400 });
+  const ticket = await prisma.ticket.findUnique({ where: { id } });
+  if (!ticket) throw Object.assign(new Error('ticket_not_found'), { status: 404 });
+  const comment = await prisma.ticketComment.create({ data: { ticketId: id, userId: apiUser.id, comment: text, isInternal: true } });
+  await createTicketAuditEvent({ ticketId: id, userId: apiUser.id, eventType: 'comment_added', newValue: text.slice(0, 200), metadata: { via: 'mcp' } });
+  return comment;
+}
+
+async function mcpUpdateTicket(apiUser, id, fields) {
+  if (!Number.isInteger(id) || id <= 0) throw Object.assign(new Error('invalid_ticket_id'), { status: 400 });
+  const existingTicket = await prisma.ticket.findUnique({ where: { id } });
+  if (!existingTicket) throw Object.assign(new Error('ticket_not_found'), { status: 404 });
+
+  const data = {};
+  if (fields?.status !== undefined) {
+    const status = String(fields.status || '').trim();
+    if (!MCP_WRITABLE_STATUSES.has(status)) throw Object.assign(new Error('invalid_status'), { status: 400 });
+    data.status = status;
+    data.resolvedAt = status === 'Resolved' ? new Date() : null;
+    if (status !== 'Resolved') data.resolvedTeamsNotifiedAt = null;
+  }
+  if (fields?.assignedAgent !== undefined) data.assignedAgent = fields.assignedAgent ? String(fields.assignedAgent).trim().toUpperCase() : null;
+  if (fields?.csAgent !== undefined) data.csAgent = fields.csAgent ? String(fields.csAgent).trim().toUpperCase() : null;
+  if (fields?.priority !== undefined) data.priority = String(fields.priority || 'Normal').trim();
+  if (!Object.keys(data).length) throw Object.assign(new Error('no_fields'), { status: 400 });
+
+  const updated = await prisma.ticket.update({ where: { id }, data });
+  await auditTicketChanges({ ticketId: id, userId: apiUser.id, before: existingTicket, after: updated, fields: ['status', 'assignedAgent', 'csAgent', 'priority'] });
+
+  if (data.status === 'Resolved' && existingTicket.status !== 'Resolved') {
+    const alert = await claimResolvedTeamsAlert({
+      ticketDbId: updated.id,
+      externalId: updated.externalId || String(updated.id),
+      csAgent: updated.csAgent,
+      category: updated.category,
+      subject: updated.subject,
+      companyName: updated.companyName,
+      jiraTicketKey: updated.jiraTicketKey,
+      assignedAgent: updated.assignedAgent
+    });
+    if (alert) void sendResolvedTeamsNotifications([alert]).catch((error) => console.warn('Resolved Teams notification failed:', error?.message || error));
+  }
+
+  return updated;
+}
+
+function mcpHttpErrorStatus(error) {
+  return Number.isInteger(error?.status) ? error.status : 500;
+}
+
+app.get('/api/mcp/tickets', requireApiToken, mcpApiLimiter, async (req, res) => {
+  const tickets = await mcpListTickets(req.query);
+  res.json({ tickets });
+});
+app.get('/api/mcp/tickets/:id', requireApiToken, mcpApiLimiter, async (req, res) => {
+  try {
+    const ticket = await mcpGetTicket(Number(req.params.id));
+    res.json({ ticket });
+  } catch (error) {
+    res.status(mcpHttpErrorStatus(error)).json({ error: error.message });
+  }
+});
+app.post('/api/mcp/tickets/:id/comments', requireApiToken, mcpApiLimiter, async (req, res) => {
+  try {
+    const comment = await mcpAddComment(req.apiUser, Number(req.params.id), req.body?.text);
+    res.json({ ok: true, comment });
+  } catch (error) {
+    res.status(mcpHttpErrorStatus(error)).json({ error: error.message });
+  }
+});
+app.patch('/api/mcp/tickets/:id', requireApiToken, mcpApiLimiter, async (req, res) => {
+  try {
+    const updated = await mcpUpdateTicket(req.apiUser, Number(req.params.id), req.body || {});
+    res.json({ ok: true, ticket: updated });
+  } catch (error) {
+    res.status(mcpHttpErrorStatus(error)).json({ error: error.message });
+  }
+});
+
+// In-process MCP protocol endpoint - the same Bearer token used above, but
+// speaking actual MCP (JSON-RPC over Streamable HTTP) so it can be added as
+// a Claude custom connector directly, with no separate service to deploy.
+const TICKET_STATUS_ENUM = ['New', 'In Progress', 'Waiting on Us', 'Due for Test', 'Waiting on Contact', 'Resolved'];
+let mcpSdkModules = null;
+async function loadMcpSdk() {
+  if (!mcpSdkModules) {
+    const [{ McpServer }, { StreamableHTTPServerTransport }, { z }] = await Promise.all([
+      import('@modelcontextprotocol/sdk/server/mcp.js'),
+      import('@modelcontextprotocol/sdk/server/streamableHttp.js'),
+      import('zod')
+    ]);
+    mcpSdkModules = { McpServer, StreamableHTTPServerTransport, z };
+  }
+  return mcpSdkModules;
+}
+function mcpTextResult(value) {
+  return { content: [{ type: 'text', text: typeof value === 'string' ? value : JSON.stringify(value, null, 2) }] };
+}
+function mcpErrorResult(error) {
+  return { content: [{ type: 'text', text: error?.message || String(error) }], isError: true };
+}
+function buildKanbanMcpServer(apiUser, { McpServer, z }) {
+  const server = new McpServer({ name: 'support-kanban', version: '1.0.0' });
+
+  server.registerTool(
+    'list_tickets',
+    {
+      title: 'List support tickets',
+      description: 'List/search tickets on the Support Kanban board. Filter by status, assignee, or a free-text search term.',
+      inputSchema: {
+        status: z.enum(TICKET_STATUS_ENUM).optional(),
+        assignee: z.string().optional().describe('Agent trigram, e.g. MBH'),
+        q: z.string().optional().describe('Free-text search over subject, company name, and sender email'),
+        limit: z.number().int().min(1).max(200).optional()
+      }
+    },
+    async (args) => {
+      try { return mcpTextResult(await mcpListTickets(args)); } catch (error) { return mcpErrorResult(error); }
+    }
+  );
+
+  server.registerTool(
+    'get_ticket',
+    { title: 'Get ticket detail', description: 'Get full detail for one ticket, including its comments.', inputSchema: { ticketId: z.number().int().positive() } },
+    async ({ ticketId }) => {
+      try { return mcpTextResult(await mcpGetTicket(ticketId)); } catch (error) { return mcpErrorResult(error); }
+    }
+  );
+
+  server.registerTool(
+    'add_comment',
+    { title: 'Add a comment to a ticket', description: 'Add an internal comment to a ticket.', inputSchema: { ticketId: z.number().int().positive(), text: z.string().min(1) } },
+    async ({ ticketId, text }) => {
+      try { return mcpTextResult(await mcpAddComment(apiUser, ticketId, text)); } catch (error) { return mcpErrorResult(error); }
+    }
+  );
+
+  server.registerTool(
+    'update_ticket',
+    {
+      title: 'Update a ticket',
+      description: 'Move a ticket to a new stage, (re)assign it, or change its priority. Only send the fields you want to change.',
+      inputSchema: {
+        ticketId: z.number().int().positive(),
+        status: z.enum(TICKET_STATUS_ENUM).optional(),
+        assignedAgent: z.string().optional().describe('Agent trigram to assign, or empty string to unassign'),
+        csAgent: z.string().optional().describe('CS owner trigram, or empty string to clear'),
+        priority: z.enum(['Low', 'Normal', 'High', 'Urgent']).optional()
+      }
+    },
+    async ({ ticketId, ...fields }) => {
+      try { return mcpTextResult(await mcpUpdateTicket(apiUser, ticketId, fields)); } catch (error) { return mcpErrorResult(error); }
+    }
+  );
+
+  return server;
+}
+async function handleMcpRequest(req, res) {
+  try {
+    const sdk = await loadMcpSdk();
+    const server = buildKanbanMcpServer(req.apiUser, sdk);
+    const transport = new sdk.StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+    res.on('close', () => { transport.close(); server.close(); });
+    await server.connect(transport);
+    await transport.handleRequest(req, res, req.body);
+  } catch (error) {
+    console.error('MCP request failed:', error);
+    if (!res.headersSent) res.status(500).json({ jsonrpc: '2.0', error: { code: -32603, message: 'Internal server error' }, id: null });
+  }
+}
+app.post('/mcp', requireApiToken, mcpApiLimiter, handleMcpRequest);
+// Same endpoint, different path - kept distinct from /mcp because Claude's
+// connector UI deduplicates custom connectors by URL. The org already has a
+// "Quinta Support Kanban" connector registered at /mcp configured for OAuth
+// (which this app doesn't implement), so any plugin pointing back at that
+// same URL inherits that broken OAuth requirement instead of using its own
+// Bearer-token header. This path lets the personal-token plugin connect
+// without colliding with that org-level registration.
+app.post('/mcp-plugin', requireApiToken, mcpApiLimiter, handleMcpRequest);
 
 app.get('/api/state', requireAuth, async (req, res) => {
   try {
