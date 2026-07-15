@@ -150,6 +150,9 @@ app.use(helmet({
   }
 }));
 app.use(express.json({ limit: '4mb' }));
+// Needed for the OAuth consent form POST and the token endpoint, which per
+// RFC 6749 is submitted as application/x-www-form-urlencoded.
+app.use(express.urlencoded({ extended: true, limit: '1mb' }));
 fs.mkdirSync(AVATAR_UPLOAD_DIR, { recursive: true });
 // The default express-session MemoryStore keeps every session in the Node
 // process's own memory for as long as the process runs and never survives a
@@ -3752,6 +3755,203 @@ app.patch('/api/mcp/tickets/:id', requireApiToken, mcpApiLimiter, async (req, re
   } catch (error) {
     res.status(mcpHttpErrorStatus(error)).json({ error: error.message });
   }
+});
+
+// --- OAuth 2.1 (Authorization Code + PKCE) for the Claude connector --------
+// Wraps the app's *existing* session login - there is no separate identity
+// system here. A client (Claude) self-registers once (RFC 7591), then each
+// individual person authorizes it by logging into the normal Kanban login
+// page; the resulting access token is just a regular ApiToken row, so
+// everything downstream (/mcp, /api/mcp/*) needs zero changes.
+const oauthLimiter = rateLimit({ windowMs: 60 * 1000, max: 30, standardHeaders: true, legacyHeaders: false });
+const OAUTH_CODE_TTL_MS = 5 * 60 * 1000;
+
+function base64url(buffer) {
+  return buffer.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+function hashOAuthCode(rawCode) {
+  return crypto.createHash('sha256').update(String(rawCode || '')).digest('hex');
+}
+function oauthIssuer(req) {
+  return publicBaseUrlForRequest(req);
+}
+
+app.get('/.well-known/oauth-authorization-server', (req, res) => {
+  const issuer = oauthIssuer(req);
+  res.json({
+    issuer,
+    authorization_endpoint: `${issuer}/oauth/authorize`,
+    token_endpoint: `${issuer}/oauth/token`,
+    registration_endpoint: `${issuer}/oauth/register`,
+    response_types_supported: ['code'],
+    grant_types_supported: ['authorization_code'],
+    code_challenge_methods_supported: ['S256'],
+    token_endpoint_auth_methods_supported: ['none']
+  });
+});
+app.get('/.well-known/oauth-protected-resource', (req, res) => {
+  const issuer = oauthIssuer(req);
+  res.json({
+    resource: `${issuer}/mcp`,
+    authorization_servers: [issuer]
+  });
+});
+
+// Dynamic Client Registration (RFC 7591). Deliberately permissive (anyone
+// can register a client) - the security boundary isn't here, it's the
+// strict redirect_uri exact-match enforced at /oauth/authorize and
+// /oauth/token, which makes a registered client_id useless to an attacker
+// without also controlling one of the redirect_uris it registered.
+app.post('/oauth/register', oauthLimiter, async (req, res) => {
+  const redirectUris = Array.isArray(req.body?.redirect_uris) ? req.body.redirect_uris.map(String) : [];
+  if (!redirectUris.length) return res.status(400).json({ error: 'invalid_client_metadata', error_description: 'redirect_uris is required' });
+  for (const uri of redirectUris) {
+    try {
+      const parsed = new URL(uri);
+      if (parsed.protocol !== 'https:' && !(parsed.protocol === 'http:' && parsed.hostname === 'localhost')) {
+        return res.status(400).json({ error: 'invalid_redirect_uri', error_description: 'redirect_uris must be https (or http://localhost for local dev)' });
+      }
+    } catch (_error) {
+      return res.status(400).json({ error: 'invalid_redirect_uri' });
+    }
+  }
+  const clientId = `mcp_${crypto.randomBytes(16).toString('hex')}`;
+  const clientName = req.body?.client_name ? String(req.body.client_name).slice(0, 200) : null;
+  await prisma.oAuthClient.create({ data: { clientId, clientName, redirectUris } });
+  res.status(201).json({
+    client_id: clientId,
+    client_name: clientName,
+    redirect_uris: redirectUris,
+    token_endpoint_auth_method: 'none',
+    grant_types: ['authorization_code'],
+    response_types: ['code']
+  });
+});
+
+function renderOAuthConsentPage({ clientName, params }) {
+  const hiddenFields = Object.entries(params).map(([key, value]) => `<input type="hidden" name="${escapeHtml(key)}" value="${escapeHtml(value)}" />`).join('\n');
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Authorize Claude - Support Kanban</title>
+  <style>
+    body{font-family:Segoe UI,Arial,sans-serif;background:linear-gradient(135deg,#f8fafc,#e2e8f0);display:flex;min-height:100vh;align-items:center;justify-content:center;margin:0}
+    .card{background:#fff;padding:28px;border-radius:12px;box-shadow:0 12px 32px rgba(15,23,42,.12);width:min(420px,92vw)}
+    h1{margin:0 0 8px;font-size:20px;color:#1e293b}
+    p{margin:0 0 20px;color:#64748b;font-size:13px;line-height:1.5}
+    .actions{display:flex;gap:10px}
+    button{flex:1;padding:10px;border:none;border-radius:8px;font-weight:700;cursor:pointer}
+    .allow{background:#4f46e5;color:#fff}
+    .deny{background:#f1f5f9;color:#334155}
+  </style>
+</head>
+<body>
+  <form class="card" method="POST" action="/oauth/authorize/confirm">
+    <h1>Authorize connector</h1>
+    <p><strong>${escapeHtml(clientName || 'A Claude connector')}</strong> wants access to your Support Kanban account - it will be able to see and update tickets exactly as you can in the board. Only continue if you started this from Claude.</p>
+    ${hiddenFields}
+    <div class="actions">
+      <button class="deny" type="submit" name="decision" value="deny">Deny</button>
+      <button class="allow" type="submit" name="decision" value="allow">Allow</button>
+    </div>
+  </form>
+</body>
+</html>`;
+}
+
+app.get('/oauth/authorize', oauthLimiter, async (req, res) => {
+  const { response_type, client_id, redirect_uri, state, code_challenge, code_challenge_method } = req.query;
+  if (response_type !== 'code') return res.status(400).send('unsupported_response_type');
+  if (!client_id || !redirect_uri || !code_challenge || code_challenge_method !== 'S256') {
+    return res.status(400).send('invalid_request');
+  }
+  const client = await prisma.oAuthClient.findUnique({ where: { clientId: String(client_id) } });
+  if (!client || !client.redirectUris.includes(String(redirect_uri))) {
+    return res.status(400).send('invalid_client_or_redirect_uri');
+  }
+  if (!isAuthed(req)) {
+    const next = `/oauth/authorize?${new URLSearchParams(req.query).toString()}`;
+    return res.redirect(`/login?next=${encodeURIComponent(next)}`);
+  }
+  res.type('html').send(renderOAuthConsentPage({
+    clientName: client.clientName,
+    params: { client_id: String(client_id), redirect_uri: String(redirect_uri), state: String(state || ''), code_challenge: String(code_challenge), code_challenge_method: 'S256' }
+  }));
+});
+
+app.post('/oauth/authorize/confirm', oauthLimiter, requireAuth, async (req, res) => {
+  try {
+    const { client_id, redirect_uri, state, code_challenge, code_challenge_method, decision } = req.body || {};
+    const client = await prisma.oAuthClient.findUnique({ where: { clientId: String(client_id || '') } });
+    if (!client || !client.redirectUris.includes(String(redirect_uri || ''))) {
+      return res.status(400).send('invalid_client_or_redirect_uri');
+    }
+    const redirectUrl = new URL(String(redirect_uri));
+    if (decision !== 'allow') {
+      redirectUrl.searchParams.set('error', 'access_denied');
+      if (state) redirectUrl.searchParams.set('state', String(state));
+      return res.redirect(redirectUrl.toString());
+    }
+    const rawCode = crypto.randomBytes(32).toString('hex');
+    await prisma.oAuthAuthCode.create({
+      data: {
+        codeHash: hashOAuthCode(rawCode),
+        clientId: client.id,
+        userId: req.session.userId,
+        redirectUri: String(redirect_uri),
+        codeChallenge: String(code_challenge),
+        codeChallengeMethod: String(code_challenge_method || 'S256'),
+        expiresAt: new Date(Date.now() + OAUTH_CODE_TTL_MS)
+      }
+    });
+    redirectUrl.searchParams.set('code', rawCode);
+    if (state) redirectUrl.searchParams.set('state', String(state));
+    res.redirect(redirectUrl.toString());
+  } catch (error) {
+    console.error('OAuth authorize confirm failed:', error.message || error);
+    res.status(400).send('invalid_request');
+  }
+});
+
+app.post('/oauth/token', oauthLimiter, async (req, res) => {
+ try {
+  const { grant_type, code, redirect_uri, client_id, code_verifier } = req.body || {};
+  if (grant_type !== 'authorization_code') return res.status(400).json({ error: 'unsupported_grant_type' });
+  if (!code || !redirect_uri || !client_id || !code_verifier) return res.status(400).json({ error: 'invalid_request' });
+
+  const client = await prisma.oAuthClient.findUnique({ where: { clientId: String(client_id) } });
+  if (!client) return res.status(400).json({ error: 'invalid_client' });
+
+  const codeHash = hashOAuthCode(code);
+  // Atomic single-use claim, same pattern as the Resolved-Teams-DM and
+  // token dedup elsewhere in this file - a single UPDATE ... WHERE usedAt
+  // IS NULL guard means a replayed/duplicated exchange can never succeed
+  // twice, no read-then-write race.
+  const claimed = await prisma.$executeRaw`UPDATE "OAuthAuthCode" SET "usedAt" = NOW() WHERE "codeHash" = ${codeHash} AND "usedAt" IS NULL`;
+  if (claimed <= 0) return res.status(400).json({ error: 'invalid_grant' });
+
+  const authCode = await prisma.oAuthAuthCode.findUnique({ where: { codeHash } });
+  if (!authCode || authCode.clientId !== client.id || authCode.redirectUri !== String(redirect_uri) || authCode.expiresAt.getTime() < Date.now()) {
+    return res.status(400).json({ error: 'invalid_grant' });
+  }
+  const expectedChallenge = base64url(crypto.createHash('sha256').update(String(code_verifier)).digest());
+  if (expectedChallenge !== authCode.codeChallenge) {
+    return res.status(400).json({ error: 'invalid_grant', error_description: 'code_verifier mismatch' });
+  }
+
+  const user = await prisma.user.findUnique({ where: { id: authCode.userId } });
+  if (!user || user.isActive === false) return res.status(400).json({ error: 'invalid_grant' });
+
+  const rawToken = `kb_${crypto.randomBytes(32).toString('base64url')}`;
+  await prisma.apiToken.create({ data: { userId: user.id, tokenHash: hashApiToken(rawToken), label: `OAuth (${client.clientName || client.clientId})` } });
+
+  res.json({ access_token: rawToken, token_type: 'Bearer' });
+ } catch (error) {
+  console.error('OAuth token exchange failed:', error.message || error);
+  res.status(400).json({ error: 'invalid_request' });
+ }
 });
 
 // In-process MCP protocol endpoint - the same Bearer token used above, but

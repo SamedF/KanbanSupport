@@ -72,7 +72,11 @@
         body: JSON.stringify({ username, password })
       });
       if (res.ok) {
-        location.href = '/';
+        // Only ever honor a same-origin redirect back into the OAuth
+        // authorize flow - anything else falls back to '/' so this can't be
+        // abused as an open redirect via a crafted ?next= link.
+        const next = new URLSearchParams(location.search).get('next');
+        location.href = (next && next.startsWith('/oauth/authorize')) ? next : '/';
         return;
       }
       document.getElementById('err').textContent = 'Invalid credentials.';
