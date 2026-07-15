@@ -3661,6 +3661,26 @@ const MCP_TICKET_SELECT = {
 };
 const MCP_WRITABLE_STATUSES = new Set(['New', 'In Progress', 'Waiting on Us', 'Due for Test', 'Waiting on Contact', 'Resolved']);
 
+// The board shows agents a short display number (e.g. "#0042", assigned
+// client-side in index.html's ensureTicketNumber and only ever persisted in
+// the ephemeral board-state file, never in Postgres) - completely different
+// from Ticket.id (the DB primary key) and externalId (a long Outlook message
+// ID). MCP tools used to only expose the DB id, so Claude had no way to know
+// it wasn't the number agents actually mean when they say "ticket 42". This
+// looks it up from the same state file the board itself reads, so it always
+// matches what's currently shown on screen.
+function ticketDisplayNumberFor(externalId) {
+  const state = safeReadState();
+  const numbers = (state.ticketNumbers && typeof state.ticketNumbers === 'object') ? state.ticketNumbers : {};
+  const n = Number(numbers[String(externalId || '')] || 0);
+  return n > 0 ? `#${String(n).padStart(4, '0')}` : null;
+}
+function withMcpTicketNumber(ticket) {
+  if (!ticket) return ticket;
+  const { id, ...rest } = ticket;
+  return { ticketNumber: ticketDisplayNumberFor(ticket.externalId), internalId: id, ...rest };
+}
+
 async function mcpListTickets({ status, assignee, q, limit }) {
   const where = {};
   if (status) where.status = String(status);
@@ -3674,14 +3694,15 @@ async function mcpListTickets({ status, assignee, q, limit }) {
     ];
   }
   const take = Math.min(Number(limit) || 50, 200);
-  return prisma.ticket.findMany({ where, take, orderBy: { updatedAt: 'desc' }, select: MCP_TICKET_SELECT });
+  const tickets = await prisma.ticket.findMany({ where, take, orderBy: { updatedAt: 'desc' }, select: MCP_TICKET_SELECT });
+  return tickets.map(withMcpTicketNumber);
 }
 
 async function mcpGetTicket(id) {
   if (!Number.isInteger(id) || id <= 0) throw Object.assign(new Error('invalid_ticket_id'), { status: 400 });
   const ticket = await prisma.ticket.findUnique({ where: { id }, include: { comments: { orderBy: { createdAt: 'asc' } } } });
   if (!ticket) throw Object.assign(new Error('ticket_not_found'), { status: 404 });
-  return ticket;
+  return withMcpTicketNumber(ticket);
 }
 
 async function mcpAddComment(apiUser, id, rawText) {
@@ -3730,7 +3751,7 @@ async function mcpUpdateTicket(apiUser, id, fields) {
     if (alert) void sendResolvedTeamsNotifications([alert]).catch((error) => console.warn('Resolved Teams notification failed:', error?.message || error));
   }
 
-  return updated;
+  return withMcpTicketNumber(updated);
 }
 
 function mcpHttpErrorStatus(error) {
@@ -3992,7 +4013,7 @@ function buildKanbanMcpServer(apiUser, { McpServer, z }) {
     'list_tickets',
     {
       title: 'List support tickets',
-      description: 'List/search tickets on the Support Kanban board. Filter by status, assignee, or a free-text search term.',
+      description: 'List/search tickets on the Support Kanban board. Filter by status, assignee, or a free-text search term. Each result has both a "ticketNumber" (e.g. "#0042" - the number agents actually use when they refer to a ticket, shown on the board) and an "internalId" (a database id, only useful as the ticketId argument to get_ticket/add_comment/update_ticket). Always report ticketNumber to the user, never internalId.',
       inputSchema: {
         status: z.enum(TICKET_STATUS_ENUM).optional(),
         assignee: z.string().optional().describe('Agent trigram, e.g. MBH'),
@@ -4007,7 +4028,11 @@ function buildKanbanMcpServer(apiUser, { McpServer, z }) {
 
   server.registerTool(
     'get_ticket',
-    { title: 'Get ticket detail', description: 'Get full detail for one ticket, including its comments.', inputSchema: { ticketId: z.number().int().positive() } },
+    {
+      title: 'Get ticket detail',
+      description: 'Get full detail for one ticket, including its comments. Report the returned "ticketNumber" (e.g. "#0042") to the user, not "internalId".',
+      inputSchema: { ticketId: z.number().int().positive().describe('The internalId from list_tickets/get_ticket - not the #-prefixed ticketNumber shown on the board.') }
+    },
     async ({ ticketId }) => {
       try { return mcpTextResult(await mcpGetTicket(ticketId)); } catch (error) { return mcpErrorResult(error); }
     }
@@ -4015,7 +4040,14 @@ function buildKanbanMcpServer(apiUser, { McpServer, z }) {
 
   server.registerTool(
     'add_comment',
-    { title: 'Add a comment to a ticket', description: 'Add an internal comment to a ticket.', inputSchema: { ticketId: z.number().int().positive(), text: z.string().min(1) } },
+    {
+      title: 'Add a comment to a ticket',
+      description: 'Add an internal comment to a ticket.',
+      inputSchema: {
+        ticketId: z.number().int().positive().describe('The internalId from list_tickets/get_ticket - not the #-prefixed ticketNumber shown on the board.'),
+        text: z.string().min(1)
+      }
+    },
     async ({ ticketId, text }) => {
       try { return mcpTextResult(await mcpAddComment(apiUser, ticketId, text)); } catch (error) { return mcpErrorResult(error); }
     }
@@ -4027,7 +4059,7 @@ function buildKanbanMcpServer(apiUser, { McpServer, z }) {
       title: 'Update a ticket',
       description: 'Move a ticket to a new stage, (re)assign it, or change its priority. Only send the fields you want to change.',
       inputSchema: {
-        ticketId: z.number().int().positive(),
+        ticketId: z.number().int().positive().describe('The internalId from list_tickets/get_ticket - not the #-prefixed ticketNumber shown on the board.'),
         status: z.enum(TICKET_STATUS_ENUM).optional(),
         assignedAgent: z.string().optional().describe('Agent trigram to assign, or empty string to unassign'),
         csAgent: z.string().optional().describe('CS owner trigram, or empty string to clear'),
