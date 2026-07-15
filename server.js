@@ -145,7 +145,16 @@ app.use(helmet({
       connectSrc: ["'self'", 'https:'],
       objectSrc: ["'none'"],
       baseUri: ["'self'"],
-      frameAncestors: ["'self'"]
+      frameAncestors: ["'self'"],
+      // Helmet's default 'form-action' self would otherwise block the
+      // OAuth consent form's redirect back to the client's redirect_uri
+      // (e.g. claude.ai) - form-action applies to the whole redirect chain
+      // a submission triggers, not just the form's own declared action.
+      // That redirect is already strictly validated server-side (exact
+      // match against what the client registered), so this is safe to
+      // leave unrestricted rather than trying to allowlist arbitrary
+      // per-client hosts here.
+      formAction: null
     }
   }
 }));
