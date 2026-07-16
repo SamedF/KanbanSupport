@@ -145,11 +145,23 @@ app.use(helmet({
       connectSrc: ["'self'", 'https:'],
       objectSrc: ["'none'"],
       baseUri: ["'self'"],
-      frameAncestors: ["'self'"]
+      frameAncestors: ["'self'"],
+      // Helmet's default 'form-action' self would otherwise block the
+      // OAuth consent form's redirect back to the client's redirect_uri
+      // (e.g. claude.ai) - form-action applies to the whole redirect chain
+      // a submission triggers, not just the form's own declared action.
+      // That redirect is already strictly validated server-side (exact
+      // match against what the client registered), so this is safe to
+      // leave unrestricted rather than trying to allowlist arbitrary
+      // per-client hosts here.
+      formAction: null
     }
   }
 }));
 app.use(express.json({ limit: '4mb' }));
+// Needed for the OAuth consent form POST and the token endpoint, which per
+// RFC 6749 is submitted as application/x-www-form-urlencoded.
+app.use(express.urlencoded({ extended: true, limit: '1mb' }));
 fs.mkdirSync(AVATAR_UPLOAD_DIR, { recursive: true });
 // The default express-session MemoryStore keeps every session in the Node
 // process's own memory for as long as the process runs and never survives a
@@ -896,6 +908,10 @@ async function hydrateStateFromDatabase(baseState = {}) {
   state.ticketCreatedAt = (state.ticketCreatedAt && typeof state.ticketCreatedAt === 'object') ? state.ticketCreatedAt : {};
   state.ticketJira = (state.ticketJira && typeof state.ticketJira === 'object') ? state.ticketJira : {};
   state.ticketHubspotId = (state.ticketHubspotId && typeof state.ticketHubspotId === 'object') ? state.ticketHubspotId : {};
+  // Postgres (Ticket.displayNumber) is the source of truth for this, not
+  // whatever the client last sent - always overwritten below so the board
+  // and MCP tools can never drift apart on what a ticket's number is.
+  state.ticketNumbers = (state.ticketNumbers && typeof state.ticketNumbers === 'object') ? state.ticketNumbers : {};
 
   for (const ticket of tickets) {
     const externalId = String(ticket.externalId || ticket.emailMessageId || ticket.id);
@@ -941,6 +957,7 @@ async function hydrateStateFromDatabase(baseState = {}) {
     if (ticket.createdAt) state.ticketCreatedAt[externalId] = ticket.createdAt.toISOString();
     if (ticket.jiraTicketKey) state.ticketJira[externalId] = ticket.jiraTicketKey;
     if (ticket.hubspotTicketId) state.ticketHubspotId[externalId] = ticket.hubspotTicketId;
+    if (ticket.displayNumber) state.ticketNumbers[externalId] = ticket.displayNumber;
     if (Array.isArray(ticket.comments) && ticket.comments.length) {
       state.ticketComments[externalId] = ticket.comments.map(comment => ({
         text: comment.comment,
@@ -3643,11 +3660,26 @@ app.delete('/api/mcp/token', requireAuth, async (req, res) => {
 // mcp*() functions so there's exactly one implementation of each operation.
 const mcpApiLimiter = rateLimit({ windowMs: 60 * 1000, max: 60, standardHeaders: true, legacyHeaders: false });
 const MCP_TICKET_SELECT = {
-  id: true, externalId: true, subject: true, senderName: true, senderEmail: true, companyName: true,
+  id: true, externalId: true, displayNumber: true, subject: true, senderName: true, senderEmail: true, companyName: true,
   status: true, priority: true, category: true, assignedAgent: true, csAgent: true, jiraTicketKey: true,
   hubspotTicketId: true, createdAt: true, updatedAt: true, resolvedAt: true
 };
 const MCP_WRITABLE_STATUSES = new Set(['New', 'In Progress', 'Waiting on Us', 'Due for Test', 'Waiting on Contact', 'Resolved']);
+
+// The board shows agents a short display number (e.g. "#0042") - completely
+// different from Ticket.id (the DB primary key) and externalId (a long
+// Outlook message ID). MCP tools used to only expose the DB id, so Claude
+// had no way to know it wasn't the number agents actually mean when they say
+// "ticket 42". Ticket.displayNumber is Postgres-assigned (its own sequence,
+// atomic, survives restarts) - hydrateStateFromDatabase seeds it into the
+// same ticketNumbers map the board's own ensureTicketNumber() already reads,
+// so the board and MCP always agree on the same number with no frontend
+// changes needed.
+function withMcpTicketNumber(ticket) {
+  if (!ticket) return ticket;
+  const { id, displayNumber, ...rest } = ticket;
+  return { ticketNumber: displayNumber ? `#${String(displayNumber).padStart(4, '0')}` : null, internalId: id, ...rest };
+}
 
 async function mcpListTickets({ status, assignee, q, limit }) {
   const where = {};
@@ -3662,14 +3694,15 @@ async function mcpListTickets({ status, assignee, q, limit }) {
     ];
   }
   const take = Math.min(Number(limit) || 50, 200);
-  return prisma.ticket.findMany({ where, take, orderBy: { updatedAt: 'desc' }, select: MCP_TICKET_SELECT });
+  const tickets = await prisma.ticket.findMany({ where, take, orderBy: { updatedAt: 'desc' }, select: MCP_TICKET_SELECT });
+  return tickets.map(withMcpTicketNumber);
 }
 
 async function mcpGetTicket(id) {
   if (!Number.isInteger(id) || id <= 0) throw Object.assign(new Error('invalid_ticket_id'), { status: 400 });
   const ticket = await prisma.ticket.findUnique({ where: { id }, include: { comments: { orderBy: { createdAt: 'asc' } } } });
   if (!ticket) throw Object.assign(new Error('ticket_not_found'), { status: 404 });
-  return ticket;
+  return withMcpTicketNumber(ticket);
 }
 
 async function mcpAddComment(apiUser, id, rawText) {
@@ -3718,7 +3751,7 @@ async function mcpUpdateTicket(apiUser, id, fields) {
     if (alert) void sendResolvedTeamsNotifications([alert]).catch((error) => console.warn('Resolved Teams notification failed:', error?.message || error));
   }
 
-  return updated;
+  return withMcpTicketNumber(updated);
 }
 
 function mcpHttpErrorStatus(error) {
@@ -3754,6 +3787,203 @@ app.patch('/api/mcp/tickets/:id', requireApiToken, mcpApiLimiter, async (req, re
   }
 });
 
+// --- OAuth 2.1 (Authorization Code + PKCE) for the Claude connector --------
+// Wraps the app's *existing* session login - there is no separate identity
+// system here. A client (Claude) self-registers once (RFC 7591), then each
+// individual person authorizes it by logging into the normal Kanban login
+// page; the resulting access token is just a regular ApiToken row, so
+// everything downstream (/mcp, /api/mcp/*) needs zero changes.
+const oauthLimiter = rateLimit({ windowMs: 60 * 1000, max: 30, standardHeaders: true, legacyHeaders: false });
+const OAUTH_CODE_TTL_MS = 5 * 60 * 1000;
+
+function base64url(buffer) {
+  return buffer.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+function hashOAuthCode(rawCode) {
+  return crypto.createHash('sha256').update(String(rawCode || '')).digest('hex');
+}
+function oauthIssuer(req) {
+  return publicBaseUrlForRequest(req);
+}
+
+app.get('/.well-known/oauth-authorization-server', (req, res) => {
+  const issuer = oauthIssuer(req);
+  res.json({
+    issuer,
+    authorization_endpoint: `${issuer}/oauth/authorize`,
+    token_endpoint: `${issuer}/oauth/token`,
+    registration_endpoint: `${issuer}/oauth/register`,
+    response_types_supported: ['code'],
+    grant_types_supported: ['authorization_code'],
+    code_challenge_methods_supported: ['S256'],
+    token_endpoint_auth_methods_supported: ['none']
+  });
+});
+app.get('/.well-known/oauth-protected-resource', (req, res) => {
+  const issuer = oauthIssuer(req);
+  res.json({
+    resource: `${issuer}/mcp`,
+    authorization_servers: [issuer]
+  });
+});
+
+// Dynamic Client Registration (RFC 7591). Deliberately permissive (anyone
+// can register a client) - the security boundary isn't here, it's the
+// strict redirect_uri exact-match enforced at /oauth/authorize and
+// /oauth/token, which makes a registered client_id useless to an attacker
+// without also controlling one of the redirect_uris it registered.
+app.post('/oauth/register', oauthLimiter, async (req, res) => {
+  const redirectUris = Array.isArray(req.body?.redirect_uris) ? req.body.redirect_uris.map(String) : [];
+  if (!redirectUris.length) return res.status(400).json({ error: 'invalid_client_metadata', error_description: 'redirect_uris is required' });
+  for (const uri of redirectUris) {
+    try {
+      const parsed = new URL(uri);
+      if (parsed.protocol !== 'https:' && !(parsed.protocol === 'http:' && parsed.hostname === 'localhost')) {
+        return res.status(400).json({ error: 'invalid_redirect_uri', error_description: 'redirect_uris must be https (or http://localhost for local dev)' });
+      }
+    } catch (_error) {
+      return res.status(400).json({ error: 'invalid_redirect_uri' });
+    }
+  }
+  const clientId = `mcp_${crypto.randomBytes(16).toString('hex')}`;
+  const clientName = req.body?.client_name ? String(req.body.client_name).slice(0, 200) : null;
+  await prisma.oAuthClient.create({ data: { clientId, clientName, redirectUris } });
+  res.status(201).json({
+    client_id: clientId,
+    client_name: clientName,
+    redirect_uris: redirectUris,
+    token_endpoint_auth_method: 'none',
+    grant_types: ['authorization_code'],
+    response_types: ['code']
+  });
+});
+
+function renderOAuthConsentPage({ clientName, params }) {
+  const hiddenFields = Object.entries(params).map(([key, value]) => `<input type="hidden" name="${escapeHtml(key)}" value="${escapeHtml(value)}" />`).join('\n');
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Authorize Claude - Support Kanban</title>
+  <style>
+    body{font-family:Segoe UI,Arial,sans-serif;background:linear-gradient(135deg,#f8fafc,#e2e8f0);display:flex;min-height:100vh;align-items:center;justify-content:center;margin:0}
+    .card{background:#fff;padding:28px;border-radius:12px;box-shadow:0 12px 32px rgba(15,23,42,.12);width:min(420px,92vw)}
+    h1{margin:0 0 8px;font-size:20px;color:#1e293b}
+    p{margin:0 0 20px;color:#64748b;font-size:13px;line-height:1.5}
+    .actions{display:flex;gap:10px}
+    button{flex:1;padding:10px;border:none;border-radius:8px;font-weight:700;cursor:pointer}
+    .allow{background:#4f46e5;color:#fff}
+    .deny{background:#f1f5f9;color:#334155}
+  </style>
+</head>
+<body>
+  <form class="card" method="POST" action="/oauth/authorize/confirm">
+    <h1>Authorize connector</h1>
+    <p><strong>${escapeHtml(clientName || 'A Claude connector')}</strong> wants access to your Support Kanban account - it will be able to see and update tickets exactly as you can in the board. Only continue if you started this from Claude.</p>
+    ${hiddenFields}
+    <div class="actions">
+      <button class="deny" type="submit" name="decision" value="deny">Deny</button>
+      <button class="allow" type="submit" name="decision" value="allow">Allow</button>
+    </div>
+  </form>
+</body>
+</html>`;
+}
+
+app.get('/oauth/authorize', oauthLimiter, async (req, res) => {
+  const { response_type, client_id, redirect_uri, state, code_challenge, code_challenge_method } = req.query;
+  if (response_type !== 'code') return res.status(400).send('unsupported_response_type');
+  if (!client_id || !redirect_uri || !code_challenge || code_challenge_method !== 'S256') {
+    return res.status(400).send('invalid_request');
+  }
+  const client = await prisma.oAuthClient.findUnique({ where: { clientId: String(client_id) } });
+  if (!client || !client.redirectUris.includes(String(redirect_uri))) {
+    return res.status(400).send('invalid_client_or_redirect_uri');
+  }
+  if (!isAuthed(req)) {
+    const next = `/oauth/authorize?${new URLSearchParams(req.query).toString()}`;
+    return res.redirect(`/login?next=${encodeURIComponent(next)}`);
+  }
+  res.type('html').send(renderOAuthConsentPage({
+    clientName: client.clientName,
+    params: { client_id: String(client_id), redirect_uri: String(redirect_uri), state: String(state || ''), code_challenge: String(code_challenge), code_challenge_method: 'S256' }
+  }));
+});
+
+app.post('/oauth/authorize/confirm', oauthLimiter, requireAuth, async (req, res) => {
+  try {
+    const { client_id, redirect_uri, state, code_challenge, code_challenge_method, decision } = req.body || {};
+    const client = await prisma.oAuthClient.findUnique({ where: { clientId: String(client_id || '') } });
+    if (!client || !client.redirectUris.includes(String(redirect_uri || ''))) {
+      return res.status(400).send('invalid_client_or_redirect_uri');
+    }
+    const redirectUrl = new URL(String(redirect_uri));
+    if (decision !== 'allow') {
+      redirectUrl.searchParams.set('error', 'access_denied');
+      if (state) redirectUrl.searchParams.set('state', String(state));
+      return res.redirect(redirectUrl.toString());
+    }
+    const rawCode = crypto.randomBytes(32).toString('hex');
+    await prisma.oAuthAuthCode.create({
+      data: {
+        codeHash: hashOAuthCode(rawCode),
+        clientId: client.id,
+        userId: req.session.userId,
+        redirectUri: String(redirect_uri),
+        codeChallenge: String(code_challenge),
+        codeChallengeMethod: String(code_challenge_method || 'S256'),
+        expiresAt: new Date(Date.now() + OAUTH_CODE_TTL_MS)
+      }
+    });
+    redirectUrl.searchParams.set('code', rawCode);
+    if (state) redirectUrl.searchParams.set('state', String(state));
+    res.redirect(redirectUrl.toString());
+  } catch (error) {
+    console.error('OAuth authorize confirm failed:', error.message || error);
+    res.status(400).send('invalid_request');
+  }
+});
+
+app.post('/oauth/token', oauthLimiter, async (req, res) => {
+ try {
+  const { grant_type, code, redirect_uri, client_id, code_verifier } = req.body || {};
+  if (grant_type !== 'authorization_code') return res.status(400).json({ error: 'unsupported_grant_type' });
+  if (!code || !redirect_uri || !client_id || !code_verifier) return res.status(400).json({ error: 'invalid_request' });
+
+  const client = await prisma.oAuthClient.findUnique({ where: { clientId: String(client_id) } });
+  if (!client) return res.status(400).json({ error: 'invalid_client' });
+
+  const codeHash = hashOAuthCode(code);
+  // Atomic single-use claim, same pattern as the Resolved-Teams-DM and
+  // token dedup elsewhere in this file - a single UPDATE ... WHERE usedAt
+  // IS NULL guard means a replayed/duplicated exchange can never succeed
+  // twice, no read-then-write race.
+  const claimed = await prisma.$executeRaw`UPDATE "OAuthAuthCode" SET "usedAt" = NOW() WHERE "codeHash" = ${codeHash} AND "usedAt" IS NULL`;
+  if (claimed <= 0) return res.status(400).json({ error: 'invalid_grant' });
+
+  const authCode = await prisma.oAuthAuthCode.findUnique({ where: { codeHash } });
+  if (!authCode || authCode.clientId !== client.id || authCode.redirectUri !== String(redirect_uri) || authCode.expiresAt.getTime() < Date.now()) {
+    return res.status(400).json({ error: 'invalid_grant' });
+  }
+  const expectedChallenge = base64url(crypto.createHash('sha256').update(String(code_verifier)).digest());
+  if (expectedChallenge !== authCode.codeChallenge) {
+    return res.status(400).json({ error: 'invalid_grant', error_description: 'code_verifier mismatch' });
+  }
+
+  const user = await prisma.user.findUnique({ where: { id: authCode.userId } });
+  if (!user || user.isActive === false) return res.status(400).json({ error: 'invalid_grant' });
+
+  const rawToken = `kb_${crypto.randomBytes(32).toString('base64url')}`;
+  await prisma.apiToken.create({ data: { userId: user.id, tokenHash: hashApiToken(rawToken), label: `OAuth (${client.clientName || client.clientId})` } });
+
+  res.json({ access_token: rawToken, token_type: 'Bearer' });
+ } catch (error) {
+  console.error('OAuth token exchange failed:', error.message || error);
+  res.status(400).json({ error: 'invalid_request' });
+ }
+});
+
 // In-process MCP protocol endpoint - the same Bearer token used above, but
 // speaking actual MCP (JSON-RPC over Streamable HTTP) so it can be added as
 // a Claude custom connector directly, with no separate service to deploy.
@@ -3783,7 +4013,7 @@ function buildKanbanMcpServer(apiUser, { McpServer, z }) {
     'list_tickets',
     {
       title: 'List support tickets',
-      description: 'List/search tickets on the Support Kanban board. Filter by status, assignee, or a free-text search term.',
+      description: 'List/search tickets on the Support Kanban board. Filter by status, assignee, or a free-text search term. Each result has both a "ticketNumber" (e.g. "#0042" - the number agents actually use when they refer to a ticket, shown on the board) and an "internalId" (a database id, only useful as the ticketId argument to get_ticket/add_comment/update_ticket). Always report ticketNumber to the user, never internalId.',
       inputSchema: {
         status: z.enum(TICKET_STATUS_ENUM).optional(),
         assignee: z.string().optional().describe('Agent trigram, e.g. MBH'),
@@ -3798,7 +4028,11 @@ function buildKanbanMcpServer(apiUser, { McpServer, z }) {
 
   server.registerTool(
     'get_ticket',
-    { title: 'Get ticket detail', description: 'Get full detail for one ticket, including its comments.', inputSchema: { ticketId: z.number().int().positive() } },
+    {
+      title: 'Get ticket detail',
+      description: 'Get full detail for one ticket, including its comments. Report the returned "ticketNumber" (e.g. "#0042") to the user, not "internalId".',
+      inputSchema: { ticketId: z.number().int().positive().describe('The internalId from list_tickets/get_ticket - not the #-prefixed ticketNumber shown on the board.') }
+    },
     async ({ ticketId }) => {
       try { return mcpTextResult(await mcpGetTicket(ticketId)); } catch (error) { return mcpErrorResult(error); }
     }
@@ -3806,7 +4040,14 @@ function buildKanbanMcpServer(apiUser, { McpServer, z }) {
 
   server.registerTool(
     'add_comment',
-    { title: 'Add a comment to a ticket', description: 'Add an internal comment to a ticket.', inputSchema: { ticketId: z.number().int().positive(), text: z.string().min(1) } },
+    {
+      title: 'Add a comment to a ticket',
+      description: 'Add an internal comment to a ticket.',
+      inputSchema: {
+        ticketId: z.number().int().positive().describe('The internalId from list_tickets/get_ticket - not the #-prefixed ticketNumber shown on the board.'),
+        text: z.string().min(1)
+      }
+    },
     async ({ ticketId, text }) => {
       try { return mcpTextResult(await mcpAddComment(apiUser, ticketId, text)); } catch (error) { return mcpErrorResult(error); }
     }
@@ -3818,7 +4059,7 @@ function buildKanbanMcpServer(apiUser, { McpServer, z }) {
       title: 'Update a ticket',
       description: 'Move a ticket to a new stage, (re)assign it, or change its priority. Only send the fields you want to change.',
       inputSchema: {
-        ticketId: z.number().int().positive(),
+        ticketId: z.number().int().positive().describe('The internalId from list_tickets/get_ticket - not the #-prefixed ticketNumber shown on the board.'),
         status: z.enum(TICKET_STATUS_ENUM).optional(),
         assignedAgent: z.string().optional().describe('Agent trigram to assign, or empty string to unassign'),
         csAgent: z.string().optional().describe('CS owner trigram, or empty string to clear'),
