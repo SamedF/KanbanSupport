@@ -3258,28 +3258,33 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
     const company = String(req.query.company || 'all').trim();
     const jiraOnly = String(req.query.jiraOnly || '').toLowerCase() === 'true';
 
-    const where = {
+    const baseWhere = {
+      NOT: [{ category: { equals: 'Spam', mode: 'insensitive' } }]
+    };
+    if (company && company !== 'all') baseWhere.companyName = company;
+    if (jiraOnly) baseWhere.jiraTicketKey = { not: null };
+
+    const accessWhere = {};
+    if (role === 'cs') accessWhere.csAgent = username;
+    else if (role === 'support') accessWhere.assignedAgent = username;
+    else if (agent && agent !== 'ALL') {
+      if (CS_AGENT_CODES.has(agent)) accessWhere.csAgent = agent;
+      else if (SUPPORT_AGENT_CODES.has(agent)) accessWhere.assignedAgent = agent;
+      else accessWhere.OR = [{ csAgent: agent }, { assignedAgent: agent }];
+    } else if (team === 'cs') {
+      accessWhere.csAgent = { in: Array.from(CS_AGENT_CODES) };
+    } else if (team === 'support') {
+      accessWhere.assignedAgent = { in: Array.from(SUPPORT_AGENT_CODES) };
+    }
+    const rangeWhere = {
       OR: [
         { createdAt: { gte: bounds.start, lte: bounds.end } },
         { updatedAt: { gte: bounds.start, lte: bounds.end } },
         { resolvedAt: { gte: bounds.start, lte: bounds.end } }
-      ],
-      NOT: [{ category: { equals: 'Spam', mode: 'insensitive' } }]
+      ]
     };
-    if (company && company !== 'all') where.companyName = company;
-    if (jiraOnly) where.jiraTicketKey = { not: null };
-
-    if (role === 'cs') where.csAgent = username;
-    else if (role === 'support') where.assignedAgent = username;
-    else if (agent && agent !== 'ALL') {
-      if (CS_AGENT_CODES.has(agent)) where.csAgent = agent;
-      else if (SUPPORT_AGENT_CODES.has(agent)) where.assignedAgent = agent;
-      else where.OR = [{ csAgent: agent }, { assignedAgent: agent }];
-    } else if (team === 'cs') {
-      where.csAgent = { in: Array.from(CS_AGENT_CODES) };
-    } else if (team === 'support') {
-      where.assignedAgent = { in: Array.from(SUPPORT_AGENT_CODES) };
-    }
+    const statusWhere = { AND: [baseWhere, accessWhere] };
+    const where = { AND: [baseWhere, accessWhere, rangeWhere] };
 
     const tickets = await prisma.ticket.findMany({
       where,
@@ -3301,6 +3306,16 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
       },
       orderBy: [{ createdAt: 'desc' }]
     });
+    const statusTickets = await prisma.ticket.findMany({
+      where: statusWhere,
+      select: {
+        id: true,
+        status: true,
+        assignedAgent: true,
+        csAgent: true,
+        jiraTicketKey: true
+      }
+    });
     const scopedTickets = tickets.filter(ticket => kpiTicketInRange(ticket, bounds));
 
     const statusKeys = ['new', 'inp', 'wus', 'dft', 'wct', 'res'];
@@ -3319,9 +3334,13 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
       if (statusKey in agentRows[rowAgent]) agentRows[rowAgent][statusKey]++;
     };
 
-    for (const ticket of scopedTickets) {
+    for (const ticket of statusTickets) {
       const statusKey = normalizeDbStatusForBoard(ticket.status);
       if (statusKey in statusCounts) statusCounts[statusKey]++;
+    }
+
+    for (const ticket of scopedTickets) {
+      const statusKey = normalizeDbStatusForBoard(ticket.status);
       const category = String(ticket.category || 'Uncategorized').trim() || 'Uncategorized';
       categoryCounts[category] = (categoryCounts[category] || 0) + 1;
       const priority = String(ticket.priority || 'Normal').trim() || 'Normal';
@@ -3355,10 +3374,11 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
       range: { key: String(req.query.range || 'today'), label: bounds.label, start: bounds.start.toISOString(), end: bounds.end.toISOString() },
       filters: { team, agent, company, jiraOnly },
       totals: {
-        tickets: scopedTickets.length,
+        tickets: statusTickets.length,
+        rangeTickets: scopedTickets.length,
         ticketsWithCs,
         uniqueCs: Object.keys(csCounts).filter(k => k !== 'Unassigned').length,
-        jiraLinked: scopedTickets.filter(t => t.jiraTicketKey).length
+        jiraLinked: statusTickets.filter(t => t.jiraTicketKey).length
       },
       statusCounts,
       categoryRows: sortRows(categoryCounts).map(([category, count]) => ({ category, count })),

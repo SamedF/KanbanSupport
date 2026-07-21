@@ -4058,7 +4058,7 @@ async function renderKpiView(){
     const end=new Date(data.range?.end).toLocaleDateString('en-GB',{day:'2-digit',month:'short',year:'numeric'});
     const teamLabel=kpiTeamFilter==='cs'?'CS only':(kpiTeamFilter==='support'?'Support only':'All CS & Support');
     const agentLabel=kpiAgentFilter==='all'?'All CS & Support':kpiAgentFilter;
-    document.getElementById('kpi-range-label').textContent=`Live DB tickets: ${totals.tickets||0} (non-spam)  ${data.range?.label||'Range'}  ${start} to ${end}  ${teamLabel}  ${agentLabel}`;
+    document.getElementById('kpi-range-label').textContent=`Live DB tickets: ${totals.tickets||0} current (range: ${totals.rangeTickets||0})  ${data.range?.label||'Range'}  ${start} to ${end}  ${teamLabel}  ${agentLabel}`;
     document.getElementById('kpi-status-cards').innerHTML=`
       <div style="background:#fff;border:1px solid #d7d7d7;border-radius:12px;padding:12px;"><div style="font-size:12px;color:#666;">New</div><div style="font-family:Caladea,serif;font-size:30px;">${s.new||0}</div></div>
       <div style="background:#fff;border:1px solid #d7d7d7;border-radius:12px;padding:12px;"><div style="font-size:12px;color:#666;">In Progress</div><div style="font-family:Caladea,serif;font-size:30px;">${s.inp||0}</div></div>

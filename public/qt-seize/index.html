@@ -96,7 +96,34 @@
       font-weight: 700;
       color: #475467;
     }
+    .field-label {
+      display: grid;
+      gap: 7px;
+      font-size: 12px;
+      font-weight: 700;
+      color: #475467;
+    }
     .actions { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .mode-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .mode-option {
+      position: relative;
+      display: grid;
+      gap: 4px;
+      min-height: 74px;
+      padding: 10px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: #fff;
+      cursor: pointer;
+    }
+    .mode-option input { position: absolute; opacity: 0; pointer-events: none; }
+    .mode-option strong { font-size: 13px; color: var(--ink); }
+    .mode-option span { font-size: 12px; line-height: 1.35; color: var(--muted); font-weight: 500; }
+    .mode-option:has(input:checked) {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 2px rgba(15, 118, 110, .13);
+      background: #f0fdfa;
+    }
     .resolution-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
     .custom-resolution { display: none; grid-template-columns: 1fr 1fr; gap: 10px; }
     .custom-resolution.open { display: grid; }
@@ -183,7 +210,21 @@
           <input id="file" type="file" accept="image/png,image/jpeg,image/webp" hidden />
           <div>
             <strong>Drop one portrait image</strong>
-            <span>PNG, JPG, or WebP. QT Seize will keep the subject and fill the missing wide frame locally.</span>
+            <span>PNG, JPG, or WebP. QT Seize can expand the frame or resize the image only.</span>
+          </div>
+        </div>
+        <div class="field-label">Output mode
+          <div class="mode-grid">
+            <label class="mode-option">
+              <input type="radio" name="output-mode" value="expand" checked />
+              <strong>Expand</strong>
+              <span>Fill the selected frame from the same photo.</span>
+            </label>
+            <label class="mode-option">
+              <input type="radio" name="output-mode" value="resize" />
+              <strong>Resize</strong>
+              <span>Fit the original image into the selected size.</span>
+            </label>
           </div>
         </div>
         <label>Background style note
@@ -213,7 +254,7 @@
           <button class="secondary" id="download" type="button" disabled>Download</button>
         </div>
         <button class="secondary" id="reset" type="button">Reset</button>
-        <div class="note" id="details">Output is generated and resized locally as PNG.</div>
+        <div class="note" id="details">Expand fills the frame. Resize fits the original image into the selected PNG size.</div>
       </section>
       <section class="panel stage">
         <div class="preview" id="preview"><div class="empty">Upload a portrait image to start.</div></div>
@@ -235,6 +276,11 @@
     const customResolution = document.getElementById('custom-resolution');
     const customWidth = document.getElementById('custom-width');
     const customHeight = document.getElementById('custom-height');
+    const outputModeInputs = [...document.querySelectorAll('input[name="output-mode"]')];
+
+    function getOutputMode() {
+      return outputModeInputs.find(input => input.checked)?.value || 'expand';
+    }
 
     function setStatus(text, isError) {
       statusEl.textContent = text;
@@ -270,7 +316,8 @@
     function updateOutputMeta() {
       try {
         const target = getTargetSize();
-        outputMeta.textContent = `${target.width} x ${target.height} PNG`;
+        const modeLabel = getOutputMode() === 'resize' ? 'resize' : 'expand';
+        outputMeta.textContent = `${target.width} x ${target.height} PNG - ${modeLabel}`;
         preview.style.setProperty('--preview-aspect', `${target.width} / ${target.height}`);
       } catch (_) {
         outputMeta.textContent = 'Custom PNG';
@@ -338,6 +385,24 @@
       const h = img.naturalHeight * scale;
       ctx.drawImage(img, (target.width - w) / 2, (target.height - h) / 2, w, h);
       return canvasToDataUrl(canvas);
+    }
+
+    async function resizeOnly(file, target) {
+      const url = URL.createObjectURL(file);
+      try {
+        const img = await loadImageFromUrl(url);
+        const { canvas, ctx } = makeCanvas(target.width, target.height);
+        ctx.clearRect(0, 0, target.width, target.height);
+        const scale = Math.min(target.width / img.naturalWidth, target.height / img.naturalHeight);
+        const drawW = Math.round(img.naturalWidth * scale);
+        const drawH = Math.round(img.naturalHeight * scale);
+        const x = Math.round((target.width - drawW) / 2);
+        const y = Math.round((target.height - drawH) / 2);
+        ctx.drawImage(img, x, y, drawW, drawH);
+        return canvasToDataUrl(canvas);
+      } finally {
+        URL.revokeObjectURL(url);
+      }
     }
 
     async function generateLocalOutpaint(file, target) {
@@ -414,7 +479,7 @@
       sourceMeta.textContent = `${file.name} - ${img.naturalWidth} x ${img.naturalHeight}`;
       generateBtn.disabled = false;
       updateOutputMeta();
-      setStatus(img.naturalHeight >= img.naturalWidth ? 'Ready to generate.' : 'Ready, but this image is not portrait.');
+      setStatus(getOutputMode() === 'resize' ? 'Ready to resize.' : (img.naturalHeight >= img.naturalWidth ? 'Ready to generate.' : 'Ready, but this image is not portrait.'));
     }
 
     function cleanup() {
@@ -440,6 +505,12 @@
     resolutionSelect.addEventListener('change', updateOutputMeta);
     customWidth.addEventListener('input', updateOutputMeta);
     customHeight.addEventListener('input', updateOutputMeta);
+    outputModeInputs.forEach(input => input.addEventListener('change', () => {
+      const mode = getOutputMode();
+      generateBtn.textContent = mode === 'resize' ? 'Resize' : 'Generate';
+      updateOutputMeta();
+      if (state.file) setStatus(mode === 'resize' ? 'Ready to resize.' : 'Ready to generate.');
+    }));
 
     generateBtn.addEventListener('click', async () => {
       if (!state.file) return;
@@ -447,10 +518,15 @@
       downloadBtn.disabled = true;
       try {
         const target = getTargetSize();
+        const mode = getOutputMode();
         setStatus(`Preparing ${target.width} x ${target.height} canvas...`);
-        await prepareCanvases(state.file, target);
-        setStatus('Filling and resizing locally...');
-        const finalDataUrl = await generateLocalOutpaint(state.file, target);
+        const finalDataUrl = mode === 'resize'
+          ? await resizeOnly(state.file, target)
+          : await (async () => {
+              await prepareCanvases(state.file, target);
+              setStatus('Filling and resizing locally...');
+              return generateLocalOutpaint(state.file, target);
+            })();
         state.resultUrl = finalDataUrl;
         showImage(finalDataUrl);
         downloadBtn.disabled = false;
@@ -466,8 +542,9 @@
       if (!state.resultUrl) return;
       const link = document.createElement('a');
       const target = getTargetSize();
+      const mode = getOutputMode();
       link.href = state.resultUrl;
-      link.download = `qt-seize-${target.width}x${target.height}.png`;
+      link.download = `qt-seize-${mode}-${target.width}x${target.height}.png`;
       document.body.appendChild(link);
       link.click();
       link.remove();
