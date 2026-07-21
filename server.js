@@ -10,6 +10,7 @@ const bcrypt = require('bcryptjs');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { spawn } = require('child_process');
 
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
@@ -129,7 +130,7 @@ if (IS_PRODUCTION && SESSION_SECRET === 'change-this-session-secret') {
 }
 
 app.use(helmet({ contentSecurityPolicy: false }));
-app.use(express.json({ limit: '4mb' }));
+app.use(express.json({ limit: '25mb' }));
 fs.mkdirSync(AVATAR_UPLOAD_DIR, { recursive: true });
 // The default express-session MemoryStore keeps every session in the Node
 // process's own memory for as long as the process runs and never survives a
@@ -4041,6 +4042,54 @@ app.post('/api/mcp-proxy', requireAuth, async (req, res) => {
   } catch (err) {
     return res.status(500).json({ isError: true, error: String(err.message || err) });
   }
+});
+
+app.post('/api/qt-seize/outpaint', requireAuth, async (req, res) => {
+  const imageDataUrl = String(req.body?.imageDataUrl || '');
+  const maskDataUrl = String(req.body?.maskDataUrl || '');
+  const prompt = String(req.body?.prompt || '').trim();
+
+  if (!imageDataUrl || !maskDataUrl) {
+    return res.status(400).json({ error: 'missing_image_or_mask' });
+  }
+
+  if (!process.env.OPENAI_API_KEY) {
+    return res.status(503).json({ error: 'missing_openai_api_key' });
+  }
+
+  const workerPath = path.join(__dirname, 'scripts', 'qt_seize_outpaint.py');
+  const pythonCmd = process.env.PYTHON || process.env.PYTHON_BIN || 'python';
+  const child = spawn(pythonCmd, [workerPath], {
+    cwd: __dirname,
+    env: process.env,
+    stdio: ['pipe', 'pipe', 'pipe']
+  });
+  const timeout = setTimeout(() => child.kill('SIGTERM'), 120000);
+  let stdout = '';
+  let stderr = '';
+
+  child.stdout.on('data', chunk => { stdout += chunk.toString('utf8'); });
+  child.stderr.on('data', chunk => { stderr += chunk.toString('utf8'); });
+  child.stdin.end(JSON.stringify({ imageDataUrl, maskDataUrl, prompt }));
+
+  child.on('error', error => {
+    clearTimeout(timeout);
+    return res.status(500).json({ error: 'python_worker_failed', detail: String(error.message || error) });
+  });
+
+  child.on('close', code => {
+    clearTimeout(timeout);
+    if (code !== 0) {
+      return res.status(500).json({ error: 'outpaint_failed', detail: stderr.slice(0, 1200) || stdout.slice(0, 1200) });
+    }
+    try {
+      const payload = JSON.parse(stdout);
+      if (!payload?.imageDataUrl) return res.status(500).json({ error: 'missing_ai_image' });
+      return res.json(payload);
+    } catch (error) {
+      return res.status(500).json({ error: 'invalid_worker_response', detail: String(error.message || error) });
+    }
+  });
 });
 
 app.get(['/qt-seize', '/qt-seize/'], requireAuth, (req, res) => {
