@@ -774,9 +774,9 @@ header {
 }
 
 .column {
-  flex: 1 0 var(--board-col-w);
-  min-width: min(var(--board-col-w), calc(100vw - 32px));
-  max-width: 420px;
+  flex: 1 1 var(--board-col-w);
+  min-width: min(190px, calc(100vw - 32px));
+  max-width: 480px;
   display: flex;
   flex-direction: column;
   scroll-snap-align: start;
@@ -2646,7 +2646,7 @@ th {
   }
 
   .column {
-    min-width: 285px;
+    min-width: min(240px, calc(100vw - 28px));
   }
 }
 </style>
