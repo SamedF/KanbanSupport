@@ -2376,6 +2376,23 @@ textarea:focus {
   gap: 7px;
 }
 
+.crm-nav-section {
+  display: grid;
+  gap: 7px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(255,255,255,.10);
+}
+
+.crm-nav-section-title {
+  padding: 0 4px;
+  font-size: 11px;
+  font-weight: 900;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: rgba(255,255,255,.56);
+}
+
 .crm-nav-btn {
   width: 100%;
   text-align: left;
@@ -2661,7 +2678,10 @@ th {
       <button class="crm-nav-btn" id="spam-view-btn"> Spam Inbox <span class="spam-count-badge" id="spam-count" style="display:none">0</span></button>
       <button class="crm-nav-btn" id="companies-view-btn"> Companies</button>
       <button class="crm-nav-btn" id="dashboard-view-btn"> Data Hygiene</button>
-      <button class="crm-nav-btn" id="qt-seize-view-btn"> QT Seize</button>
+      <div class="crm-nav-section" aria-label="QT-Tools">
+        <div class="crm-nav-section-title">QT-Tools</div>
+        <button class="crm-nav-btn" id="qt-seize-view-btn"> QT Seize</button>
+      </div>
     </div>
   </aside>
   <main class="crm-main">

@@ -355,6 +355,12 @@
       return finalCanvas.canvas;
     }
 
+    function resizeImageHighQuality(img, width, height) {
+      const start = makeCanvas(img.naturalWidth, img.naturalHeight);
+      start.ctx.drawImage(img, 0, 0);
+      return resizeCanvasHighQuality(start.canvas, width, height);
+    }
+
     async function prepareCanvases(file, target) {
       const url = URL.createObjectURL(file);
       const img = await loadImageFromUrl(url);
@@ -391,15 +397,8 @@
       const url = URL.createObjectURL(file);
       try {
         const img = await loadImageFromUrl(url);
-        const { canvas, ctx } = makeCanvas(target.width, target.height);
-        ctx.clearRect(0, 0, target.width, target.height);
-        const scale = Math.min(target.width / img.naturalWidth, target.height / img.naturalHeight);
-        const drawW = Math.round(img.naturalWidth * scale);
-        const drawH = Math.round(img.naturalHeight * scale);
-        const x = Math.round((target.width - drawW) / 2);
-        const y = Math.round((target.height - drawH) / 2);
-        ctx.drawImage(img, x, y, drawW, drawH);
-        return canvasToDataUrl(canvas);
+        const resizedCanvas = resizeImageHighQuality(img, target.width, target.height);
+        return canvasToDataUrl(resizedCanvas);
       } finally {
         URL.revokeObjectURL(url);
       }
@@ -521,7 +520,10 @@
         const mode = getOutputMode();
         setStatus(`Preparing ${target.width} x ${target.height} canvas...`);
         const finalDataUrl = mode === 'resize'
-          ? await resizeOnly(state.file, target)
+          ? await (async () => {
+              setStatus(`Resampling to ${target.width} x ${target.height}...`);
+              return resizeOnly(state.file, target);
+            })()
           : await (async () => {
               await prepareCanvases(state.file, target);
               setStatus('Filling and resizing locally...');
