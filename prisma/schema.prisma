@@ -21,6 +21,25 @@ model User {
   events        TicketEvent[]
   apiTokens     ApiToken[]
   oauthAuthCodes OAuthAuthCode[]
+  templatesCreated    Template[] @relation("TemplateCreatedBy")
+  templatesLastEdited Template[] @relation("TemplateLastEditedBy")
+}
+
+// Shared, team-wide message templates (CS/support use these to draft ticket
+// descriptions/comments with fill-in-the-blank [bracketed] placeholders,
+// parsed client-side). Not per-user - anyone on the team can edit/delete any
+// template, same trust model as the shared ticket board itself.
+model Template {
+  id                 Int      @id @default(autoincrement())
+  name               String
+  body               String
+  createdByUserId    Int?
+  lastEditedByUserId Int?
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  createdBy    User? @relation("TemplateCreatedBy", fields: [createdByUserId], references: [id], onDelete: SetNull)
+  lastEditedBy User? @relation("TemplateLastEditedBy", fields: [lastEditedByUserId], references: [id], onDelete: SetNull)
 }
 
 model ApiToken {
