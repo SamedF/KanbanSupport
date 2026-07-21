@@ -72,15 +72,22 @@
     .drop.dragging { border-color: var(--accent); background: #ecfdf9; }
     .drop strong { display: block; font-size: 18px; margin-bottom: 8px; }
     .drop span, .note { color: var(--muted); font-size: 13px; line-height: 1.45; }
-    textarea {
+    textarea, select, input[type="number"] {
       width: 100%;
-      min-height: 90px;
       resize: vertical;
       border: 1px solid var(--border);
       border-radius: 8px;
       padding: 10px 11px;
       font: inherit;
       color: var(--ink);
+      background: #fff;
+    }
+    textarea {
+      min-height: 90px;
+    }
+    select, input[type="number"] {
+      min-height: 42px;
+      resize: none;
     }
     label {
       display: grid;
@@ -90,6 +97,9 @@
       color: #475467;
     }
     .actions { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .resolution-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .custom-resolution { display: none; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .custom-resolution.open { display: grid; }
     button {
       border: 1px solid transparent;
       border-radius: 8px;
@@ -165,7 +175,7 @@
   <div class="app">
     <header>
       <h1>QT Seize</h1>
-      <div class="status" id="status">Portrait image to locally-filled 1920 x 1080.</div>
+      <div class="status" id="status">Portrait image to locally-filled 16:9 output.</div>
     </header>
     <main>
       <section class="panel controls">
@@ -179,12 +189,31 @@
         <label>Background style note
           <textarea id="prompt">Local fill preserves the original image and builds a soft 16:9 background from the same photo. No API key or paid model is required.</textarea>
         </label>
+        <label>Resolution
+          <select id="resolution">
+            <option value="1920x1080">Full HD - 1920 x 1080</option>
+            <option value="2560x1440">QHD - 2560 x 1440</option>
+            <option value="3840x2160">4K UHD - 3840 x 2160</option>
+            <option value="1280x720">HD - 1280 x 720</option>
+            <option value="1080x1080">Square - 1080 x 1080</option>
+            <option value="1080x1920">Story - 1080 x 1920</option>
+            <option value="custom">Custom</option>
+          </select>
+        </label>
+        <div class="custom-resolution" id="custom-resolution">
+          <label>Width
+            <input id="custom-width" type="number" min="256" max="7680" step="1" value="1920" />
+          </label>
+          <label>Height
+            <input id="custom-height" type="number" min="256" max="7680" step="1" value="1080" />
+          </label>
+        </div>
         <div class="actions">
           <button class="primary" id="generate" type="button" disabled>Generate</button>
           <button class="secondary" id="download" type="button" disabled>Download</button>
         </div>
         <button class="secondary" id="reset" type="button">Reset</button>
-        <div class="note" id="details">Output is always normalized to 1920 x 1080 PNG.</div>
+        <div class="note" id="details">Output is generated and resized locally as PNG.</div>
       </section>
       <section class="panel stage">
         <div class="preview" id="preview"><div class="empty">Upload a portrait image to start.</div></div>
@@ -193,16 +222,19 @@
     </main>
   </div>
   <script>
-    const TARGET_W = 1920;
-    const TARGET_H = 1080;
     const state = { file: null, sourceUrl: '', resultUrl: '' };
     const fileInput = document.getElementById('file');
     const drop = document.getElementById('drop');
     const preview = document.getElementById('preview');
     const statusEl = document.getElementById('status');
     const sourceMeta = document.getElementById('sourceMeta');
+    const outputMeta = document.getElementById('outputMeta');
     const generateBtn = document.getElementById('generate');
     const downloadBtn = document.getElementById('download');
+    const resolutionSelect = document.getElementById('resolution');
+    const customResolution = document.getElementById('custom-resolution');
+    const customWidth = document.getElementById('custom-width');
+    const customHeight = document.getElementById('custom-height');
 
     function setStatus(text, isError) {
       statusEl.textContent = text;
@@ -222,80 +254,119 @@
       return canvas.toDataURL('image/png');
     }
 
-    async function prepareCanvases(file) {
+    function getTargetSize() {
+      if (resolutionSelect.value === 'custom') {
+        const width = Math.round(Number(customWidth.value || 0));
+        const height = Math.round(Number(customHeight.value || 0));
+        if (!Number.isFinite(width) || !Number.isFinite(height) || width < 256 || height < 256 || width > 7680 || height > 7680) {
+          throw new Error('Choose a resolution between 256 and 7680 pixels per side.');
+        }
+        return { width, height };
+      }
+      const [width, height] = resolutionSelect.value.split('x').map(Number);
+      return { width, height };
+    }
+
+    function updateOutputMeta() {
+      try {
+        const target = getTargetSize();
+        outputMeta.textContent = `${target.width} x ${target.height} PNG`;
+        preview.style.setProperty('--preview-aspect', `${target.width} / ${target.height}`);
+      } catch (_) {
+        outputMeta.textContent = 'Custom PNG';
+      }
+      customResolution.classList.toggle('open', resolutionSelect.value === 'custom');
+    }
+
+    function makeCanvas(width, height) {
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext('2d');
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = 'high';
+      return { canvas, ctx };
+    }
+
+    function drawCover(ctx, img, width, height) {
+      const scale = Math.max(width / img.naturalWidth, height / img.naturalHeight);
+      const w = img.naturalWidth * scale;
+      const h = img.naturalHeight * scale;
+      ctx.drawImage(img, (width - w) / 2, (height - h) / 2, w, h);
+    }
+
+    function resizeCanvasHighQuality(sourceCanvas, width, height) {
+      let current = sourceCanvas;
+      while (current.width * 0.5 > width && current.height * 0.5 > height) {
+        const next = makeCanvas(Math.max(width, Math.round(current.width * 0.5)), Math.max(height, Math.round(current.height * 0.5)));
+        next.ctx.drawImage(current, 0, 0, next.canvas.width, next.canvas.height);
+        current = next.canvas;
+      }
+      if (current.width === width && current.height === height) return current;
+      const finalCanvas = makeCanvas(width, height);
+      finalCanvas.ctx.drawImage(current, 0, 0, width, height);
+      return finalCanvas.canvas;
+    }
+
+    async function prepareCanvases(file, target) {
       const url = URL.createObjectURL(file);
       const img = await loadImageFromUrl(url);
       URL.revokeObjectURL(url);
-      const scale = Math.min(TARGET_H / img.naturalHeight, TARGET_W / img.naturalWidth);
+      const scale = Math.min(target.height / img.naturalHeight, target.width / img.naturalWidth);
       const drawW = Math.round(img.naturalWidth * scale);
       const drawH = Math.round(img.naturalHeight * scale);
-      const x = Math.round((TARGET_W - drawW) / 2);
-      const y = Math.round((TARGET_H - drawH) / 2);
+      const x = Math.round((target.width - drawW) / 2);
+      const y = Math.round((target.height - drawH) / 2);
 
-      const imageCanvas = document.createElement('canvas');
-      imageCanvas.width = TARGET_W;
-      imageCanvas.height = TARGET_H;
-      const imageCtx = imageCanvas.getContext('2d');
-      imageCtx.clearRect(0, 0, TARGET_W, TARGET_H);
+      const { canvas: imageCanvas, ctx: imageCtx } = makeCanvas(target.width, target.height);
+      imageCtx.clearRect(0, 0, target.width, target.height);
       imageCtx.drawImage(img, x, y, drawW, drawH);
 
-      const maskCanvas = document.createElement('canvas');
-      maskCanvas.width = TARGET_W;
-      maskCanvas.height = TARGET_H;
-      const maskCtx = maskCanvas.getContext('2d');
-      maskCtx.clearRect(0, 0, TARGET_W, TARGET_H);
+      const { canvas: maskCanvas, ctx: maskCtx } = makeCanvas(target.width, target.height);
+      maskCtx.clearRect(0, 0, target.width, target.height);
       maskCtx.fillStyle = '#ffffff';
       maskCtx.fillRect(x, y, drawW, drawH);
 
       return { imageDataUrl: canvasToDataUrl(imageCanvas), maskDataUrl: canvasToDataUrl(maskCanvas), width: img.naturalWidth, height: img.naturalHeight };
     }
 
-    async function normalizeToTarget(dataUrl) {
+    async function normalizeToTarget(dataUrl, target) {
       const img = await loadImageFromUrl(dataUrl);
-      const canvas = document.createElement('canvas');
-      canvas.width = TARGET_W;
-      canvas.height = TARGET_H;
-      const ctx = canvas.getContext('2d');
-      ctx.imageSmoothingEnabled = true;
-      ctx.imageSmoothingQuality = 'high';
-      const scale = Math.max(TARGET_W / img.naturalWidth, TARGET_H / img.naturalHeight);
+      const { canvas, ctx } = makeCanvas(target.width, target.height);
+      const scale = Math.max(target.width / img.naturalWidth, target.height / img.naturalHeight);
       const w = img.naturalWidth * scale;
       const h = img.naturalHeight * scale;
-      ctx.drawImage(img, (TARGET_W - w) / 2, (TARGET_H - h) / 2, w, h);
+      ctx.drawImage(img, (target.width - w) / 2, (target.height - h) / 2, w, h);
       return canvasToDataUrl(canvas);
     }
 
-    async function generateLocalOutpaint(file) {
+    async function generateLocalOutpaint(file, target) {
       const url = URL.createObjectURL(file);
       try {
         const img = await loadImageFromUrl(url);
-        const canvas = document.createElement('canvas');
-        canvas.width = TARGET_W;
-        canvas.height = TARGET_H;
-        const ctx = canvas.getContext('2d');
-        ctx.imageSmoothingEnabled = true;
-        ctx.imageSmoothingQuality = 'high';
+        const workScale = target.width < 1600 && target.height < 1000 ? 2 : 1;
+        const workW = target.width * workScale;
+        const workH = target.height * workScale;
+        const { canvas, ctx } = makeCanvas(workW, workH);
 
-        const bgScale = Math.max(TARGET_W / img.naturalWidth, TARGET_H / img.naturalHeight);
-        const bgW = img.naturalWidth * bgScale;
-        const bgH = img.naturalHeight * bgScale;
-        ctx.filter = 'blur(34px) saturate(1.08) brightness(.98)';
-        ctx.drawImage(img, (TARGET_W - bgW) / 2, (TARGET_H - bgH) / 2, bgW, bgH);
+        const blur = Math.max(18, Math.round(Math.min(workW, workH) * .032));
+        ctx.filter = `blur(${blur}px) saturate(1.08) brightness(.98)`;
+        drawCover(ctx, img, workW, workH);
         ctx.filter = 'none';
 
-        const overlay = ctx.createLinearGradient(0, 0, TARGET_W, 0);
+        const overlay = ctx.createLinearGradient(0, 0, workW, 0);
         overlay.addColorStop(0, 'rgba(17,24,39,.16)');
         overlay.addColorStop(.32, 'rgba(17,24,39,.03)');
         overlay.addColorStop(.68, 'rgba(17,24,39,.03)');
         overlay.addColorStop(1, 'rgba(17,24,39,.16)');
         ctx.fillStyle = overlay;
-        ctx.fillRect(0, 0, TARGET_W, TARGET_H);
+        ctx.fillRect(0, 0, workW, workH);
 
-        const fgScale = Math.min(TARGET_H / img.naturalHeight, TARGET_W / img.naturalWidth);
+        const fgScale = Math.min(workH / img.naturalHeight, workW / img.naturalWidth);
         const fgW = Math.round(img.naturalWidth * fgScale);
         const fgH = Math.round(img.naturalHeight * fgScale);
-        const x = Math.round((TARGET_W - fgW) / 2);
-        const y = Math.round((TARGET_H - fgH) / 2);
+        const x = Math.round((workW - fgW) / 2);
+        const y = Math.round((workH - fgH) / 2);
 
         const feather = Math.max(24, Math.round(Math.min(fgW, fgH) * .035));
         ctx.save();
@@ -314,7 +385,8 @@
         ctx.fillRect(x, y, fgW, fgH);
         ctx.restore();
 
-        return canvasToDataUrl(canvas);
+        const finalCanvas = resizeCanvasHighQuality(canvas, target.width, target.height);
+        return canvasToDataUrl(finalCanvas);
       } finally {
         URL.revokeObjectURL(url);
       }
@@ -325,6 +397,10 @@
       const img = document.createElement('img');
       img.src = url;
       img.alt = 'QT Seize preview';
+      try {
+        const target = getTargetSize();
+        img.style.aspectRatio = `${target.width} / ${target.height}`;
+      } catch (_) {}
       preview.appendChild(img);
     }
 
@@ -337,6 +413,7 @@
       showImage(state.sourceUrl);
       sourceMeta.textContent = `${file.name} - ${img.naturalWidth} x ${img.naturalHeight}`;
       generateBtn.disabled = false;
+      updateOutputMeta();
       setStatus(img.naturalHeight >= img.naturalWidth ? 'Ready to generate.' : 'Ready, but this image is not portrait.');
     }
 
@@ -360,20 +437,24 @@
       drop.classList.remove('dragging');
       selectFile(event.dataTransfer.files[0]);
     });
+    resolutionSelect.addEventListener('change', updateOutputMeta);
+    customWidth.addEventListener('input', updateOutputMeta);
+    customHeight.addEventListener('input', updateOutputMeta);
 
     generateBtn.addEventListener('click', async () => {
       if (!state.file) return;
       generateBtn.disabled = true;
       downloadBtn.disabled = true;
-      setStatus('Preparing 1920 x 1080 mask...');
       try {
-        await prepareCanvases(state.file);
-        setStatus('Filling 16:9 frame locally...');
-        const finalDataUrl = await generateLocalOutpaint(state.file);
+        const target = getTargetSize();
+        setStatus(`Preparing ${target.width} x ${target.height} canvas...`);
+        await prepareCanvases(state.file, target);
+        setStatus('Filling and resizing locally...');
+        const finalDataUrl = await generateLocalOutpaint(state.file, target);
         state.resultUrl = finalDataUrl;
         showImage(finalDataUrl);
         downloadBtn.disabled = false;
-        setStatus('Done. Output is 1920 x 1080.');
+        setStatus(`Done. Output is ${target.width} x ${target.height}.`);
       } catch (error) {
         setStatus(error.message || String(error), true);
       } finally {
@@ -384,8 +465,9 @@
     downloadBtn.addEventListener('click', () => {
       if (!state.resultUrl) return;
       const link = document.createElement('a');
+      const target = getTargetSize();
       link.href = state.resultUrl;
-      link.download = 'qt-seize-1920x1080.png';
+      link.download = `qt-seize-${target.width}x${target.height}.png`;
       document.body.appendChild(link);
       link.click();
       link.remove();
@@ -396,8 +478,10 @@
       preview.innerHTML = '<div class="empty">Upload a portrait image to start.</div>';
       sourceMeta.textContent = 'No source selected';
       generateBtn.disabled = true;
-      setStatus('Portrait image to locally-filled 1920 x 1080.');
+      updateOutputMeta();
+      setStatus('Portrait image to locally-filled output.');
     });
+    updateOutputMeta();
   </script>
 </body>
 </html>

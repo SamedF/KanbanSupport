@@ -2758,6 +2758,8 @@ th {
       <label for="kpi-time-filter" style="font-size:12px;color:#555;">Time range</label>
       <select class="filter-sel" id="kpi-time-filter" style="max-width:210px;">
         <option value="today">Today</option>
+        <option value="this_week">This week</option>
+        <option value="this_month">This month</option>
         <option value="last_week">Last week</option>
         <option value="last_30_days">Last 30 days</option>
         <option value="this_quarter">This quarter</option>
@@ -2786,6 +2788,16 @@ th {
     <div style="background:#fff;border:1px solid #d7d7d7;border-radius:14px;padding:12px;box-shadow:0 6px 16px rgba(0,0,0,.06);">
       <div style="font-family:Caladea,serif;font-size:24px;margin-bottom:8px;">CS / Support Workload by Status</div>
       <div id="kpi-agent-chart"></div>
+    </div>
+  </div>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px;">
+    <div style="background:#fff;border:1px solid #d7d7d7;border-radius:14px;padding:12px;box-shadow:0 6px 16px rgba(0,0,0,.06);">
+      <div style="font-family:Caladea,serif;font-size:24px;margin-bottom:8px;">Tickets by Category</div>
+      <div id="kpi-category-chart"></div>
+    </div>
+    <div style="background:#fff;border:1px solid #d7d7d7;border-radius:14px;padding:12px;box-shadow:0 6px 16px rgba(0,0,0,.06);">
+      <div style="font-family:Caladea,serif;font-size:24px;margin-bottom:8px;">Tickets by Priority</div>
+      <div id="kpi-priority-chart"></div>
     </div>
   </div>
   <div style="background:#fff;border:1px solid #d7d7d7;border-radius:14px;padding:12px;box-shadow:0 6px 16px rgba(0,0,0,.06);margin-bottom:12px;">
@@ -4004,7 +4016,76 @@ function ticketMatchesAgentFilter(ticket,agentCode){
   if(CS_AGENTS.includes(agentCode))return csOwner===agentCode;
   return assignee===agentCode||csOwner===agentCode;
 }
-function renderKpiView(){
+function renderSimpleKpiRows(rows,labelKey,valueKey){
+  const max=Math.max(1,...(rows||[]).map(r=>Number(r[valueKey]||0)));
+  return rows?.length?`<div style="display:flex;flex-direction:column;gap:8px;">${rows.map(r=>{const label=r[labelKey]||'Unknown';const value=Number(r[valueKey]||0);return `<div><div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px;"><span style="font-weight:700;">${esc(label)}</span><span>${value}</span></div><div style="height:12px;background:#f1f5f9;border-radius:999px;overflow:hidden;"><div style="height:12px;width:${Math.round((value/max)*100)}%;background:#0f766e;"></div></div></div>`;}).join('')}</div>`:'<div style="font-size:12px;color:#666;">No data in this range.</div>';
+}
+async function renderKpiView(){
+  if(!currentUserCanViewAllTickets()){
+    const role=currentUserRole();
+    if(role==='cs')kpiTeamFilter='cs';
+    else if(role==='support')kpiTeamFilter='support';
+    kpiAgentFilter=enforcedAgentFilter();
+  }
+  const canViewAllTickets=currentUserCanViewAllTickets();
+  const agentFilterEl=document.getElementById('kpi-agent-filter');
+  const teamFilterEl=document.getElementById('kpi-team-filter');
+  document.getElementById('kpi-time-filter').value=kpiTimeFilter;
+  document.getElementById('kpi-team-filter').value=kpiTeamFilter;
+  document.getElementById('kpi-range-label').textContent='Loading live KPI stats...';
+  try{
+    const params=new URLSearchParams({range:kpiTimeFilter,team:kpiTeamFilter,agent:kpiAgentFilter,company:activeCompany||'all',jiraOnly:activeJira?'true':'false'});
+    const res=await fetch('/api/tickets/kpis?'+params.toString(),{credentials:'include'});
+    const data=await res.json().catch(()=>({}));
+    if(!res.ok)throw new Error(data?.error||'kpi_fetch_failed');
+    if(canViewAllTickets){
+      const options=['<option value="all">All</option>',...(data.agents||[]).map(a=>`<option value="${esc(a)}">${esc(a)}</option>`)];
+      agentFilterEl.innerHTML=options.join('');
+      if(kpiAgentFilter!=='all'&&!(data.agents||[]).includes(kpiAgentFilter))kpiAgentFilter='all';
+      agentFilterEl.value=kpiAgentFilter;
+      agentFilterEl.disabled=false;
+      teamFilterEl.disabled=false;
+    }else{
+      const agentValue=enforcedAgentFilter()||'all';
+      agentFilterEl.innerHTML=`<option value="${esc(agentValue)}">${esc(agentValue)}</option>`;
+      agentFilterEl.value=agentValue;
+      agentFilterEl.disabled=true;
+      teamFilterEl.disabled=true;
+    }
+    const s=data.statusCounts||{};
+    const totals=data.totals||{};
+    const start=new Date(data.range?.start).toLocaleDateString('en-GB',{day:'2-digit',month:'short',year:'numeric'});
+    const end=new Date(data.range?.end).toLocaleDateString('en-GB',{day:'2-digit',month:'short',year:'numeric'});
+    const teamLabel=kpiTeamFilter==='cs'?'CS only':(kpiTeamFilter==='support'?'Support only':'All CS & Support');
+    const agentLabel=kpiAgentFilter==='all'?'All CS & Support':kpiAgentFilter;
+    document.getElementById('kpi-range-label').textContent=`Live DB tickets: ${totals.tickets||0} (non-spam)  ${data.range?.label||'Range'}  ${start} to ${end}  ${teamLabel}  ${agentLabel}`;
+    document.getElementById('kpi-status-cards').innerHTML=`
+      <div style="background:#fff;border:1px solid #d7d7d7;border-radius:12px;padding:12px;"><div style="font-size:12px;color:#666;">New</div><div style="font-family:Caladea,serif;font-size:30px;">${s.new||0}</div></div>
+      <div style="background:#fff;border:1px solid #d7d7d7;border-radius:12px;padding:12px;"><div style="font-size:12px;color:#666;">In Progress</div><div style="font-family:Caladea,serif;font-size:30px;">${s.inp||0}</div></div>
+      <div style="background:#fff;border:1px solid #d7d7d7;border-radius:12px;padding:12px;"><div style="font-size:12px;color:#666;">Waiting On Us</div><div style="font-family:Caladea,serif;font-size:30px;">${s.wus||0}</div></div>
+      <div style="background:#fff;border:1px solid #d7d7d7;border-radius:12px;padding:12px;"><div style="font-size:12px;color:#666;">Due for test</div><div style="font-family:Caladea,serif;font-size:30px;">${s.dft||0}</div></div>
+      <div style="background:#fff;border:1px solid #d7d7d7;border-radius:12px;padding:12px;"><div style="font-size:12px;color:#666;">Waiting On Contact</div><div style="font-family:Caladea,serif;font-size:30px;">${s.wct||0}</div></div>
+      <div style="background:#fff;border:1px solid #d7d7d7;border-radius:12px;padding:12px;"><div style="font-size:12px;color:#666;">Resolved</div><div style="font-family:Caladea,serif;font-size:30px;">${s.res||0}</div></div>
+      <div style="background:#fff;border:1px solid #d7d7d7;border-radius:12px;padding:12px;"><div style="font-size:12px;color:#666;">Tickets with CS</div><div style="font-family:Caladea,serif;font-size:30px;">${totals.ticketsWithCs||0}</div></div>
+      <div style="background:#fff;border:1px solid #d7d7d7;border-radius:12px;padding:12px;"><div style="font-size:12px;color:#666;">Jira Linked</div><div style="font-family:Caladea,serif;font-size:30px;">${totals.jiraLinked||0}</div></div>`;
+    const maxStatus=Math.max(1,s.new||0,s.inp||0,s.wus||0,s.dft||0,s.wct||0,s.res||0);
+    document.getElementById('kpi-status-chart').innerHTML=renderSimpleKpiRows([{label:'New',count:s.new||0},{label:'In Progress',count:s.inp||0},{label:'Waiting On Us',count:s.wus||0},{label:'Due for test',count:s.dft||0},{label:'Waiting On Contact',count:s.wct||0},{label:'Resolved',count:s.res||0}], 'label', 'count').replaceAll('background:#0f766e','background:#3b82f6');
+    const rows=data.agentRows||[];
+    const agentChartRows=rows.slice(0,10).map(r=>{const total=Math.max(1,r.total);const n=Math.round((r.new/total)*100);const i=Math.round((r.inp/total)*100);const wu=Math.round(((r.wus||0)/total)*100);const dft=Math.round(((r.dft||0)/total)*100);const wc=Math.round(((r.wct||0)/total)*100);const rs=Math.max(0,100-n-i-wu-dft-wc);return `<div style="margin-bottom:8px;"><div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px;"><span style="font-weight:700;">${esc(r.agent)}</span><span>${r.total}</span></div><div style="height:12px;background:#f1f5f9;border-radius:999px;overflow:hidden;display:flex;"><div style="width:${n}%;background:#f59e0b;"></div><div style="width:${i}%;background:#3b82f6;"></div><div style="width:${wu}%;background:#2563eb;"></div><div style="width:${dft}%;background:#0ea5e9;"></div><div style="width:${wc}%;background:#e11d48;"></div><div style="width:${rs}%;background:#10b981;"></div></div></div>`;}).join('');
+    document.getElementById('kpi-agent-chart').innerHTML=agentChartRows||'<div style="font-size:12px;color:#666;">No data in this range.</div>';
+    document.getElementById('kpi-cs-chart').innerHTML=renderSimpleKpiRows(data.csRows||[],'agent','count');
+    document.getElementById('kpi-category-chart').innerHTML=renderSimpleKpiRows(data.categoryRows||[],'category','count');
+    document.getElementById('kpi-priority-chart').innerHTML=renderSimpleKpiRows(data.priorityRows||[],'priority','count');
+    document.getElementById('kpi-company-rows').innerHTML=(data.companyRows||[]).length?data.companyRows.map(r=>`<tr style="border-bottom:1px solid #f0f0f0;"><td style="padding:8px 10px;">${esc(r.company)}</td><td style="padding:8px 10px;">${r.count}</td></tr>`).join(''):'<tr><td colspan="2" style="padding:12px 10px;color:#666;">No tickets for this filter.</td></tr>';
+    document.getElementById('kpi-jira-ticket-rows').innerHTML=(data.jiraRows||[]).length?data.jiraRows.map(x=>`<tr style="border-bottom:1px solid #f0f0f0;"><td style="padding:8px 10px;">${esc(x.ticket)}</td><td style="padding:8px 10px;">${esc(x.company)}</td><td style="padding:8px 10px;">${esc(x.agent)}</td><td style="padding:8px 10px;font-weight:700;">${esc(x.jira)}</td></tr>`).join(''):'<tr><td colspan="4" style="padding:12px 10px;color:#666;">No Jira-linked tickets for this filter.</td></tr>';
+    const body=document.getElementById('kpi-agent-rows');
+    body.innerHTML=rows.length?rows.map(r=>`<tr style="border-bottom:1px solid #f0f0f0;"><td style="padding:8px 10px;font-weight:700;">${esc(r.agent)}</td><td style="padding:8px 10px;">${r.total}</td><td style="padding:8px 10px;">${r.new}</td><td style="padding:8px 10px;">${r.inp}</td><td style="padding:8px 10px;">${r.wus||0}</td><td style="padding:8px 10px;">${r.dft||0}</td><td style="padding:8px 10px;">${r.wct||0}</td><td style="padding:8px 10px;">${r.res}</td></tr>`).join(''):'<tr><td colspan="8" style="padding:12px 10px;color:#666;">No tickets in this time range.</td></tr>';
+  }catch(error){
+    document.getElementById('kpi-range-label').textContent=`Live KPI failed (${String(error?.message||error)}). Showing loaded board data.`;
+    renderKpiViewLocal();
+  }
+}
+function renderKpiViewLocal(){
   if(!currentUserCanViewAllTickets()){
     const role=currentUserRole();
     if(role==='cs')kpiTeamFilter='cs';

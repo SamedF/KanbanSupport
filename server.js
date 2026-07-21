@@ -289,6 +289,29 @@ function normalizeDbStatusForBoard(status) {
   if (value === 'resolved' || value === 'closed') return 'res';
   return 'new';
 }
+function startOfLocalDay(date = new Date()) {
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate());
+}
+function kpiDateBounds(range) {
+  const now = new Date();
+  const dayStart = startOfLocalDay(now);
+  const dayMs = 24 * 60 * 60 * 1000;
+  const key = String(range || 'today').trim().toLowerCase();
+  if (key === 'today' || key === 'day') return { start: dayStart, end: now, label: 'Today' };
+  if (key === 'this_week' || key === 'week') {
+    const dow = (dayStart.getDay() + 6) % 7;
+    return { start: new Date(dayStart.getTime() - dow * dayMs), end: now, label: 'This week' };
+  }
+  if (key === 'last_week') {
+    const dow = (dayStart.getDay() + 6) % 7;
+    const thisWeekStart = dayStart.getTime() - dow * dayMs;
+    return { start: new Date(thisWeekStart - 7 * dayMs), end: new Date(thisWeekStart - 1), label: 'Last week' };
+  }
+  if (key === 'this_month' || key === 'month') return { start: new Date(now.getFullYear(), now.getMonth(), 1), end: now, label: 'This month' };
+  if (key === 'last_30_days') return { start: new Date(dayStart.getTime() - 29 * dayMs), end: now, label: 'Last 30 days' };
+  if (key === 'this_year') return { start: new Date(now.getFullYear(), 0, 1), end: now, label: 'This year' };
+  return { start: dayStart, end: now, label: 'Today' };
+}
 function resolvedAtFromState(state, ticketId) {
   const touched = Number(state?.ticketStageTouchedAt?.[ticketId] || 0);
   if (touched > 0) return touched;
@@ -3191,6 +3214,123 @@ app.get('/api/tickets', requireAuth, async (req, res) => {
     orderBy: [{ updatedAt: 'desc' }, { createdAt: 'desc' }]
   });
   res.json({ tickets });
+});
+app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
+  try {
+    const bounds = kpiDateBounds(req.query.range);
+    const role = normalizeRole(req.session.role) || 'support';
+    const username = String(req.session.username || '').trim().toUpperCase();
+    const team = String(req.query.team || 'all').trim().toLowerCase();
+    const agent = String(req.query.agent || 'all').trim().toUpperCase();
+    const company = String(req.query.company || 'all').trim();
+    const jiraOnly = String(req.query.jiraOnly || '').toLowerCase() === 'true';
+
+    const where = {
+      createdAt: { gte: bounds.start, lte: bounds.end },
+      NOT: [{ category: { equals: 'Spam', mode: 'insensitive' } }]
+    };
+    if (company && company !== 'all') where.companyName = company;
+    if (jiraOnly) where.jiraTicketKey = { not: null };
+
+    if (role === 'cs') where.csAgent = username;
+    else if (role === 'support') where.assignedAgent = username;
+    else if (agent && agent !== 'ALL') {
+      if (CS_AGENT_CODES.has(agent)) where.csAgent = agent;
+      else if (SUPPORT_AGENT_CODES.has(agent)) where.assignedAgent = agent;
+      else where.OR = [{ csAgent: agent }, { assignedAgent: agent }];
+    } else if (team === 'cs') {
+      where.csAgent = { in: Array.from(CS_AGENT_CODES) };
+    } else if (team === 'support') {
+      where.assignedAgent = { in: Array.from(SUPPORT_AGENT_CODES) };
+    }
+
+    const tickets = await prisma.ticket.findMany({
+      where,
+      select: {
+        id: true,
+        externalId: true,
+        subject: true,
+        status: true,
+        priority: true,
+        category: true,
+        assignedAgent: true,
+        csAgent: true,
+        companyName: true,
+        senderEmail: true,
+        jiraTicketKey: true,
+        createdAt: true,
+        resolvedAt: true
+      },
+      orderBy: [{ createdAt: 'desc' }]
+    });
+
+    const statusKeys = ['new', 'inp', 'wus', 'dft', 'wct', 'res'];
+    const statusCounts = Object.fromEntries(statusKeys.map(k => [k, 0]));
+    const categoryCounts = {};
+    const priorityCounts = {};
+    const companyCounts = {};
+    const agentRows = {};
+    const csCounts = {};
+    let ticketsWithCs = 0;
+
+    for (const ticket of tickets) {
+      const statusKey = normalizeDbStatusForBoard(ticket.status);
+      if (statusKey in statusCounts) statusCounts[statusKey]++;
+      const category = String(ticket.category || 'Uncategorized').trim() || 'Uncategorized';
+      categoryCounts[category] = (categoryCounts[category] || 0) + 1;
+      const priority = String(ticket.priority || 'Normal').trim() || 'Normal';
+      priorityCounts[priority] = (priorityCounts[priority] || 0) + 1;
+      const companyName = String(ticket.companyName || 'Unknown').trim() || 'Unknown';
+      companyCounts[companyName] = (companyCounts[companyName] || 0) + 1;
+
+      const assignee = String(ticket.assignedAgent || '').trim().toUpperCase();
+      const csOwner = String(ticket.csAgent || '').trim().toUpperCase();
+      const rowAgent = team === 'cs' ? (csOwner || 'Unassigned') : (assignee || 'Unassigned');
+      if (!agentRows[rowAgent]) agentRows[rowAgent] = { agent: rowAgent, total: 0, new: 0, inp: 0, wus: 0, dft: 0, wct: 0, res: 0 };
+      agentRows[rowAgent].total++;
+      if (statusKey in agentRows[rowAgent]) agentRows[rowAgent][statusKey]++;
+      const csLabel = csOwner || 'Unassigned';
+      csCounts[csLabel] = (csCounts[csLabel] || 0) + 1;
+      if (csOwner) ticketsWithCs++;
+    }
+
+    const sortRows = obj => Object.entries(obj).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+    const agents = Array.from(new Set([
+      ...Array.from(SUPPORT_AGENT_CODES),
+      ...Array.from(CS_AGENT_CODES),
+      ...tickets.flatMap(t => [t.assignedAgent, t.csAgent]).filter(Boolean).map(v => String(v).trim().toUpperCase())
+    ])).sort((a, b) => a.localeCompare(b));
+
+    return res.json({
+      ok: true,
+      generatedAt: new Date().toISOString(),
+      range: { key: String(req.query.range || 'today'), label: bounds.label, start: bounds.start.toISOString(), end: bounds.end.toISOString() },
+      filters: { team, agent, company, jiraOnly },
+      totals: {
+        tickets: tickets.length,
+        ticketsWithCs,
+        uniqueCs: Object.keys(csCounts).filter(k => k !== 'Unassigned').length,
+        jiraLinked: tickets.filter(t => t.jiraTicketKey).length
+      },
+      statusCounts,
+      categoryRows: sortRows(categoryCounts).map(([category, count]) => ({ category, count })),
+      priorityRows: sortRows(priorityCounts).map(([priority, count]) => ({ priority, count })),
+      companyRows: sortRows(companyCounts).map(([company, count]) => ({ company, count })),
+      csRows: sortRows(csCounts).map(([agent, count]) => ({ agent, count })),
+      agentRows: Object.values(agentRows).sort((a, b) => b.total - a.total || a.agent.localeCompare(b.agent)),
+      jiraRows: tickets.filter(t => t.jiraTicketKey).slice(0, 50).map(t => ({
+        ticket: t.subject || '(no subject)',
+        company: t.companyName || 'Unknown',
+        agent: t.assignedAgent || 'Unassigned',
+        jira: t.jiraTicketKey,
+        createdAt: t.createdAt
+      })),
+      agents
+    });
+  } catch (error) {
+    console.error('Read ticket KPIs failed:', error);
+    return res.status(500).json({ error: 'read_ticket_kpis_failed' });
+  }
 });
 app.get('/api/tickets/:id/audit', requireAdmin, async (req, res) => {
   const ticketId = Number(req.params.id);
