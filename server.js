@@ -312,6 +312,16 @@ function kpiDateBounds(range) {
   if (key === 'this_year') return { start: new Date(now.getFullYear(), 0, 1), end: now, label: 'This year' };
   return { start: dayStart, end: now, label: 'Today' };
 }
+function isDateInBounds(value, bounds) {
+  if (!value || !bounds?.start || !bounds?.end) return false;
+  const date = value instanceof Date ? value : new Date(value);
+  return !Number.isNaN(date.getTime()) && date >= bounds.start && date <= bounds.end;
+}
+function kpiTicketInRange(ticket, bounds) {
+  const statusKey = normalizeDbStatusForBoard(ticket?.status);
+  if (statusKey === 'res') return isDateInBounds(ticket?.resolvedAt, bounds);
+  return isDateInBounds(ticket?.createdAt, bounds) || isDateInBounds(ticket?.updatedAt, bounds);
+}
 function resolvedAtFromState(state, ticketId) {
   const touched = Number(state?.ticketStageTouchedAt?.[ticketId] || 0);
   if (touched > 0) return touched;
@@ -851,6 +861,8 @@ async function safeWriteState(state) {
     pendingResolvedTeamsAlerts.push({
       ticketId,
       csOwner,
+      notificationKey: `${ticketId}:resolved:${inTs}`,
+      resolvedAt: inTs ? new Date(inTs).toISOString() : new Date().toISOString(),
       ticketNumber: nextState.ticketNumbers && nextState.ticketNumbers[ticketId] ? String(nextState.ticketNumbers[ticketId]) : null,
       subject: String(ticket?.email?.subject || '(no subject)').trim(),
       companyName: String((nextState.hsCache && nextState.ticketClientEmail && nextState.ticketClientEmail[ticketId] && nextState.hsCache[nextState.ticketClientEmail[ticketId]]?.companyName) || '').trim() || null,
@@ -1209,6 +1221,8 @@ function buildResolvedPowerAutomatePayload(item) {
     jiraKey,
     jiraUrl,
     status: 'Resolved',
+    notificationKey: String(item.notificationKey || `${item.ticketId}:resolved`).trim(),
+    resolvedAt: String(item.resolvedAt || '').trim(),
     message: messageParts.join('\n'),
     copyEmail: RESOLVED_ALERT_COPY_EMAIL
   };
@@ -1832,6 +1846,12 @@ async function upsertBoardTicketsToDatabase(state, req) {
       .map(c => ({ text: String(c?.text || c?.comment || '').trim(), ts: c?.ts || c?.createdAt }))
       .filter(c => c.text && !existingCommentTexts.has(c.text));
 
+    const previousStatus = existingTicket?.status || null;
+    const wasResolved = previousStatus === 'Resolved';
+    const resolvedAtForDb = status === 'Resolved'
+      ? (wasResolved ? existingTicket?.resolvedAt || new Date() : new Date())
+      : null;
+
     const fieldsUnchanged = existingTicket
       && existingTicket.subject === subject
       && existingTicket.senderEmail === (senderEmail || null)
@@ -1869,7 +1889,7 @@ async function upsertBoardTicketsToDatabase(state, req) {
         body,
         emailRaw: email,
         createdAt,
-        resolvedAt: status === 'Resolved' ? new Date() : null
+        resolvedAt: resolvedAtForDb
       },
       update: {
         subject,
@@ -1887,7 +1907,7 @@ async function upsertBoardTicketsToDatabase(state, req) {
         jiraTicketKey,
         body,
         emailRaw: email,
-        resolvedAt: status === 'Resolved' ? new Date() : null
+        resolvedAt: resolvedAtForDb
       }
     });
 
@@ -3239,7 +3259,11 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
     const jiraOnly = String(req.query.jiraOnly || '').toLowerCase() === 'true';
 
     const where = {
-      createdAt: { gte: bounds.start, lte: bounds.end },
+      OR: [
+        { createdAt: { gte: bounds.start, lte: bounds.end } },
+        { updatedAt: { gte: bounds.start, lte: bounds.end } },
+        { resolvedAt: { gte: bounds.start, lte: bounds.end } }
+      ],
       NOT: [{ category: { equals: 'Spam', mode: 'insensitive' } }]
     };
     if (company && company !== 'all') where.companyName = company;
@@ -3272,10 +3296,12 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
         senderEmail: true,
         jiraTicketKey: true,
         createdAt: true,
+        updatedAt: true,
         resolvedAt: true
       },
       orderBy: [{ createdAt: 'desc' }]
     });
+    const scopedTickets = tickets.filter(ticket => kpiTicketInRange(ticket, bounds));
 
     const statusKeys = ['new', 'inp', 'wus', 'dft', 'wct', 'res'];
     const statusCounts = Object.fromEntries(statusKeys.map(k => [k, 0]));
@@ -3286,7 +3312,14 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
     const csCounts = {};
     let ticketsWithCs = 0;
 
-    for (const ticket of tickets) {
+    const addAgentRow = (agentCode, statusKey) => {
+      const rowAgent = String(agentCode || 'Unassigned').trim().toUpperCase() || 'Unassigned';
+      if (!agentRows[rowAgent]) agentRows[rowAgent] = { agent: rowAgent, total: 0, new: 0, inp: 0, wus: 0, dft: 0, wct: 0, res: 0 };
+      agentRows[rowAgent].total++;
+      if (statusKey in agentRows[rowAgent]) agentRows[rowAgent][statusKey]++;
+    };
+
+    for (const ticket of scopedTickets) {
       const statusKey = normalizeDbStatusForBoard(ticket.status);
       if (statusKey in statusCounts) statusCounts[statusKey]++;
       const category = String(ticket.category || 'Uncategorized').trim() || 'Uncategorized';
@@ -3298,10 +3331,12 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
 
       const assignee = String(ticket.assignedAgent || '').trim().toUpperCase();
       const csOwner = String(ticket.csAgent || '').trim().toUpperCase();
-      const rowAgent = team === 'cs' ? (csOwner || 'Unassigned') : (assignee || 'Unassigned');
-      if (!agentRows[rowAgent]) agentRows[rowAgent] = { agent: rowAgent, total: 0, new: 0, inp: 0, wus: 0, dft: 0, wct: 0, res: 0 };
-      agentRows[rowAgent].total++;
-      if (statusKey in agentRows[rowAgent]) agentRows[rowAgent][statusKey]++;
+      if (team === 'cs') addAgentRow(csOwner || 'Unassigned', statusKey);
+      else if (team === 'support') addAgentRow(assignee || 'Unassigned', statusKey);
+      else {
+        addAgentRow(assignee || 'Unassigned', statusKey);
+        if (csOwner && csOwner !== assignee) addAgentRow(csOwner, statusKey);
+      }
       const csLabel = csOwner || 'Unassigned';
       csCounts[csLabel] = (csCounts[csLabel] || 0) + 1;
       if (csOwner) ticketsWithCs++;
@@ -3320,10 +3355,10 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
       range: { key: String(req.query.range || 'today'), label: bounds.label, start: bounds.start.toISOString(), end: bounds.end.toISOString() },
       filters: { team, agent, company, jiraOnly },
       totals: {
-        tickets: tickets.length,
+        tickets: scopedTickets.length,
         ticketsWithCs,
         uniqueCs: Object.keys(csCounts).filter(k => k !== 'Unassigned').length,
-        jiraLinked: tickets.filter(t => t.jiraTicketKey).length
+        jiraLinked: scopedTickets.filter(t => t.jiraTicketKey).length
       },
       statusCounts,
       categoryRows: sortRows(categoryCounts).map(([category, count]) => ({ category, count })),
@@ -3331,7 +3366,7 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
       companyRows: sortRows(companyCounts).map(([company, count]) => ({ company, count })),
       csRows: sortRows(csCounts).map(([agent, count]) => ({ agent, count })),
       agentRows: Object.values(agentRows).sort((a, b) => b.total - a.total || a.agent.localeCompare(b.agent)),
-      jiraRows: tickets.filter(t => t.jiraTicketKey).slice(0, 50).map(t => ({
+      jiraRows: scopedTickets.filter(t => t.jiraTicketKey).slice(0, 50).map(t => ({
         ticket: t.subject || '(no subject)',
         company: t.companyName || 'Unknown',
         agent: t.assignedAgent || 'Unassigned',
