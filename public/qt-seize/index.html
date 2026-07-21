@@ -165,7 +165,7 @@
   <div class="app">
     <header>
       <h1>QT Seize</h1>
-      <div class="status" id="status">Portrait image to AI-filled 1920 x 1080.</div>
+      <div class="status" id="status">Portrait image to locally-filled 1920 x 1080.</div>
     </header>
     <main>
       <section class="panel controls">
@@ -173,11 +173,11 @@
           <input id="file" type="file" accept="image/png,image/jpeg,image/webp" hidden />
           <div>
             <strong>Drop one portrait image</strong>
-            <span>PNG, JPG, or WebP. QT Seize will keep the subject and generate the missing wide frame.</span>
+            <span>PNG, JPG, or WebP. QT Seize will keep the subject and fill the missing wide frame locally.</span>
           </div>
         </div>
-        <label>Generation direction
-          <textarea id="prompt">Extend this portrait photo into a realistic 16:9 landscape frame. Preserve the original person, product, lighting, camera angle, and visual style. Generate only the missing left and right areas naturally.</textarea>
+        <label>Background style note
+          <textarea id="prompt">Local fill preserves the original image and builds a soft 16:9 background from the same photo. No API key or paid model is required.</textarea>
         </label>
         <div class="actions">
           <button class="primary" id="generate" type="button" disabled>Generate</button>
@@ -265,6 +265,61 @@
       return canvasToDataUrl(canvas);
     }
 
+    async function generateLocalOutpaint(file) {
+      const url = URL.createObjectURL(file);
+      try {
+        const img = await loadImageFromUrl(url);
+        const canvas = document.createElement('canvas');
+        canvas.width = TARGET_W;
+        canvas.height = TARGET_H;
+        const ctx = canvas.getContext('2d');
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = 'high';
+
+        const bgScale = Math.max(TARGET_W / img.naturalWidth, TARGET_H / img.naturalHeight);
+        const bgW = img.naturalWidth * bgScale;
+        const bgH = img.naturalHeight * bgScale;
+        ctx.filter = 'blur(34px) saturate(1.08) brightness(.98)';
+        ctx.drawImage(img, (TARGET_W - bgW) / 2, (TARGET_H - bgH) / 2, bgW, bgH);
+        ctx.filter = 'none';
+
+        const overlay = ctx.createLinearGradient(0, 0, TARGET_W, 0);
+        overlay.addColorStop(0, 'rgba(17,24,39,.16)');
+        overlay.addColorStop(.32, 'rgba(17,24,39,.03)');
+        overlay.addColorStop(.68, 'rgba(17,24,39,.03)');
+        overlay.addColorStop(1, 'rgba(17,24,39,.16)');
+        ctx.fillStyle = overlay;
+        ctx.fillRect(0, 0, TARGET_W, TARGET_H);
+
+        const fgScale = Math.min(TARGET_H / img.naturalHeight, TARGET_W / img.naturalWidth);
+        const fgW = Math.round(img.naturalWidth * fgScale);
+        const fgH = Math.round(img.naturalHeight * fgScale);
+        const x = Math.round((TARGET_W - fgW) / 2);
+        const y = Math.round((TARGET_H - fgH) / 2);
+
+        const feather = Math.max(24, Math.round(Math.min(fgW, fgH) * .035));
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(x, y, fgW, fgH);
+        ctx.clip();
+        ctx.drawImage(img, x, y, fgW, fgH);
+
+        ctx.globalCompositeOperation = 'destination-in';
+        const alpha = ctx.createLinearGradient(x, 0, x + fgW, 0);
+        alpha.addColorStop(0, 'rgba(0,0,0,0)');
+        alpha.addColorStop(feather / fgW, 'rgba(0,0,0,1)');
+        alpha.addColorStop(1 - feather / fgW, 'rgba(0,0,0,1)');
+        alpha.addColorStop(1, 'rgba(0,0,0,0)');
+        ctx.fillStyle = alpha;
+        ctx.fillRect(x, y, fgW, fgH);
+        ctx.restore();
+
+        return canvasToDataUrl(canvas);
+      } finally {
+        URL.revokeObjectURL(url);
+      }
+    }
+
     function showImage(url) {
       preview.innerHTML = '';
       const img = document.createElement('img');
@@ -312,21 +367,9 @@
       downloadBtn.disabled = true;
       setStatus('Preparing 1920 x 1080 mask...');
       try {
-        const prepared = await prepareCanvases(state.file);
-        setStatus('Generating missing areas with AI...');
-        const response = await fetch('/api/qt-seize/outpaint', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          credentials: 'include',
-          body: JSON.stringify({
-            imageDataUrl: prepared.imageDataUrl,
-            maskDataUrl: prepared.maskDataUrl,
-            prompt: document.getElementById('prompt').value
-          })
-        });
-        const payload = await response.json().catch(() => ({}));
-        if (!response.ok) throw new Error(payload.detail || payload.error || 'Generation failed.');
-        const finalDataUrl = await normalizeToTarget(payload.imageDataUrl);
+        await prepareCanvases(state.file);
+        setStatus('Filling 16:9 frame locally...');
+        const finalDataUrl = await generateLocalOutpaint(state.file);
         state.resultUrl = finalDataUrl;
         showImage(finalDataUrl);
         downloadBtn.disabled = false;
@@ -353,7 +396,7 @@
       preview.innerHTML = '<div class="empty">Upload a portrait image to start.</div>';
       sourceMeta.textContent = 'No source selected';
       generateBtn.disabled = true;
-      setStatus('Portrait image to AI-filled 1920 x 1080.');
+      setStatus('Portrait image to locally-filled 1920 x 1080.');
     });
   </script>
 </body>
