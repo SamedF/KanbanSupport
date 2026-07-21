@@ -2634,6 +2634,14 @@ th {
     </span>
   </button>
 
+  <button class="account-item" id="templates-btn" type="button">
+    <span class="account-icon">&#128221;</span>
+    <span>
+      <strong>Templates</strong>
+      <small>Reusable message templates</small>
+    </span>
+  </button>
+
   <button class="account-item account-logout-btn" id="logout-btn" type="button">
     <span class="account-icon">&#10140;</span>
     <span>
@@ -2915,7 +2923,7 @@ th {
         <input id="ct-subject" class="form-input" type="text" placeholder="e.g. Cannot access Velma dashboard"/>
       </div>
       <div class="form-field">
-        <label>Description</label>
+        <label style="display:flex;align-items:center;justify-content:space-between;">Description <button class="btn-out" id="ct-use-template-btn" type="button" style="font-size:11px;padding:3px 8px;font-weight:400;">Use template</button></label>
         <textarea id="ct-desc" class="form-input" rows="3" placeholder="Describe the issue" style="resize:vertical;font-family:inherit;"></textarea>
       </div>
       <div class="form-row">
@@ -2954,6 +2962,57 @@ th {
     <div class="modal-actions">
       <button class="btn-out" data-close="create-modal">Cancel</button>
       <button class="btn-primary" id="ct-submit">Create Ticket</button>
+    </div>
+  </div>
+</div>
+
+<!--  Templates manager modal  -->
+<div class="modal-bg" id="templates-modal">
+  <div class="modal" style="max-width:640px;">
+    <div class="modal-head"><h2 id="templates-modal-title"> Templates</h2><button class="modal-close-x" data-close="templates-modal"></button></div>
+    <div style="padding:16px 18px;overflow-y:auto;flex:1;" id="templates-list-view">
+      <div style="display:flex;justify-content:flex-end;margin-bottom:12px;">
+        <button class="btn-primary" id="tpl-new-btn" type="button">+ New template</button>
+      </div>
+      <div id="templates-list"></div>
+    </div>
+    <div style="padding:16px 18px;overflow-y:auto;flex:1;display:none;flex-direction:column;gap:12px;" id="templates-editor-view">
+      <div class="form-field">
+        <label>Template name</label>
+        <input id="tpl-name" class="form-input" type="text" placeholder="e.g. New Property Creation Request"/>
+      </div>
+      <div class="form-field">
+        <label>Body <span style="color:#94a3b8;font-weight:400;">(wrap fill-in-later fields in [Brackets], e.g. [Hotel Name])</span></label>
+        <textarea id="tpl-body" class="form-input" rows="14" style="resize:vertical;font-family:inherit;"></textarea>
+      </div>
+    </div>
+    <div class="modal-actions" id="templates-list-actions">
+      <button class="btn-out" data-close="templates-modal">Close</button>
+    </div>
+    <div class="modal-actions" id="templates-editor-actions" style="display:none;">
+      <button class="btn-out" id="tpl-editor-cancel" type="button">Back</button>
+      <button class="btn-primary" id="tpl-editor-save" type="button">Save template</button>
+    </div>
+  </div>
+</div>
+
+<!--  Template picker modal (from "Use template" in New Manual Ticket)  -->
+<div class="modal-bg" id="tpl-picker-modal">
+  <div class="modal" style="max-width:480px;">
+    <div class="modal-head"><h2>Choose a template</h2><button class="modal-close-x" data-close="tpl-picker-modal"></button></div>
+    <div style="padding:16px 18px;overflow-y:auto;flex:1;" id="tpl-picker-list"></div>
+    <div class="modal-actions"><button class="btn-out" data-close="tpl-picker-modal">Cancel</button></div>
+  </div>
+</div>
+
+<!--  Fill-in-the-blanks modal  -->
+<div class="modal-bg" id="tpl-fill-modal">
+  <div class="modal" style="max-width:520px;">
+    <div class="modal-head"><h2 id="tpl-fill-title">Fill in template</h2><button class="modal-close-x" data-close="tpl-fill-modal"></button></div>
+    <div style="padding:16px 18px;display:flex;flex-direction:column;gap:10px;overflow-y:auto;flex:1;" id="tpl-fill-fields"></div>
+    <div class="modal-actions">
+      <button class="btn-out" data-close="tpl-fill-modal">Cancel</button>
+      <button class="btn-primary" id="tpl-fill-insert" type="button">Insert into description</button>
     </div>
   </div>
 </div>
@@ -3889,6 +3948,170 @@ document.getElementById('jira-unlink').addEventListener('click',async()=>{
 });
 document.getElementById('jira-input').addEventListener('keydown',e=>{if(e.key==='Enter')document.getElementById('jira-save').click();});
 document.getElementById('jira-settings-btn').addEventListener('click',e=>{e.stopPropagation();document.getElementById('account-panel').classList.remove('open');openJiraSettingsModal();});
+
+// --- Templates: shared, team-wide reusable message templates -----------
+let allTemplates=[];
+let editingTemplateId=null;
+async function fetchTemplates(){
+  const res=await fetch('/api/templates',{credentials:'include'});
+  const data=await res.json().catch(()=>({}));
+  allTemplates=Array.isArray(data.templates)?data.templates:[];
+}
+function templatesShowList(){
+  document.getElementById('templates-list-view').style.display='';
+  document.getElementById('templates-editor-view').style.display='none';
+  document.getElementById('templates-list-actions').style.display='';
+  document.getElementById('templates-editor-actions').style.display='none';
+  document.getElementById('templates-modal-title').textContent=' Templates';
+}
+function templatesShowEditor(template){
+  editingTemplateId=template?template.id:null;
+  document.getElementById('tpl-name').value=template?template.name:'';
+  document.getElementById('tpl-body').value=template?template.body:'';
+  document.getElementById('templates-list-view').style.display='none';
+  document.getElementById('templates-editor-view').style.display='flex';
+  document.getElementById('templates-list-actions').style.display='none';
+  document.getElementById('templates-editor-actions').style.display='';
+  document.getElementById('templates-modal-title').textContent=template?'Edit template':'New template';
+}
+function renderTemplatesList(){
+  const el=document.getElementById('templates-list');
+  if(!allTemplates.length){el.innerHTML='<div style="text-align:center;color:#94a3b8;padding:30px 0;">No templates yet. Create one to get started.</div>';return;}
+  el.innerHTML=allTemplates.map(t=>{
+    const who=t.lastEditedBy?.displayName||t.lastEditedBy?.username||t.createdBy?.displayName||t.createdBy?.username||'someone';
+    const when=new Date(t.updatedAt).toLocaleDateString();
+    const preview=String(t.body||'').replace(/\s+/g,' ').slice(0,90);
+    return `<div class="template-row" data-id="${t.id}" style="border:1px solid #e2e8f0;border-radius:10px;padding:12px 14px;margin-bottom:10px;display:flex;justify-content:space-between;align-items:flex-start;gap:10px;">
+      <div style="min-width:0;">
+        <div style="font-weight:700;color:#1e293b;">${esc(t.name)}</div>
+        <div style="font-size:12px;color:#94a3b8;margin:2px 0 6px;">Updated by ${esc(who)} on ${when}</div>
+        <div style="font-size:12px;color:#64748b;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(preview)}</div>
+      </div>
+      <div style="display:flex;gap:6px;flex-shrink:0;">
+        <button class="btn-out tpl-edit-btn" data-id="${t.id}" type="button" style="font-size:11px;padding:4px 8px;">Edit</button>
+        <button class="btn-out tpl-dup-btn" data-id="${t.id}" type="button" style="font-size:11px;padding:4px 8px;">Duplicate</button>
+        <button class="btn-out tpl-del-btn" data-id="${t.id}" type="button" style="font-size:11px;padding:4px 8px;color:#dc2626;">Delete</button>
+      </div>
+    </div>`;
+  }).join('');
+  el.querySelectorAll('.tpl-edit-btn').forEach(b=>b.addEventListener('click',()=>{
+    const t=allTemplates.find(x=>x.id===Number(b.dataset.id));
+    if(t)templatesShowEditor(t);
+  }));
+  el.querySelectorAll('.tpl-dup-btn').forEach(b=>b.addEventListener('click',async()=>{
+    const res=await fetch(`/api/templates/${b.dataset.id}/duplicate`,{method:'POST',credentials:'include'});
+    if(!res.ok){showToast('Could not duplicate template','err');return;}
+    await fetchTemplates();renderTemplatesList();showToast('Template duplicated','ok');
+  }));
+  el.querySelectorAll('.tpl-del-btn').forEach(b=>b.addEventListener('click',async()=>{
+    const t=allTemplates.find(x=>x.id===Number(b.dataset.id));
+    if(!confirm(`Delete template "${t?.name||''}"? This can't be undone.`))return;
+    const res=await fetch(`/api/templates/${b.dataset.id}`,{method:'DELETE',credentials:'include'});
+    if(!res.ok){showToast('Could not delete template','err');return;}
+    await fetchTemplates();renderTemplatesList();showToast('Template deleted','ok');
+  }));
+}
+async function openTemplatesModal(){
+  await fetchTemplates();
+  renderTemplatesList();
+  templatesShowList();
+  document.getElementById('templates-modal').classList.add('open');
+}
+document.getElementById('templates-btn').addEventListener('click',e=>{e.stopPropagation();document.getElementById('account-panel').classList.remove('open');openTemplatesModal();});
+document.getElementById('tpl-new-btn').addEventListener('click',()=>templatesShowEditor(null));
+document.getElementById('tpl-editor-cancel').addEventListener('click',()=>templatesShowList());
+document.getElementById('tpl-editor-save').addEventListener('click',async()=>{
+  const name=document.getElementById('tpl-name').value.trim();
+  const body=document.getElementById('tpl-body').value;
+  if(!name){showToast('Template name is required','err');return;}
+  if(!body.trim()){showToast('Template body is required','err');return;}
+  const url=editingTemplateId?`/api/templates/${editingTemplateId}`:'/api/templates';
+  const method=editingTemplateId?'PATCH':'POST';
+  const res=await fetch(url,{method,credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify({name,body})});
+  if(!res.ok){showToast('Could not save template','err');return;}
+  await fetchTemplates();renderTemplatesList();templatesShowList();
+  showToast(editingTemplateId?'Template updated':'Template created','ok');
+});
+
+// Positional [Bracket] parsing: each occurrence is its own field regardless
+// of whether its bracket text repeats elsewhere (e.g. "Sales: [Trigram]" and
+// "CS: [Trigram]" must stay independent) - fields are substituted back by
+// exact string span, never by matching text.
+function parseTemplateFields(body){
+  const regex=/\[([^\]\n]*)\]/g;
+  const fields=[];
+  const seenLabels={};
+  let match;
+  while((match=regex.exec(body))){
+    const inner=match[1];
+    const start=match.index;
+    const lineStart=body.lastIndexOf('\n',start)+1;
+    const before=body.slice(lineStart,start);
+    const labelMatch=before.match(/([A-Za-z][A-Za-z0-9 /()]{0,40}):\s*\*?\s*$/);
+    let label=labelMatch?labelMatch[1].trim():inner.trim()||'Value';
+    if(seenLabels[label]!==undefined){seenLabels[label]+=1;label=`${label} (${seenLabels[label]})`;}
+    else seenLabels[label]=1;
+    fields.push({id:'f'+fields.length,start,end:start+match[0].length,label,placeholder:inner});
+  }
+  return fields;
+}
+function fillTemplate(body,fields,values){
+  let result='';let cursor=0;
+  fields.forEach(f=>{
+    result+=body.slice(cursor,f.start);
+    const v=(values[f.id]||'').trim();
+    result+=v||`[${f.placeholder}]`;
+    cursor=f.end;
+  });
+  result+=body.slice(cursor);
+  return result;
+}
+let currentFillTemplate=null;
+let currentFillFields=[];
+function openTemplatePicker(){
+  fetchTemplates().then(()=>{
+    const el=document.getElementById('tpl-picker-list');
+    if(!allTemplates.length){
+      el.innerHTML='<div style="text-align:center;color:#94a3b8;padding:20px 0;">No templates yet - create one from Account &rarr; Templates.</div>';
+    }else{
+      el.innerHTML=allTemplates.map(t=>`<div class="tpl-pick-row" data-id="${t.id}" style="cursor:pointer;border:1px solid #e2e8f0;border-radius:10px;padding:10px 12px;margin-bottom:8px;font-weight:600;color:#1e293b;">${esc(t.name)}</div>`).join('');
+      el.querySelectorAll('.tpl-pick-row').forEach(row=>row.addEventListener('click',()=>{
+        const t=allTemplates.find(x=>x.id===Number(row.dataset.id));
+        if(!t)return;
+        document.getElementById('tpl-picker-modal').classList.remove('open');
+        openTemplateFillModal(t);
+      }));
+    }
+    document.getElementById('tpl-picker-modal').classList.add('open');
+  });
+}
+function openTemplateFillModal(template){
+  currentFillTemplate=template;
+  currentFillFields=parseTemplateFields(template.body);
+  document.getElementById('tpl-fill-title').textContent=`Fill in: ${template.name}`;
+  const el=document.getElementById('tpl-fill-fields');
+  if(!currentFillFields.length){
+    el.innerHTML='<div style="color:#64748b;font-size:13px;">This template has no [bracketed] fields - it will be inserted as-is.</div>';
+  }else{
+    el.innerHTML=currentFillFields.map(f=>`<div class="form-field"><label>${esc(f.label)}</label><input class="form-input tpl-fill-input" data-field-id="${f.id}" type="text" placeholder="${esc(f.placeholder)}"/></div>`).join('');
+  }
+  document.getElementById('tpl-fill-modal').classList.add('open');
+}
+document.getElementById('ct-use-template-btn').addEventListener('click',()=>openTemplatePicker());
+document.getElementById('tpl-fill-insert').addEventListener('click',()=>{
+  const values={};
+  document.querySelectorAll('.tpl-fill-input').forEach(input=>{values[input.dataset.fieldId]=input.value;});
+  const finalText=currentFillFields.length?fillTemplate(currentFillTemplate.body,currentFillFields,values):currentFillTemplate.body;
+  const desc=document.getElementById('ct-desc');
+  if(desc.value.trim()){
+    const replace=confirm('The Description field already has content.\n\nOK = replace it with the template\nCancel = append the template instead');
+    desc.value=replace?finalText:(desc.value+'\n\n'+finalText);
+  }else{
+    desc.value=finalText;
+  }
+  document.getElementById('tpl-fill-modal').classList.remove('open');
+  showToast('Template inserted','ok');
+});
 document.getElementById('jira-settings-save').addEventListener('click',async()=>{
   const payload={
     baseUrl:document.getElementById('jira-site-url').value.trim(),
