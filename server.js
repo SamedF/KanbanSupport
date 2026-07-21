@@ -726,6 +726,9 @@ async function safeWriteState(state) {
   const incomingSavedAt = Number(incomingMeta.clientSavedAt || 0);
   const currentSavedAt = Number(currentMeta.clientSavedAt || 0);
   const isStale = incomingVersion < currentVersion || (incomingVersion === currentVersion && incomingSavedAt < currentSavedAt);
+  const incomingHistory = Array.isArray(nextState.actionHistory) ? nextState.actionHistory : [];
+  const latestIncomingAction = incomingHistory[incomingHistory.length - 1] || null;
+  const latestIncomingReason = String(latestIncomingAction?.reason || '').trim();
 
   // Merge ticket stages with per-ticket timestamps so stale snapshots cannot roll
   // back a stage that was moved more recently.
@@ -826,12 +829,22 @@ async function safeWriteState(state) {
   stageIds.forEach((ticketId) => {
     const nextStage = normalizeBoardStatusForDb(mergedStages[ticketId] || 'new');
     const prevStage = normalizeBoardStatusForDb(currentStages[ticketId] || 'new');
+    const inTs = Number(incomingTouched[ticketId] || 0);
     const category = String((nextState.ticketCategory && nextState.ticketCategory[ticketId]) || '').trim().toLowerCase();
     if (nextStage !== 'Resolved' || category === 'spam') {
       delete teamsResolvedNotified[ticketId];
       return;
     }
     if (prevStage === 'Resolved' || teamsResolvedNotified[ticketId]) return; // already resolved and/or already notified - nothing new happened
+    const isFreshResolveMove = latestIncomingReason === 'ticket_stage_move'
+      && Object.prototype.hasOwnProperty.call(incomingStages, ticketId)
+      && normalizeBoardStatusForDb(incomingStages[ticketId]) === 'Resolved'
+      && inTs > 0
+      && (!incomingSavedAt || Math.abs(incomingSavedAt - inTs) < 15_000);
+    if (!isFreshResolveMove) {
+      teamsResolvedNotified[ticketId] = true;
+      return;
+    }
     const csOwner = String((nextState.ticketCSOwner && nextState.ticketCSOwner[ticketId]) || '').trim().toUpperCase();
     if (!csOwner) return;
     const ticket = ticketsById.get(ticketId) || null;
