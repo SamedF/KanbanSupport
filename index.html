@@ -74,6 +74,10 @@
   --shadow-sm: 0 6px 16px rgba(15, 23, 42, 0.06);
   --shadow: 0 14px 36px rgba(15, 23, 42, 0.10);
   --shadow-lg: 0 24px 70px rgba(15, 23, 42, 0.18);
+  --app-header-h: 84px;
+  --sidebar-w: clamp(190px, 12.5vw, 240px);
+  --board-col-w: clamp(250px, 16vw, 360px);
+  --content-pad: clamp(10px, 1.1vw, 18px);
 }
 
 * {
@@ -582,8 +586,8 @@ header {
   backdrop-filter: blur(18px);
   border: 1px solid rgba(226, 232, 240, 0.9);
   border-radius: 18px;
-  margin: 14px 18px 0;
-  padding: 11px 14px;
+  margin: clamp(10px, 1vw, 14px) var(--content-pad) 0;
+  padding: clamp(9px, .8vw, 12px) clamp(10px, 1vw, 14px);
   display: flex;
   gap: 7px;
   flex-wrap: wrap;
@@ -654,7 +658,8 @@ header {
 }
 
 .filter-sel {
-  max-width: 170px;
+  max-width: min(210px, 100%);
+  min-width: 0;
 }
 
 .spam-view-btn {
@@ -713,8 +718,8 @@ header {
 .fstats {
   font-size: 11px;
   color: var(--muted);
-  padding: 9px 18px;
-  margin: 10px 18px 0;
+  padding: 9px var(--content-pad);
+  margin: 10px var(--content-pad) 0;
   background: rgba(255, 255, 255, 0.82);
   border: 1px solid rgba(226, 232, 240, 0.9);
   border-radius: 15px;
@@ -761,18 +766,20 @@ header {
 
 .board {
   display: flex;
-  gap: 16px;
-  padding: 18px;
+  gap: clamp(10px, .9vw, 16px);
+  padding: var(--content-pad);
   overflow-x: auto;
-  min-height: calc(100vh - 190px);
+  min-height: calc(100dvh - 190px);
+  scroll-snap-type: x proximity;
 }
 
 .column {
-  flex: 1;
-  min-width: 280px;
-  max-width: 395px;
+  flex: 1 0 var(--board-col-w);
+  min-width: min(var(--board-col-w), calc(100vw - 32px));
+  max-width: 420px;
   display: flex;
   flex-direction: column;
+  scroll-snap-align: start;
 }
 
 .col-header {
@@ -2016,7 +2023,7 @@ textarea:focus {
 #spam-view {
   display: none;
   flex-direction: column;
-  min-height: calc(100vh - 175px);
+  min-height: calc(100dvh - 175px);
 }
 
 #spam-view.active {
@@ -2295,21 +2302,22 @@ textarea:focus {
 
 .crm-shell {
   display: flex;
-  min-height: calc(100vh - 84px);
+  min-height: calc(100dvh - var(--app-header-h));
   align-items: flex-start;
 }
 
 .crm-sidebar {
-  width: 220px;
-  flex: 0 0 220px;
+  width: var(--sidebar-w);
+  flex: 0 0 var(--sidebar-w);
   position: sticky;
   top: 77px;
-  height: calc(100vh - 77px);
+  height: calc(100dvh - 77px);
   overflow: auto;
-  background: #0f172a;
+  background: linear-gradient(180deg, #0b1220 0%, #111827 48%, #0f172a 100%);
   color: #ffffff;
-  padding: 14px 10px;
+  padding: 14px 10px 16px;
   border-right: 1px solid rgba(255,255,255,.08);
+  box-shadow: 10px 0 30px rgba(15, 23, 42, .16);
   transition: width .18s ease, flex-basis .18s ease, padding .18s ease;
   z-index: 50;
 }
@@ -2323,8 +2331,8 @@ textarea:focus {
 
 .crm-side-title {
   font-family: Caladea, serif;
-  font-size: 22px;
-  padding: 8px 10px 14px;
+  font-size: 21px;
+  padding: 9px 10px 14px;
   border-bottom: 1px solid rgba(255,255,255,.12);
   margin-bottom: 12px;
   display: flex;
@@ -2334,10 +2342,28 @@ textarea:focus {
 }
 
 .crm-side-title-text {
+  display: flex;
+  align-items: center;
+  gap: 9px;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.crm-side-mark {
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  display: inline-grid;
+  place-items: center;
+  background: rgba(255,255,255,.10);
+  border: 1px solid rgba(255,255,255,.13);
+  color: #e2e8f0;
+  font-family: Inter, "Segoe UI", Arial, sans-serif;
+  font-size: 13px;
+  font-weight: 900;
+  flex: 0 0 auto;
 }
 
 .crm-sidebar-toggle {
@@ -2373,33 +2399,40 @@ textarea:focus {
 .crm-nav {
   display: flex;
   flex-direction: column;
-  gap: 7px;
+  gap: 6px;
+}
+
+.crm-nav-group {
+  display: grid;
+  gap: 6px;
 }
 
 .crm-nav-section {
   display: grid;
-  gap: 7px;
-  margin-top: 10px;
-  padding-top: 10px;
-  border-top: 1px solid rgba(255,255,255,.10);
+  gap: 6px;
+  margin-top: 12px;
+  padding: 11px 8px 8px;
+  border: 1px solid rgba(255,255,255,.10);
+  border-radius: 12px;
+  background: rgba(255,255,255,.045);
 }
 
 .crm-nav-section-title {
-  padding: 0 4px;
+  padding: 0 2px 2px;
   font-size: 11px;
   font-weight: 900;
   letter-spacing: .08em;
   text-transform: uppercase;
-  color: rgba(255,255,255,.56);
+  color: rgba(226,232,240,.66);
 }
 
 .crm-nav-btn {
   width: 100%;
   text-align: left;
-  background: rgba(255,255,255,.06);
+  background: rgba(255,255,255,.055);
   color: #ffffff;
   border: 1px solid rgba(255,255,255,.12);
-  border-radius: 12px;
+  border-radius: 10px;
   padding: 10px 11px;
   font-size: 12px;
   font-weight: 800;
@@ -2407,16 +2440,21 @@ textarea:focus {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.04);
+  transition: background .15s ease, border-color .15s ease, transform .15s ease, box-shadow .15s ease;
 }
 
 .crm-nav-btn:hover {
-  background: rgba(255,255,255,.12);
+  background: rgba(255,255,255,.11);
+  border-color: rgba(255,255,255,.20);
+  transform: translateX(1px);
 }
 
 .crm-nav-btn.active {
-  background: #ffffff;
+  background: #f8fafc;
   color: #0f172a;
   border-color: #ffffff;
+  box-shadow: 0 8px 18px rgba(0,0,0,.16);
 }
 
 .crm-main {
@@ -2426,13 +2464,13 @@ textarea:focus {
 
 #qt-seize-view {
   display: none;
-  min-height: calc(100vh - 175px);
-  padding: 14px 18px 18px;
+  min-height: calc(100dvh - 175px);
+  padding: var(--content-pad);
   background: #f5f7fb;
 }
 
 .qt-seize-shell {
-  min-height: calc(100vh - 210px);
+  min-height: calc(100dvh - 210px);
   background: #ffffff;
   border: 1px solid #d7d7d7;
   border-radius: 14px;
@@ -2465,9 +2503,20 @@ textarea:focus {
 
 .qt-seize-frame {
   width: 100%;
-  min-height: calc(100vh - 280px);
+  min-height: clamp(520px, calc(100dvh - 280px), 1200px);
   border: 0;
   background: #f8fafc;
+}
+
+.responsive-grid-2 {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(360px, 100%), 1fr));
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+#kpi-status-cards {
+  grid-template-columns: repeat(auto-fit, minmax(min(160px, 100%), 1fr)) !important;
 }
 
 /* =========================
@@ -2667,17 +2716,20 @@ th {
 <div class="crm-shell">
   <aside class="crm-sidebar" id="crm-sidebar">
     <div class="crm-side-title">
-      <span class="crm-side-title-text">Quinta CRM</span>
+      <span class="crm-side-title-text"><span class="crm-side-mark">Q</span>Quinta CRM</span>
       <button class="crm-sidebar-toggle" id="crm-sidebar-toggle" type="button" title="Collapse sidebar" aria-label="Collapse sidebar">‹</button>
     </div>
     <div class="crm-nav">
-      <button class="crm-nav-btn active" id="board-view-btn"> Support Board</button>
-      <div id="support-subnav" style="padding-left:10px;margin-top:4px;margin-bottom:4px;">
-        <button class="crm-nav-btn" id="ticket-kpi-view-btn" style="font-size:14px;padding:7px 10px;border-radius:10px;"> Ticket KPIs</button>
+      <div class="crm-nav-group">
+        <div class="crm-nav-section-title">CRM</div>
+        <button class="crm-nav-btn active" id="board-view-btn"> Support Board</button>
+        <div id="support-subnav" style="padding-left:10px;margin-top:4px;margin-bottom:4px;">
+          <button class="crm-nav-btn" id="ticket-kpi-view-btn" style="font-size:14px;padding:7px 10px;border-radius:10px;"> Ticket KPIs</button>
+        </div>
+        <button class="crm-nav-btn" id="spam-view-btn"> Spam Inbox <span class="spam-count-badge" id="spam-count" style="display:none">0</span></button>
+        <button class="crm-nav-btn" id="companies-view-btn"> Companies</button>
+        <button class="crm-nav-btn" id="dashboard-view-btn"> Data Hygiene</button>
       </div>
-      <button class="crm-nav-btn" id="spam-view-btn"> Spam Inbox <span class="spam-count-badge" id="spam-count" style="display:none">0</span></button>
-      <button class="crm-nav-btn" id="companies-view-btn"> Companies</button>
-      <button class="crm-nav-btn" id="dashboard-view-btn"> Data Hygiene</button>
       <div class="crm-nav-section" aria-label="QT-Tools">
         <div class="crm-nav-section-title">QT-Tools</div>
         <button class="crm-nav-btn" id="qt-seize-view-btn"> QT Seize</button>
@@ -2737,7 +2789,7 @@ th {
   </div>
   <div class="spam-list" id="spam-list"></div>
 </div>
-<div id="companies-view" style="display:none;min-height:calc(100vh - 175px);padding:14px 18px;">
+<div id="companies-view" style="display:none;min-height:calc(100dvh - 175px);padding:var(--content-pad);">
   <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px;">
     <div style="font-family:'Caladea',serif;font-size:24px;">Companies</div>
     <div style="display:flex;align-items:center;gap:8px;">
@@ -2769,9 +2821,9 @@ th {
       <div id="companies-stats" style="font-size:12px;color:#555;">Loading</div>
     </div>
   </div>
-  <div id="companies-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:12px;"></div>
+  <div id="companies-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(min(320px,100%),1fr));gap:12px;"></div>
 </div>
-<div id="kpi-view" style="display:none;min-height:calc(100vh - 175px);padding:14px 18px;">
+<div id="kpi-view" style="display:none;min-height:calc(100dvh - 175px);padding:var(--content-pad);">
   <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px;">
     <div style="font-family:'Caladea',serif;font-size:24px;">KPI Dashboard</div>
     <div style="display:flex;align-items:center;gap:8px;">
@@ -2800,7 +2852,7 @@ th {
   </div>
   <div id="kpi-range-label" style="font-size:12px;color:#666;margin-bottom:10px;">Loading</div>
   <div id="kpi-status-cards" style="display:grid;grid-template-columns:repeat(8,minmax(160px,1fr));gap:12px;margin-bottom:12px;"></div>
-  <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px;">
+  <div class="responsive-grid-2">
     <div style="background:#fff;border:1px solid #d7d7d7;border-radius:14px;padding:12px;box-shadow:0 6px 16px rgba(0,0,0,.06);">
       <div style="font-family:Caladea,serif;font-size:24px;margin-bottom:8px;">Tickets by Status</div>
       <div id="kpi-status-chart"></div>
@@ -2810,7 +2862,7 @@ th {
       <div id="kpi-agent-chart"></div>
     </div>
   </div>
-  <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px;">
+  <div class="responsive-grid-2">
     <div style="background:#fff;border:1px solid #d7d7d7;border-radius:14px;padding:12px;box-shadow:0 6px 16px rgba(0,0,0,.06);">
       <div style="font-family:Caladea,serif;font-size:24px;margin-bottom:8px;">Tickets by Category</div>
       <div id="kpi-category-chart"></div>
@@ -2827,7 +2879,7 @@ th {
     </div>
     <div id="kpi-cs-chart"></div>
   </div>
-  <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px;">
+  <div class="responsive-grid-2">
     <div style="background:#fff;border:1px solid #d7d7d7;border-radius:14px;padding:12px;box-shadow:0 6px 16px rgba(0,0,0,.06);">
       <div style="font-family:Caladea,serif;font-size:24px;margin-bottom:8px;">Tickets by Company</div>
       <div style="overflow:auto;">
@@ -4451,7 +4503,7 @@ function renderHygieneDashboard(grid){
   <div style="background:#fff;border:1px solid #d7d7d7;border-radius:14px;padding:12px;box-shadow:0 6px 16px rgba(0,0,0,.06);"><div style="font-family:Caladea,serif;font-size:24px;margin-bottom:8px;">Parent/Monohotel Without Deal</div><div style="overflow:auto;"><table style="width:100%;border-collapse:collapse;font-size:12px;"><thead><tr style="text-align:left;border-bottom:1px solid #ddd;"><th style="padding:8px 10px;">Company</th><th style="padding:8px 10px;">Domain</th><th style="padding:8px 10px;">AM Owner</th><th style="padding:8px 10px;">CS Co-owner</th><th style="padding:8px 10px;">Contract Date</th><th style="padding:8px 10px;">Deals</th><th style="padding:8px 10px;">Type</th><th style="padding:8px 10px;">Duplicate Rule</th></tr></thead><tbody>${hygieneTableRows(rows.noDealParentOrMonohotel)}</tbody></table></div></div>`;
   document.getElementById('refresh-hygiene')?.addEventListener('click',()=>fetchDataHygieneReport(true));
 }
-function renderCompaniesView(){const groups=companyGroups();ensureHubspotOwnerNames(groups);ensureCompanyNetworks(groups);upsertCompanyProfiles(groups);refreshCompaniesFilterOptions(groups);const filtered=applyCompanyFilters(groups);document.getElementById('companies-type-filter').value=companyFilters.type;document.getElementById('companies-search').value=companyFilters.q||'';document.getElementById('companies-viewtype-btn').textContent=companiesViewLabel(companiesViewType)+' ';document.getElementById('companies-stats').textContent=`${filtered.length} companies  ${filtered.reduce((s,x)=>s+x.tickets.length,0)} tickets`;const grid=document.getElementById('companies-grid');if(companiesViewType==='report'){renderHygieneDashboard(grid);if(!dataHygieneReport&&!dataHygieneLoading)fetchDataHygieneReport(false);return;}if(companiesViewType==='calendar'){grid.style.display='block';grid.innerHTML='<div style="background:#fff;border:1px solid #d7d7d7;border-radius:14px;padding:20px;box-shadow:0 6px 16px rgba(0,0,0,.06);"><div style="font-family:Caladea,serif;font-size:24px;margin-bottom:8px;">Calendar view</div><div style="font-size:13px;color:#666;">Calendar view is still a placeholder and can be expanded next.</div></div>';return;}if(!filtered.length){grid.innerHTML='<div class="empty"><div class="empty-icon"></div>No companies match current filters.</div>';return;}grid.style.display='grid';grid.style.gridTemplateColumns=companiesViewType==='table'?'1fr':'repeat(auto-fill,minmax(320px,1fr))';grid.innerHTML='';filtered.forEach(gr=>{const custom=companyCustomProps[gr.companyId]||{};const profile=companyProfiles[gr.companyId]||null;const labeled=(gr.associatedCompanies||[]).map(c=>{const l=(c.labels||[]).map(x=>String(x).toLowerCase());const label=l.find(x=>x.includes('specific hotel'))?'specific hotel':(l.find(x=>x.includes('group central'))?'group central':null);return label?{label,ref:c}:null;}).filter(Boolean);const parentChild=((gr.parentCompany?[{label:'group central',ref:gr.parentCompany}]:[]).concat((gr.childCompanies||[]).map(c=>({label:'specific hotel',ref:c}))));const unlabeledAssoc=(gr.associatedCompanies||[]).filter(c=>{const l=(c.labels||[]).map(x=>String(x).toLowerCase());return !(l.find(x=>x.includes('specific hotel'))||l.find(x=>x.includes('group central')));}).map(c=>({label:'group related',ref:c}));const related=[...labeled,...parentChild,...unlabeledAssoc];const relHtml=related.length?related.map(r=>`<span style="font-size:11px;border:1px solid #ddd;border-radius:999px;padding:2px 8px;display:inline-block;margin:2px 6px 2px 0;background:#f8fafc;">${esc(r.label)}: ${esc(r.ref?.name||r.ref?.id||'')}</span>`).join(''):(gr.relationshipType==='group'?`<span style="font-size:11px;border:1px solid #ddd;border-radius:999px;padding:2px 8px;display:inline-block;margin:2px 6px 2px 0;background:#f8fafc;">Group</span>`:`<span style="font-size:11px;border:1px solid #ddd;border-radius:999px;padding:2px 8px;display:inline-block;margin:2px 6px 2px 0;background:#f8fafc;">Monhotel</span>`);const shownCS=displayCSOwner(gr.coOwner);const metaLine=[gr.country?` ${gr.country}`:null,shownCS?`CS: ${shownCS}`:null].filter(Boolean).join('  ');const contactHtml=[...gr.contacts.values()].map(c=>`<a href="${c.contactUrl||'#'}" ${c.contactUrl?'target="_blank"':''} style="text-decoration:none;color:#333;border:1px solid #ddd;border-radius:999px;padding:2px 8px;font-size:11px;display:inline-flex;gap:4px;align-items:center;"> ${esc(c.contactName)}</a>`).join(' ');const ticketHtml=gr.tickets.slice(0,8).map(t=>{const p=ticketPriority[t.id]||t.priority||'Medium';const col=normalizeTicketStage(ticketState[t.id]||'new');const colLbl={new:'New',inp:'In Progress',wus:'Waiting On Us',dft:'Due for test',wct:'Waiting On Contact',res:'Resolved'}[col]||'New';return `<button data-open-company-ticket="${esc(t.id)}" style="width:100%;text-align:left;border:1px solid #ddd;border-radius:10px;padding:8px 10px;margin-top:6px;background:#fff;cursor:pointer;"><div style="font-weight:700;font-size:12px;margin-bottom:3px;">${esc(t.email.subject||'(no subject)')}</div><div style="display:flex;justify-content:space-between;font-size:11px;color:#666;"><span>${esc(colLbl)}  ${esc(p)}</span><span>${fmtDate(t.email.receivedDateTime)}</span></div></button>`;}).join('');const customHtml=Object.entries(custom).map(([k,v])=>`<span style="font-size:11px;border:1px solid #ddd;border-radius:999px;padding:2px 8px;display:inline-block;margin:2px 4px 2px 0;">${esc(k)}: ${esc(v)}</span>`).join('')||'<span style="font-size:11px;color:#777;">No custom properties yet</span>';const card=document.createElement('div');card.style.cssText='background:#fff;border:1px solid #d7d7d7;border-radius:14px;padding:12px;box-shadow:0 6px 16px rgba(0,0,0,.06);';card.innerHTML=`<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;"><div><div style="font-family:Caladea,serif;font-size:22px;">${esc(gr.companyName)}</div><div style="font-size:11px;color:#666;">${gr.tickets.length} ticket(s)${profile?.createdAt?`  profile: ${fmtDate(profile.createdAt)}`:''}</div>${metaLine?`<div style="font-size:11px;color:#777;margin-top:2px;">${esc(metaLine)}</div>`:''}</div><div style="display:flex;gap:6px;">${gr.companyUrl?`<a class="btn-out" href="${esc(gr.companyUrl)}" target="_blank" style="font-size:11px;padding:4px 8px;">Open HubSpot</a>`:''}<button class="btn-primary" data-cprop="${esc(gr.companyId)}" style="font-size:11px;padding:4px 8px;">Custom Properties</button></div></div><div style="margin-top:8px;"><div style="font-size:11px;color:#666;margin-bottom:3px;">Hierarchy</div>${relHtml}</div><div style="margin-top:8px;"><div style="font-size:11px;color:#666;margin-bottom:5px;">Contacts</div><div style="display:flex;flex-wrap:wrap;gap:4px;">${contactHtml||'<span style="font-size:11px;color:#777;">No contacts</span>'}</div></div><div style="margin-top:8px;"><div style="font-size:11px;color:#666;margin-bottom:3px;">Properties</div>${customHtml}</div><div style="margin-top:8px;"><div style="font-size:11px;color:#666;margin-bottom:2px;">Tickets</div>${ticketHtml}</div>`;if(companiesViewType==='table'){card.style.borderRadius='10px';card.style.padding='10px';card.style.display='grid';card.style.gridTemplateColumns='minmax(220px,1fr) minmax(260px,1fr) minmax(260px,1fr)';card.style.columnGap='12px';card.innerHTML=`<div><div style="font-family:Caladea,serif;font-size:20px;">${esc(gr.companyName)}</div><div style="font-size:11px;color:#666;margin-bottom:6px;">${gr.tickets.length} ticket(s)</div>${metaLine?`<div style=\"font-size:11px;color:#777;margin-bottom:6px;\">${esc(metaLine)}</div>`:''}${relHtml}${gr.companyUrl?`<a class=\"btn-out\" href=\"${esc(gr.companyUrl)}\" target=\"_blank\" style=\"font-size:11px;padding:4px 8px;display:inline-block;\">Open HubSpot</a>`:''}<button class=\"btn-primary\" data-cprop=\"${esc(gr.companyId)}\" style=\"font-size:11px;padding:4px 8px;margin-left:6px;\">Custom Properties</button></div><div><div style=\"font-size:11px;color:#666;margin-bottom:5px;\">Contacts</div><div style=\"display:flex;flex-wrap:wrap;gap:4px;\">${contactHtml||'<span style=\"font-size:11px;color:#777;\">No contacts</span>'}</div><div style=\"margin-top:8px;font-size:11px;color:#666;\">Properties</div><div>${customHtml}</div></div><div><div style=\"font-size:11px;color:#666;margin-bottom:2px;\">Tickets</div>${ticketHtml}</div>`;}card.querySelector('[data-cprop]')?.addEventListener('click',()=>openCompanyPropModal(gr));card.querySelectorAll('[data-open-company-ticket]').forEach(btn=>btn.addEventListener('click',()=>{const t=allTickets.find(x=>x.id===btn.dataset.openCompanyTicket);if(t)openEmailModal(t);}));grid.appendChild(card);});}
+function renderCompaniesView(){const groups=companyGroups();ensureHubspotOwnerNames(groups);ensureCompanyNetworks(groups);upsertCompanyProfiles(groups);refreshCompaniesFilterOptions(groups);const filtered=applyCompanyFilters(groups);document.getElementById('companies-type-filter').value=companyFilters.type;document.getElementById('companies-search').value=companyFilters.q||'';document.getElementById('companies-viewtype-btn').textContent=companiesViewLabel(companiesViewType)+' ';document.getElementById('companies-stats').textContent=`${filtered.length} companies  ${filtered.reduce((s,x)=>s+x.tickets.length,0)} tickets`;const grid=document.getElementById('companies-grid');if(companiesViewType==='report'){renderHygieneDashboard(grid);if(!dataHygieneReport&&!dataHygieneLoading)fetchDataHygieneReport(false);return;}if(companiesViewType==='calendar'){grid.style.display='block';grid.innerHTML='<div style="background:#fff;border:1px solid #d7d7d7;border-radius:14px;padding:20px;box-shadow:0 6px 16px rgba(0,0,0,.06);"><div style="font-family:Caladea,serif;font-size:24px;margin-bottom:8px;">Calendar view</div><div style="font-size:13px;color:#666;">Calendar view is still a placeholder and can be expanded next.</div></div>';return;}if(!filtered.length){grid.innerHTML='<div class="empty"><div class="empty-icon"></div>No companies match current filters.</div>';return;}grid.style.display='grid';grid.style.gridTemplateColumns=companiesViewType==='table'?'1fr':'repeat(auto-fill,minmax(min(320px,100%),1fr))';grid.innerHTML='';filtered.forEach(gr=>{const custom=companyCustomProps[gr.companyId]||{};const profile=companyProfiles[gr.companyId]||null;const labeled=(gr.associatedCompanies||[]).map(c=>{const l=(c.labels||[]).map(x=>String(x).toLowerCase());const label=l.find(x=>x.includes('specific hotel'))?'specific hotel':(l.find(x=>x.includes('group central'))?'group central':null);return label?{label,ref:c}:null;}).filter(Boolean);const parentChild=((gr.parentCompany?[{label:'group central',ref:gr.parentCompany}]:[]).concat((gr.childCompanies||[]).map(c=>({label:'specific hotel',ref:c}))));const unlabeledAssoc=(gr.associatedCompanies||[]).filter(c=>{const l=(c.labels||[]).map(x=>String(x).toLowerCase());return !(l.find(x=>x.includes('specific hotel'))||l.find(x=>x.includes('group central')));}).map(c=>({label:'group related',ref:c}));const related=[...labeled,...parentChild,...unlabeledAssoc];const relHtml=related.length?related.map(r=>`<span style="font-size:11px;border:1px solid #ddd;border-radius:999px;padding:2px 8px;display:inline-block;margin:2px 6px 2px 0;background:#f8fafc;">${esc(r.label)}: ${esc(r.ref?.name||r.ref?.id||'')}</span>`).join(''):(gr.relationshipType==='group'?`<span style="font-size:11px;border:1px solid #ddd;border-radius:999px;padding:2px 8px;display:inline-block;margin:2px 6px 2px 0;background:#f8fafc;">Group</span>`:`<span style="font-size:11px;border:1px solid #ddd;border-radius:999px;padding:2px 8px;display:inline-block;margin:2px 6px 2px 0;background:#f8fafc;">Monhotel</span>`);const shownCS=displayCSOwner(gr.coOwner);const metaLine=[gr.country?` ${gr.country}`:null,shownCS?`CS: ${shownCS}`:null].filter(Boolean).join('  ');const contactHtml=[...gr.contacts.values()].map(c=>`<a href="${c.contactUrl||'#'}" ${c.contactUrl?'target="_blank"':''} style="text-decoration:none;color:#333;border:1px solid #ddd;border-radius:999px;padding:2px 8px;font-size:11px;display:inline-flex;gap:4px;align-items:center;"> ${esc(c.contactName)}</a>`).join(' ');const ticketHtml=gr.tickets.slice(0,8).map(t=>{const p=ticketPriority[t.id]||t.priority||'Medium';const col=normalizeTicketStage(ticketState[t.id]||'new');const colLbl={new:'New',inp:'In Progress',wus:'Waiting On Us',dft:'Due for test',wct:'Waiting On Contact',res:'Resolved'}[col]||'New';return `<button data-open-company-ticket="${esc(t.id)}" style="width:100%;text-align:left;border:1px solid #ddd;border-radius:10px;padding:8px 10px;margin-top:6px;background:#fff;cursor:pointer;"><div style="font-weight:700;font-size:12px;margin-bottom:3px;">${esc(t.email.subject||'(no subject)')}</div><div style="display:flex;justify-content:space-between;font-size:11px;color:#666;"><span>${esc(colLbl)}  ${esc(p)}</span><span>${fmtDate(t.email.receivedDateTime)}</span></div></button>`;}).join('');const customHtml=Object.entries(custom).map(([k,v])=>`<span style="font-size:11px;border:1px solid #ddd;border-radius:999px;padding:2px 8px;display:inline-block;margin:2px 4px 2px 0;">${esc(k)}: ${esc(v)}</span>`).join('')||'<span style="font-size:11px;color:#777;">No custom properties yet</span>';const card=document.createElement('div');card.style.cssText='background:#fff;border:1px solid #d7d7d7;border-radius:14px;padding:12px;box-shadow:0 6px 16px rgba(0,0,0,.06);';card.innerHTML=`<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;"><div><div style="font-family:Caladea,serif;font-size:22px;">${esc(gr.companyName)}</div><div style="font-size:11px;color:#666;">${gr.tickets.length} ticket(s)${profile?.createdAt?`  profile: ${fmtDate(profile.createdAt)}`:''}</div>${metaLine?`<div style="font-size:11px;color:#777;margin-top:2px;">${esc(metaLine)}</div>`:''}</div><div style="display:flex;gap:6px;">${gr.companyUrl?`<a class="btn-out" href="${esc(gr.companyUrl)}" target="_blank" style="font-size:11px;padding:4px 8px;">Open HubSpot</a>`:''}<button class="btn-primary" data-cprop="${esc(gr.companyId)}" style="font-size:11px;padding:4px 8px;">Custom Properties</button></div></div><div style="margin-top:8px;"><div style="font-size:11px;color:#666;margin-bottom:3px;">Hierarchy</div>${relHtml}</div><div style="margin-top:8px;"><div style="font-size:11px;color:#666;margin-bottom:5px;">Contacts</div><div style="display:flex;flex-wrap:wrap;gap:4px;">${contactHtml||'<span style="font-size:11px;color:#777;">No contacts</span>'}</div></div><div style="margin-top:8px;"><div style="font-size:11px;color:#666;margin-bottom:3px;">Properties</div>${customHtml}</div><div style="margin-top:8px;"><div style="font-size:11px;color:#666;margin-bottom:2px;">Tickets</div>${ticketHtml}</div>`;if(companiesViewType==='table'){card.style.borderRadius='10px';card.style.padding='10px';card.style.display='grid';card.style.gridTemplateColumns='minmax(220px,1fr) minmax(260px,1fr) minmax(260px,1fr)';card.style.columnGap='12px';card.innerHTML=`<div><div style="font-family:Caladea,serif;font-size:20px;">${esc(gr.companyName)}</div><div style="font-size:11px;color:#666;margin-bottom:6px;">${gr.tickets.length} ticket(s)</div>${metaLine?`<div style=\"font-size:11px;color:#777;margin-bottom:6px;\">${esc(metaLine)}</div>`:''}${relHtml}${gr.companyUrl?`<a class=\"btn-out\" href=\"${esc(gr.companyUrl)}\" target=\"_blank\" style=\"font-size:11px;padding:4px 8px;display:inline-block;\">Open HubSpot</a>`:''}<button class=\"btn-primary\" data-cprop=\"${esc(gr.companyId)}\" style=\"font-size:11px;padding:4px 8px;margin-left:6px;\">Custom Properties</button></div><div><div style=\"font-size:11px;color:#666;margin-bottom:5px;\">Contacts</div><div style=\"display:flex;flex-wrap:wrap;gap:4px;\">${contactHtml||'<span style=\"font-size:11px;color:#777;\">No contacts</span>'}</div><div style=\"margin-top:8px;font-size:11px;color:#666;\">Properties</div><div>${customHtml}</div></div><div><div style=\"font-size:11px;color:#666;margin-bottom:2px;\">Tickets</div>${ticketHtml}</div>`;}card.querySelector('[data-cprop]')?.addEventListener('click',()=>openCompanyPropModal(gr));card.querySelectorAll('[data-open-company-ticket]').forEach(btn=>btn.addEventListener('click',()=>{const t=allTickets.find(x=>x.id===btn.dataset.openCompanyTicket);if(t)openEmailModal(t);}));grid.appendChild(card);});}
 function showCompaniesView(){viewMode='companies';setBoardChromeVisible(true);hidePrimaryViews();document.getElementById('companies-view').style.display='block';setSideNavActive(companiesViewType==='report'?'dashboard':'companies');saveLastWorkspaceSession(companiesViewType==='report'?'dashboard':'companies');renderCompaniesView();}
 function renderSpamView(){const spamTickets=getSpamTickets();const listEl=document.getElementById('spam-list');document.getElementById('spam-view-count').textContent=`(${spamTickets.length} ticket${spamTickets.length!==1?'s':''})`;if(!spamTickets.length){listEl.innerHTML='<div class="spam-empty"><div style="font-size:48px;margin-bottom:12px;"></div><div style="font-size:16px;font-weight:700;color:#374151;margin-bottom:6px;">Inbox zero!</div><div style="font-size:13px;color:#94a3b8;">No spam tickets.</div></div>';return;}listEl.innerHTML='';spamTickets.forEach(t=>{const{email,id}=t;const clientEmail=ticketClientEmail[id]||null;const hs=clientEmail?hsCache[clientEmail]:null;const senderDisplay=clientEmail||email.sender||'';const row=document.createElement('div');row.className='spam-row';row.innerHTML=`<div class="spam-row-info"><div class="spam-row-subject">${esc(email.subject||'(no subject)')}</div><div class="spam-row-meta"><span class="spam-sender-chip"> ${esc(senderName(senderDisplay))}</span>${hs?.companyName?`<span class="spam-company-chip"> ${esc(hs.companyName)}</span>`:''}<span class="spam-date">${fmtDate(email.receivedDateTime)}</span></div></div><div class="spam-row-actions"><button class="btn-restore" data-restore="${id}"> Restore</button></div>`;row.querySelector(`[data-restore="${id}"]`).addEventListener('click',()=>{ticketCategory[id]='Other';if(normalizeTicketStage(ticketState[id]||'new')==='res'){ticketState[id]='new';ticketStageTouchedAt[id]=Date.now();}const te=clientEmail||email.sender?.toLowerCase();const otherSpam=allTickets.some(x=>x.id!==id&&normalizeTicketStage(ticketState[x.id]||'new')!=='res'&&(ticketClientEmail[x.id]||x.email.sender?.toLowerCase())===te&&ticketCategory[x.id]==='Spam');if(!otherSpam&&te)spamSenders.delete(te);saveState('spam_ticket_restored');renderSpamView();renderBoard();updateSpamBadge();showToast('Ticket restored to board','ok');});listEl.appendChild(row);});}
 document.getElementById('btn-clear-spam').addEventListener('click',()=>{const spamTickets=getSpamTickets();const cnt=spamTickets.length;if(!cnt)return;if(!confirm(`Remove all ${cnt} spam ticket(s)?`))return;const touchedAt=Date.now();spamTickets.forEach((t,idx)=>{ticketState[t.id]='res';ticketStageTouchedAt[t.id]=touchedAt+idx;});saveState('spam_inbox_cleared');renderSpamView();renderBoard();updateSpamBadge();showToast(`${cnt} spam ticket${cnt>1?'s':''} cleared`,'ok');});
