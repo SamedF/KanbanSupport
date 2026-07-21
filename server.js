@@ -2367,6 +2367,85 @@ app.patch('/api/profile', requireAuth, async (req, res) => {
     res.status(500).json({ error: 'update_profile_failed' });
   }
 });
+// --- Templates: shared, team-wide reusable message templates ------------
+// Any logged-in user can create/edit/delete any template (same trust model
+// as the shared ticket board itself) - lastEditedByUserId gives a minimal
+// audit trail for "who changed this" without a full event log.
+const TEMPLATE_SELECT = {
+  id: true, name: true, body: true, createdAt: true, updatedAt: true,
+  createdBy: { select: { username: true, displayName: true } },
+  lastEditedBy: { select: { username: true, displayName: true } }
+};
+app.get('/api/templates', requireAuth, async (req, res) => {
+  const templates = await prisma.template.findMany({ orderBy: { updatedAt: 'desc' }, select: TEMPLATE_SELECT });
+  res.json({ templates });
+});
+app.get('/api/templates/:id', requireAuth, async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: 'invalid_template_id' });
+  const template = await prisma.template.findUnique({ where: { id }, select: TEMPLATE_SELECT });
+  if (!template) return res.status(404).json({ error: 'template_not_found' });
+  res.json({ template });
+});
+app.post('/api/templates', requireAuth, async (req, res) => {
+  const name = String(req.body?.name || '').trim();
+  const body = String(req.body?.body || '');
+  if (!name) return res.status(400).json({ error: 'name_required' });
+  if (!body.trim()) return res.status(400).json({ error: 'body_required' });
+  const template = await prisma.template.create({
+    data: { name, body, createdByUserId: req.session.userId, lastEditedByUserId: req.session.userId },
+    select: TEMPLATE_SELECT
+  });
+  res.status(201).json({ template });
+});
+app.patch('/api/templates/:id', requireAuth, async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: 'invalid_template_id' });
+  const data = { lastEditedByUserId: req.session.userId };
+  if (req.body?.name !== undefined) {
+    const name = String(req.body.name || '').trim();
+    if (!name) return res.status(400).json({ error: 'name_required' });
+    data.name = name;
+  }
+  if (req.body?.body !== undefined) {
+    const body = String(req.body.body || '');
+    if (!body.trim()) return res.status(400).json({ error: 'body_required' });
+    data.body = body;
+  }
+  try {
+    const template = await prisma.template.update({ where: { id }, data, select: TEMPLATE_SELECT });
+    res.json({ template });
+  } catch (error) {
+    res.status(404).json({ error: 'template_not_found' });
+  }
+});
+app.post('/api/templates/:id/duplicate', requireAuth, async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: 'invalid_template_id' });
+  const source = await prisma.template.findUnique({ where: { id } });
+  if (!source) return res.status(404).json({ error: 'template_not_found' });
+  const template = await prisma.template.create({
+    data: {
+      name: `${source.name} (copy)`,
+      body: source.body,
+      createdByUserId: req.session.userId,
+      lastEditedByUserId: req.session.userId
+    },
+    select: TEMPLATE_SELECT
+  });
+  res.status(201).json({ template });
+});
+app.delete('/api/templates/:id', requireAuth, async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: 'invalid_template_id' });
+  try {
+    await prisma.template.delete({ where: { id } });
+    res.json({ ok: true });
+  } catch (error) {
+    res.status(404).json({ error: 'template_not_found' });
+  }
+});
+
 app.get('/api/jira/status', requireAuth, async (req, res) => {
   try {
     const jira = await getJiraConfig();
