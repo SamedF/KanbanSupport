@@ -1178,11 +1178,12 @@ function buildResolvedPowerAutomatePayload(item) {
   // a real email/UPN to resolve the recipient in Graph - the CS trigram alone
   // (e.g. "MBH") is not one, so send the resolved address alongside it.
   const recipientEmail = csTeamsEmails(csOwner)[0] || '';
-  // A plain absolute URL in the message text renders as a clickable link in
-  // Teams on its own, so "View ticket" works even if the Power Automate flow
-  // (external, not in this repo) is never updated to render ticketUrl as a
-  // proper Adaptive Card button - ticketUrl is included too for whoever owns
-  // that flow to use for a nicer button later.
+  // This "message" field ends up inside an Adaptive Card TextBlock (per the
+  // flow's existing structured "Ticket:/Status:/Subject:/..." card layout) -
+  // those render Markdown, not raw HTML and not auto-linked bare URLs, which
+  // is why a plain "View ticket: https://..." line showed as inert text.
+  // Markdown link syntax renders as an actual clickable link instead of
+  // showing the raw ugly Outlook message-id URL.
   const ticketUrl = item.ticketId ? `${RESOLVED_ALERT_APP_URL}/?ticket=${encodeURIComponent(item.ticketId)}` : '';
   const messageParts = [
     `Ticket #${ticketNumber} moved to Resolved.`,
@@ -1191,7 +1192,7 @@ function buildResolvedPowerAutomatePayload(item) {
     csOwner ? `CS: ${csOwner}` : '',
     supportAgent ? `Support: ${supportAgent}` : '',
     jiraKey ? `Jira: ${jiraKey}` : '',
-    ticketUrl ? `View ticket: ${ticketUrl}` : ''
+    ticketUrl ? `[View ticket](${ticketUrl})` : ''
   ].filter(Boolean);
   return {
     ticketId: String(item.ticketId || '').trim(),
