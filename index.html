@@ -3192,7 +3192,17 @@ function normalizeThreadSubject(subject){return String(subject||'').toLowerCase(
 function isReplyLikeSubject(subject){return /^\s*(re|fw|fwd)\s*:/i.test(String(subject||''));}
 function buildTicketThreadKeys(ticket,{allowSubjectFallback=true}={}){if(!ticket||!ticket.id)return[];const email=ticket.email||{};const keys=[];const conversationId=String(email.conversationId||'').trim();if(conversationId)keys.push(`conv:${conversationId}`);if(!allowSubjectFallback)return [...new Set(keys)];const sender=String(email.sender||'').trim().toLowerCase();const recipients=normalizeEmailList(email.recipients);const normalizedSubject=normalizeThreadSubject(email.subject||'');const clientEmail=(ticketClientEmail[ticket.id]||getClientEmail(email)||'').toLowerCase();const allowFallback=!conversationId&&isReplyLikeSubject(email.subject||'');if(clientEmail&&normalizedSubject&&allowFallback)keys.push(`client-subject:${clientEmail}::${normalizedSubject}`);if(sender&&normalizedSubject&&allowFallback)keys.push(`sender-subject:${sender}::${normalizedSubject}`);if(normalizedSubject&&recipients.length&&allowFallback){recipients.slice().sort().forEach(recipient=>{if(recipient&&!SUPPORT_BOX_ALIASES.includes(recipient))keys.push(`recipient-subject:${recipient}::${normalizedSubject}`);});}return [...new Set(keys)];}
 function findExistingTicketForEmail(emailObj){const probe={id:'__probe__',email:emailObj};const strictKeys=buildTicketThreadKeys(probe,{allowSubjectFallback:false});if(strictKeys.length){for(const ticket of allTickets){const existingStrictKeys=buildTicketThreadKeys(ticket,{allowSubjectFallback:false});if(existingStrictKeys.some(key=>strictKeys.includes(key)))return ticket;}}const fallbackKeys=buildTicketThreadKeys(probe,{allowSubjectFallback:true});if(!fallbackKeys.length)return null;for(const ticket of allTickets){const existingKeys=buildTicketThreadKeys(ticket,{allowSubjectFallback:true});if(existingKeys.some(key=>fallbackKeys.includes(key)))return ticket;}return null;}
-function mergeEmailIntoExistingTicket(ticket,emailObj,subtypeId){if(!ticket||!ticket.id||!emailObj)return false;ticket.email={...ticket.email,...emailObj};const ce=getClientEmail(emailObj);if(ce)ticketClientEmail[ticket.id]=ce;const csFromSender=csAgentFromSenderEmail(emailObj.sender);if(csFromSender&&!ticketCSOwner[ticket.id])ticketCSOwner[ticket.id]=csFromSender;const st=SUBTYPE_BY_ID[subtypeId]||null;if(!ticketSubtype[ticket.id]&&st)ticketSubtype[ticket.id]=st.id;if(!ticketPriority[ticket.id]&&st)ticketPriority[ticket.id]=st.priority;ticketHasNewReply[ticket.id]=true;return true;}
+function mergeEmailIntoExistingTicket(ticket,emailObj,subtypeId){if(!ticket||!ticket.id||!emailObj)return false;ticket.email={...ticket.email,...emailObj};const ce=getClientEmail(emailObj);if(ce)ticketClientEmail[ticket.id]=ce;const csFromSender=csAgentFromSenderEmail(emailObj.sender);if(csFromSender&&!ticketCSOwner[ticket.id])ticketCSOwner[ticket.id]=csFromSender;const st=SUBTYPE_BY_ID[subtypeId]||null;if(!ticketSubtype[ticket.id]&&st)ticketSubtype[ticket.id]=st.id;if(!ticketPriority[ticket.id]&&st)ticketPriority[ticket.id]=st.priority;ticketHasNewReply[ticket.id]=true;
+  // A genuine client reply (not internal CS staff, e.g. a CC'd @quinta.im
+  // address) while waiting on the client means the ball is back in our
+  // court - move it out of Waiting on Contact automatically. addTickets()
+  // already filters out automated/OOO messages (isAutomatic()) before this
+  // ever runs, so this only fires for real inbound replies.
+  if(!isInternalEmailAddress(emailObj.sender)&&normalizeTicketStage(ticketState[ticket.id]||'new')==='wct'){
+    ticketState[ticket.id]='wus';
+    ticketStageTouchedAt[ticket.id]=Date.now();
+  }
+  return true;}
 
 //  State 
 const seen={};
@@ -5389,13 +5399,43 @@ document.querySelectorAll('.col-body').forEach(col=>{col.addEventListener('drago
 document.querySelectorAll('[data-close]').forEach(b=>{b.addEventListener('click',()=>document.getElementById(b.dataset.close).classList.remove('open'));});
 document.querySelectorAll('.modal-bg').forEach(bg=>{bg.addEventListener('click',e=>{if(e.target===bg)bg.classList.remove('open');});});
 
+// Deep link from the Teams "Resolved" alert's "View ticket" link
+// (?ticket=<externalId>) - resolved once board data is loaded, then the
+// param is stripped so a refresh doesn't keep reopening the same ticket.
+let ticketDeepLinkHandled=false;
+function handleTicketDeepLink(){
+  if(ticketDeepLinkHandled)return;
+  const params=new URLSearchParams(location.search);
+  const ticketId=params.get('ticket');
+  if(!ticketId)return;
+  const ticket=allTickets.find(t=>t.id===ticketId);
+  if(!ticket)return; // board may not be fully loaded yet - a later call retries, param stays until then
+  ticketDeepLinkHandled=true;
+  openEmailModal(ticket);
+  const url=new URL(location.href);
+  url.searchParams.delete('ticket');
+  history.replaceState({},'',url.toString());
+}
 async function openEmailModal(ticket){
   const{email,id}=ticket;const clientEmail=ticketClientEmail[id];const hs=clientEmail?hsCache[clientEmail]:null;const isReply=isQuintaSender(email.sender)&&!!clientEmail;
   document.getElementById('em-title').textContent=email.subject||'(no subject)';
   const csOwner=ticketCSOwner[id]||null;
   const csMeta=csOwner?`  CS: ${esc(csOwner)}`:'';
   let metaHtml=isReply?`<span><strong>Client:</strong> ${esc(clientEmail)}</span><span><strong>Replied by:</strong> ${esc(email.sender)}</span>`:`<span><strong>From:</strong> ${esc(email.sender||'')}</span>`;
-  metaHtml+=`<span><strong>Received:</strong> ${fmtDate(email.receivedDateTime)}</span><span><strong>Support:</strong> ${ticketAssignee[id]||''}${csMeta}</span>`;
+  // Created (original ticket date, what SLA is measured from) and Last
+  // message (the latest reply's date - overwritten on every merged reply in
+  // mergeEmailIntoExistingTicket) are shown separately once they diverge,
+  // so a stale-but-recently-followed-up ticket doesn't look self-contradictory
+  // (e.g. "Received: 10m ago" next to "13d overdue" was really two different
+  // timestamps mislabeled as one).
+  const createdRaw=ticketCreatedAt[id]||email.receivedDateTime;
+  const createdTs=Date.parse(createdRaw||'');
+  const lastMsgTs=Date.parse(email.receivedDateTime||'');
+  metaHtml+=`<span><strong>Created:</strong> ${fmtDate(createdRaw)}</span>`;
+  if(Number.isFinite(createdTs)&&Number.isFinite(lastMsgTs)&&Math.abs(lastMsgTs-createdTs)>60000){
+    metaHtml+=`<span><strong>Last message:</strong> ${fmtDate(email.receivedDateTime)}</span>`;
+  }
+  metaHtml+=`<span><strong>Support:</strong> ${ticketAssignee[id]||''}${csMeta}</span>`;
   const sla=getSLAStatus(id,ticketPriority[id]||ticket.priority);
   if(sla)metaHtml+=`<span><strong>SLA:</strong> <span style="font-weight:600;color:${sla.overdue?'#dc2626':'#d97706'}"> ${sla.text}</span></span>`;
   const jiraKey=canonicalJiraKey(ticketJira[id]);
@@ -5624,7 +5664,7 @@ async function poll(){if(!hasCowork){startCountdown();return;}const res=await fe
   if(allTickets.length){
     applyCompanyCSAssignments();
     autoAssignNew(allTickets);
-    updateCompanyFilter();restoreLastWorkspaceSession();updateSpamBadge();updateJiraBadge();
+    updateCompanyFilter();restoreLastWorkspaceSession();updateSpamBadge();updateJiraBadge();handleTicketDeepLink();
     await refreshLinkedJiraIssues(true);
     syncUnsyncedTicketsToHubspot();
   }
@@ -5638,7 +5678,7 @@ async function poll(){if(!hasCowork){startCountdown();return;}const res=await fe
       document.getElementById('fstats').textContent='Mailbox sync error: '+(recentRes?.error||'unknown');
     }
     document.getElementById('meta').textContent='Secure web mode active (manual tickets + board workflow available)';
-    updateCompanyFilter();restoreLastWorkspaceSession();updateSpamBadge();updateJiraBadge();
+    updateCompanyFilter();restoreLastWorkspaceSession();updateSpamBadge();updateJiraBadge();handleTicketDeepLink();
     await refreshLinkedJiraIssues(true);
     requestNotificationPermission();
     notifySnapshot=snapshotForNotify({ticketAssignee,ticketState,ticketComments,jiraAlerts,allTickets,ticketCSOwner});
@@ -5659,7 +5699,7 @@ async function poll(){if(!hasCowork){startCountdown();return;}const res=await fe
   const newest=nonSpam[0]?.email?.receivedDateTime;
   document.getElementById('fstats').textContent=`${nonSpam.length} tickets  most recent: ${newest?fmtDate(newest):''}`;
   document.getElementById('meta').textContent=`${allTickets.length} tickets  polling every ${POLL_SECS}s`;
-  updateCompanyFilter();restoreLastWorkspaceSession();updateSpamBadge();updateJiraBadge();startCountdown();
+  updateCompanyFilter();restoreLastWorkspaceSession();updateSpamBadge();updateJiraBadge();startCountdown();handleTicketDeepLink();
   await refreshLinkedJiraIssues(true);
   enrichWithHubSpot();
   requestNotificationPermission();
