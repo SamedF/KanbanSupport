@@ -42,6 +42,12 @@ const M365_SCOPES = String(process.env.M365_SCOPES || 'offline_access openid pro
 const SUPPORT_MAILBOX = String(process.env.SUPPORT_MAILBOX || 'helpdesk@quinta.im').trim().toLowerCase();
 const CONFIGURED_APP_BASE_URL = String(process.env.APP_BASE_URL || process.env.PUBLIC_BASE_URL || '').trim();
 const APP_BASE_URL = String(CONFIGURED_APP_BASE_URL || `http://localhost:${PORT}`).replace(/\/+$/, '');
+// Teams "Resolved" alerts always link to prod, regardless of which
+// environment actually triggered the resolve - preprod is a test
+// environment, so a real DM's "View ticket" link should still point
+// somewhere real rather than a preprod/localhost URL nobody outside testing
+// can use.
+const RESOLVED_ALERT_APP_URL = String(process.env.RESOLVED_ALERT_APP_URL || 'https://support-dash.quinta.im').replace(/\/+$/, '');
 const PASSWORD_RESET_TTL_MS = Number(process.env.PASSWORD_RESET_TTL_MS || 60 * 60 * 1000);
 const HUBSPOT_TOKEN = process.env.HUBSPOT_PRIVATE_APP_TOKEN || process.env.HUBSPOT_ACCESS_TOKEN || '';
 const HAS_STATIC_HUBSPOT_TOKEN = !!HUBSPOT_TOKEN && HUBSPOT_TOKEN.startsWith('pat-');
@@ -1177,7 +1183,7 @@ function buildResolvedPowerAutomatePayload(item) {
   // (external, not in this repo) is never updated to render ticketUrl as a
   // proper Adaptive Card button - ticketUrl is included too for whoever owns
   // that flow to use for a nicer button later.
-  const ticketUrl = item.ticketId ? `${APP_BASE_URL}/?ticket=${encodeURIComponent(item.ticketId)}` : '';
+  const ticketUrl = item.ticketId ? `${RESOLVED_ALERT_APP_URL}/?ticket=${encodeURIComponent(item.ticketId)}` : '';
   const messageParts = [
     `Ticket #${ticketNumber} moved to Resolved.`,
     `Subject: ${subject}`,
