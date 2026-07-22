@@ -3167,7 +3167,6 @@ const POLL_SECS=60,POLL_WIN_MINS=5;
 const MAIL_FETCH_LIMIT=200;
 const INITIAL_SYNC_DAYS=14;
 const POLL_LOOKBACK_HOURS=96;
-const POLL_BACKFILL_BUFFER_HOURS=6;
 const JIRA_REFRESH_MS=60000;
 const RESOLVED_RETENTION_MS=72*60*60*1000;
 const hasCowork=typeof window!=='undefined'&&window.cowork&&typeof window.cowork.callMcpTool==='function';
@@ -3565,8 +3564,15 @@ function ticketMatchesNumberQuery(ticket){
 function inlineSelectedTags(id){return Array.isArray(inlineTagDrafts[id])?inlineTagDrafts[id]:[];}
 function toggleInlineTag(id,tag){const next=new Set(inlineSelectedTags(id));if(next.has(tag))next.delete(tag);else next.add(tag);inlineTagDrafts[id]=[...next];}
 function isoHoursAgo(hours){return new Date(Date.now()-(Math.max(1,Number(hours)||1)*3600000)).toISOString();}
-function newestKnownEmailTs(){let newest=0;allTickets.forEach(t=>{const ts=Date.parse(t?.email?.receivedDateTime||ticketCreatedAt[t?.id]||'');if(Number.isFinite(ts)&&ts>newest)newest=ts;});return newest||0;}
-function buildPollAfterDateTime(){const newestTs=newestKnownEmailTs();if(!newestTs)return isoHoursAgo(POLL_LOOKBACK_HOURS);const bufferedTs=newestTs-(POLL_BACKFILL_BUFFER_HOURS*3600000);return new Date(Math.max(Date.now()-(POLL_LOOKBACK_HOURS*3600000),bufferedTs)).toISOString();}
+// Previously narrowed this window to the newest email seen across the WHOLE
+// board (minus a small buffer) rather than a fixed lookback from now - any
+// single thread quieter than that buffer relative to the rest of the board's
+// activity fell permanently outside every future poll (confirmed live: a
+// 13-day-old gap on one thread while the rest of the board stayed active).
+// Always using a fixed rolling window from the actual present time means no
+// thread can silently fall behind again, at the cost of a bit more refetch
+// volume each poll.
+function buildPollAfterDateTime(){return isoHoursAgo(POLL_LOOKBACK_HOURS);}
 async function fetchMailboxWindow(afterDateTime){
   const args={limit:MAIL_FETCH_LIMIT,mailboxOwnerEmail:SUPPORT_BOX};
   if(afterDateTime)args.afterDateTime=afterDateTime;
