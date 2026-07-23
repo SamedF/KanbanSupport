@@ -2030,6 +2030,16 @@ textarea:focus {
   display: flex;
 }
 
+#archive-view {
+  display: none;
+  flex-direction: column;
+  min-height: calc(100vh - 175px);
+}
+
+#archive-view.active {
+  display: flex;
+}
+
 .spam-view-header {
   padding: 16px 24px 12px;
   display: flex;
@@ -2735,6 +2745,7 @@ th {
           <button class="crm-nav-btn" id="ticket-kpi-view-btn" style="font-size:14px;padding:7px 10px;border-radius:10px;"> Ticket KPIs</button>
         </div>
         <button class="crm-nav-btn" id="spam-view-btn"> Spam Inbox <span class="spam-count-badge" id="spam-count" style="display:none">0</span></button>
+        <button class="crm-nav-btn" id="archive-view-btn"> Archive Inbox <span class="spam-count-badge" id="archive-count" style="display:none">0</span></button>
         <button class="crm-nav-btn" id="companies-view-btn"> Companies</button>
         <button class="crm-nav-btn" id="dashboard-view-btn"> Data Hygiene</button>
       </div>
@@ -2796,6 +2807,15 @@ th {
     </div>
   </div>
   <div class="spam-list" id="spam-list"></div>
+</div>
+<div id="archive-view">
+  <div class="spam-view-header">
+    <div class="spam-view-title" style="color:#475569;"> Archive Inbox <span id="archive-view-count" style="font-size:14px;font-weight:400;color:#94a3b8;"></span></div>
+    <div class="spam-view-actions">
+      <button class="btn-back" id="btn-back-board-archive"> Back to Board</button>
+    </div>
+  </div>
+  <div class="spam-list" id="archive-list"></div>
 </div>
 <div id="companies-view" style="display:none;min-height:calc(100dvh - 175px);padding:var(--content-pad);">
   <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px;">
@@ -3352,6 +3372,8 @@ let ticketHubspotId={}; // ticketId -> HubSpot ticket ID
 let ticketStageTouchedAt={}; // ticketId -> last stage-change timestamp (ms)
 let ticketHasNewReply={}; // ticketId -> true while an unread reply is glowing on the card
 let ticketResolutionMeta={}; // ticketId -> CS confirmation / send-back metadata
+let ticketArchived={}; // ticketId -> {archivedAt,archivedBy,reason:'manual'|'resolved_confirmed'}
+function isArchivedTicket(id){return !!ticketArchived[id];}
 let spamSenders=new Set();
 let hsCache={},domainCompanyCache={},readMentions=new Set(),readJiraAlerts=new Set();
 let jiraAlerts=[],jiraStatusSnapshot={};
@@ -3541,7 +3563,7 @@ function buildStatePayload(reason){
   const snapshot={
     allTickets,
     seenIds:Object.keys(seen),
-    ticketState,ticketStageTouchedAt,ticketHasNewReply,ticketResolutionMeta,ticketPriority,ticketCategory,ticketSubtype,ticketAssignee,ticketAssignmentMode,manualSupportOverride,ticketCSOwner,ticketComments,ticketClientEmail,ticketCreatedAt,ticketNumbers,ticketNumberCounter,ticketJira,ticketHubspotId,
+    ticketState,ticketStageTouchedAt,ticketHasNewReply,ticketResolutionMeta,ticketArchived,ticketPriority,ticketCategory,ticketSubtype,ticketAssignee,ticketAssignmentMode,manualSupportOverride,ticketCSOwner,ticketComments,ticketClientEmail,ticketCreatedAt,ticketNumbers,ticketNumberCounter,ticketJira,ticketHubspotId,
     spamSenders:[...spamSenders],hsCache,domainCompanyCache,readMentions:[...readMentions],jiraAlerts,readJiraAlerts:[...readJiraAlerts],jiraStatusSnapshot,companyCustomProps,companyProfiles,companiesViewType,companyNetworkCache,companyFilters,coOwnerMappings,actionHistory,
     _meta:{clientSavedAt:now,clientVersion:stateVersion}
   };
@@ -3782,6 +3804,7 @@ async function loadState(){
   if(s.ticketStageTouchedAt&&typeof s.ticketStageTouchedAt==='object')Object.assign(ticketStageTouchedAt,s.ticketStageTouchedAt);
   if(s.ticketHasNewReply&&typeof s.ticketHasNewReply==='object')Object.assign(ticketHasNewReply,s.ticketHasNewReply);
   if(s.ticketResolutionMeta&&typeof s.ticketResolutionMeta==='object')Object.assign(ticketResolutionMeta,s.ticketResolutionMeta);
+  if(s.ticketArchived&&typeof s.ticketArchived==='object')Object.assign(ticketArchived,s.ticketArchived);
   if(s.ticketPriority)Object.assign(ticketPriority,s.ticketPriority);
   if(s.ticketCategory)Object.assign(ticketCategory,s.ticketCategory);if(s.ticketSubtype)Object.assign(ticketSubtype,s.ticketSubtype);
   if(s.ticketAssignee)Object.assign(ticketAssignee,s.ticketAssignee);
@@ -3831,9 +3854,12 @@ async function syncTicketStatusToHubspot(ticketId,newCol){const hsId=ticketHubsp
 function recordSpamSender(spamEmail){if(!spamEmail||isQuintaSender(spamEmail)||spamSenders.has(spamEmail))return 0;spamSenders.add(spamEmail);let count=0;allTickets.forEach(t=>{const te=ticketClientEmail[t.id]||t.email.sender?.toLowerCase();if(te===spamEmail){ticketCategory[t.id]='Spam';count++;}});return count;}
 function getSpamTickets(){return allTickets.filter(t=>ticketCategory[t.id]==='Spam'&&normalizeTicketStage(ticketState[t.id]||'new')!=='res'&&ticketVisibleToCurrentUser(t)).sort((a,b)=>new Date(b.email.receivedDateTime||0)-new Date(a.email.receivedDateTime||0));}
 function updateSpamBadge(){const cnt=getSpamTickets().length;const badge=document.getElementById('spam-count');const btn=document.getElementById('spam-view-btn');if(cnt>0){badge.textContent=cnt>99?'99+':cnt;badge.style.display='inline-flex';}else{badge.style.display='none';}(cnt>0&&!btn.classList.contains('active'))&&(btn.style.fontWeight='700');}
+function getArchivedTickets(){return allTickets.filter(t=>isArchivedTicket(t.id)&&ticketVisibleToCurrentUser(t)).sort((a,b)=>(ticketArchived[b.id]?.archivedAt||0)-(ticketArchived[a.id]?.archivedAt||0));}
+function updateArchiveBadge(){const cnt=getArchivedTickets().length;const badge=document.getElementById('archive-count');const btn=document.getElementById('archive-view-btn');if(!badge||!btn)return;if(cnt>0){badge.textContent=cnt>99?'99+':cnt;badge.style.display='inline-flex';}else{badge.style.display='none';}}
 function setSideNavActive(mode){
   document.getElementById('board-view-btn')?.classList.toggle('active',mode==='board'||mode==='kpi');
   document.getElementById('spam-view-btn')?.classList.toggle('active',mode==='spam');
+  document.getElementById('archive-view-btn')?.classList.toggle('active',mode==='archive');
   document.getElementById('companies-view-btn')?.classList.toggle('active',mode==='companies');
   document.getElementById('dashboard-view-btn')?.classList.toggle('active',mode==='dashboard');
   document.getElementById('ticket-kpi-view-btn')?.classList.toggle('active',mode==='kpi');
@@ -4337,13 +4363,14 @@ document.getElementById('ct-submit').addEventListener('click',async()=>{
 });
 
 //  View switching 
-function hidePrimaryViews(){document.getElementById('main-board').style.display='none';document.getElementById('spam-view').classList.remove('active');document.getElementById('companies-view').style.display='none';document.getElementById('kpi-view').style.display='none';document.getElementById('qt-seize-view').style.display='none';}
+function hidePrimaryViews(){document.getElementById('main-board').style.display='none';document.getElementById('spam-view').classList.remove('active');document.getElementById('archive-view').classList.remove('active');document.getElementById('companies-view').style.display='none';document.getElementById('kpi-view').style.display='none';document.getElementById('qt-seize-view').style.display='none';}
 function showBoardView(){viewMode='board';setBoardChromeVisible(true);hidePrimaryViews();document.getElementById('main-board').style.display='flex';setSideNavActive('board');saveLastWorkspaceSession('board');renderBoard();}
 function showSpamView(){viewMode='spam';setBoardChromeVisible(true);hidePrimaryViews();document.getElementById('spam-view').classList.add('active');setSideNavActive('spam');saveLastWorkspaceSession('spam');renderSpamView();}
+function showArchiveView(){viewMode='archive';setBoardChromeVisible(true);hidePrimaryViews();document.getElementById('archive-view').classList.add('active');setSideNavActive('archive');saveLastWorkspaceSession('archive');renderArchiveView();}
 function showDashboardView(){companiesViewType='report';viewMode='companies';setBoardChromeVisible(true);hidePrimaryViews();document.getElementById('companies-view').style.display='block';setSideNavActive('dashboard');saveLastWorkspaceSession('dashboard');renderCompaniesView();}
 function showKpiView(){viewMode='kpi';setBoardChromeVisible(true);hidePrimaryViews();document.getElementById('kpi-view').style.display='block';setSideNavActive('kpi');saveLastWorkspaceSession('kpi');renderKpiView();}
 function showQtSeizeView(){viewMode='qtSeize';setBoardChromeVisible(false);hidePrimaryViews();const frame=document.getElementById('qt-seize-frame');if(frame&&!frame.src)frame.src='/qt-seize/';document.getElementById('qt-seize-view').style.display='block';setSideNavActive('qtSeize');saveLastWorkspaceSession('qtSeize');}
-function renderActiveView(){if(viewMode==='board')renderBoard();else if(viewMode==='spam')renderSpamView();else if(viewMode==='kpi')renderKpiView();else if(viewMode==='qtSeize')return;else renderCompaniesView();}
+function renderActiveView(){if(viewMode==='board')renderBoard();else if(viewMode==='spam')renderSpamView();else if(viewMode==='archive')renderArchiveView();else if(viewMode==='kpi')renderKpiView();else if(viewMode==='qtSeize')return;else renderCompaniesView();}
 function ticketTimestampMs(t){
   const id=t?.id;
   const raw=t?.email?.receivedDateTime||ticketCreatedAt[id]||null;
@@ -4479,7 +4506,7 @@ function renderKpiViewLocal(){
     return companyForTicket(t)===activeCompany;
   };
   const inRange=allTickets
-    .filter(t=>ticketCategory[t.id]!=='Spam')
+    .filter(t=>ticketCategory[t.id]!=='Spam'&&!isArchivedTicket(t.id))
     .filter(t=>{const ms=ticketTimestampMs(t);return ms!==null&&ms>=bounds.start&&ms<=bounds.end;})
     .filter(ticketMatchesCompany)
     .filter(t=>!activeJira||!!ticketJira[t.id])
@@ -4587,7 +4614,7 @@ function companyGroups(){
     return row;
   };
   allTickets.forEach(t=>{
-    if(ticketCategory[t.id]==='Spam')return;
+    if(ticketCategory[t.id]==='Spam'||isArchivedTicket(t.id))return;
     const ce=ticketClientEmail[t.id]||getClientEmail(t.email);
     if(!ce)return;
     const hs=hsCache[ce];
@@ -4808,9 +4835,26 @@ function renderHygieneDashboard(grid){
 function renderCompaniesView(){const groups=companyGroups();ensureHubspotOwnerNames(groups);ensureCompanyNetworks(groups);upsertCompanyProfiles(groups);refreshCompaniesFilterOptions(groups);const filtered=applyCompanyFilters(groups);document.getElementById('companies-type-filter').value=companyFilters.type;document.getElementById('companies-search').value=companyFilters.q||'';document.getElementById('companies-viewtype-btn').textContent=companiesViewLabel(companiesViewType)+' ';document.getElementById('companies-stats').textContent=`${filtered.length} companies  ${filtered.reduce((s,x)=>s+x.tickets.length,0)} tickets`;const grid=document.getElementById('companies-grid');if(companiesViewType==='report'){renderHygieneDashboard(grid);if(!dataHygieneReport&&!dataHygieneLoading)fetchDataHygieneReport(false);return;}if(companiesViewType==='calendar'){grid.style.display='block';grid.innerHTML='<div style="background:#fff;border:1px solid #d7d7d7;border-radius:14px;padding:20px;box-shadow:0 6px 16px rgba(0,0,0,.06);"><div style="font-family:Caladea,serif;font-size:24px;margin-bottom:8px;">Calendar view</div><div style="font-size:13px;color:#666;">Calendar view is still a placeholder and can be expanded next.</div></div>';return;}if(!filtered.length){grid.innerHTML='<div class="empty"><div class="empty-icon"></div>No companies match current filters.</div>';return;}grid.style.display='grid';grid.style.gridTemplateColumns=companiesViewType==='table'?'1fr':'repeat(auto-fill,minmax(min(320px,100%),1fr))';grid.innerHTML='';filtered.forEach(gr=>{const custom=companyCustomProps[gr.companyId]||{};const profile=companyProfiles[gr.companyId]||null;const labeled=(gr.associatedCompanies||[]).map(c=>{const l=(c.labels||[]).map(x=>String(x).toLowerCase());const label=l.find(x=>x.includes('specific hotel'))?'specific hotel':(l.find(x=>x.includes('group central'))?'group central':null);return label?{label,ref:c}:null;}).filter(Boolean);const parentChild=((gr.parentCompany?[{label:'group central',ref:gr.parentCompany}]:[]).concat((gr.childCompanies||[]).map(c=>({label:'specific hotel',ref:c}))));const unlabeledAssoc=(gr.associatedCompanies||[]).filter(c=>{const l=(c.labels||[]).map(x=>String(x).toLowerCase());return !(l.find(x=>x.includes('specific hotel'))||l.find(x=>x.includes('group central')));}).map(c=>({label:'group related',ref:c}));const related=[...labeled,...parentChild,...unlabeledAssoc];const relHtml=related.length?related.map(r=>`<span style="font-size:11px;border:1px solid #ddd;border-radius:999px;padding:2px 8px;display:inline-block;margin:2px 6px 2px 0;background:#f8fafc;">${esc(r.label)}: ${esc(r.ref?.name||r.ref?.id||'')}</span>`).join(''):(gr.relationshipType==='group'?`<span style="font-size:11px;border:1px solid #ddd;border-radius:999px;padding:2px 8px;display:inline-block;margin:2px 6px 2px 0;background:#f8fafc;">Group</span>`:`<span style="font-size:11px;border:1px solid #ddd;border-radius:999px;padding:2px 8px;display:inline-block;margin:2px 6px 2px 0;background:#f8fafc;">Monhotel</span>`);const shownCS=displayCSOwner(gr.coOwner);const metaLine=[gr.country?` ${gr.country}`:null,shownCS?`CS: ${shownCS}`:null].filter(Boolean).join('  ');const contactHtml=[...gr.contacts.values()].map(c=>`<a href="${c.contactUrl||'#'}" ${c.contactUrl?'target="_blank"':''} style="text-decoration:none;color:#333;border:1px solid #ddd;border-radius:999px;padding:2px 8px;font-size:11px;display:inline-flex;gap:4px;align-items:center;"> ${esc(c.contactName)}</a>`).join(' ');const ticketHtml=gr.tickets.slice(0,8).map(t=>{const p=ticketPriority[t.id]||t.priority||'Medium';const col=normalizeTicketStage(ticketState[t.id]||'new');const colLbl={new:'New',inp:'In Progress',wus:'Waiting On Us',dft:'Due for test',wct:'Waiting On Contact',res:'Resolved'}[col]||'New';return `<button data-open-company-ticket="${esc(t.id)}" style="width:100%;text-align:left;border:1px solid #ddd;border-radius:10px;padding:8px 10px;margin-top:6px;background:#fff;cursor:pointer;"><div style="font-weight:700;font-size:12px;margin-bottom:3px;">${esc(t.email.subject||'(no subject)')}</div><div style="display:flex;justify-content:space-between;font-size:11px;color:#666;"><span>${esc(colLbl)}  ${esc(p)}</span><span>${fmtDate(t.email.receivedDateTime)}</span></div></button>`;}).join('');const customHtml=Object.entries(custom).map(([k,v])=>`<span style="font-size:11px;border:1px solid #ddd;border-radius:999px;padding:2px 8px;display:inline-block;margin:2px 4px 2px 0;">${esc(k)}: ${esc(v)}</span>`).join('')||'<span style="font-size:11px;color:#777;">No custom properties yet</span>';const card=document.createElement('div');card.style.cssText='background:#fff;border:1px solid #d7d7d7;border-radius:14px;padding:12px;box-shadow:0 6px 16px rgba(0,0,0,.06);';card.innerHTML=`<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;"><div><div style="font-family:Caladea,serif;font-size:22px;">${esc(gr.companyName)}</div><div style="font-size:11px;color:#666;">${gr.tickets.length} ticket(s)${profile?.createdAt?`  profile: ${fmtDate(profile.createdAt)}`:''}</div>${metaLine?`<div style="font-size:11px;color:#777;margin-top:2px;">${esc(metaLine)}</div>`:''}</div><div style="display:flex;gap:6px;">${gr.companyUrl?`<a class="btn-out" href="${esc(gr.companyUrl)}" target="_blank" style="font-size:11px;padding:4px 8px;">Open HubSpot</a>`:''}<button class="btn-primary" data-cprop="${esc(gr.companyId)}" style="font-size:11px;padding:4px 8px;">Custom Properties</button></div></div><div style="margin-top:8px;"><div style="font-size:11px;color:#666;margin-bottom:3px;">Hierarchy</div>${relHtml}</div><div style="margin-top:8px;"><div style="font-size:11px;color:#666;margin-bottom:5px;">Contacts</div><div style="display:flex;flex-wrap:wrap;gap:4px;">${contactHtml||'<span style="font-size:11px;color:#777;">No contacts</span>'}</div></div><div style="margin-top:8px;"><div style="font-size:11px;color:#666;margin-bottom:3px;">Properties</div>${customHtml}</div><div style="margin-top:8px;"><div style="font-size:11px;color:#666;margin-bottom:2px;">Tickets</div>${ticketHtml}</div>`;if(companiesViewType==='table'){card.style.borderRadius='10px';card.style.padding='10px';card.style.display='grid';card.style.gridTemplateColumns='minmax(220px,1fr) minmax(260px,1fr) minmax(260px,1fr)';card.style.columnGap='12px';card.innerHTML=`<div><div style="font-family:Caladea,serif;font-size:20px;">${esc(gr.companyName)}</div><div style="font-size:11px;color:#666;margin-bottom:6px;">${gr.tickets.length} ticket(s)</div>${metaLine?`<div style=\"font-size:11px;color:#777;margin-bottom:6px;\">${esc(metaLine)}</div>`:''}${relHtml}${gr.companyUrl?`<a class=\"btn-out\" href=\"${esc(gr.companyUrl)}\" target=\"_blank\" style=\"font-size:11px;padding:4px 8px;display:inline-block;\">Open HubSpot</a>`:''}<button class=\"btn-primary\" data-cprop=\"${esc(gr.companyId)}\" style=\"font-size:11px;padding:4px 8px;margin-left:6px;\">Custom Properties</button></div><div><div style=\"font-size:11px;color:#666;margin-bottom:5px;\">Contacts</div><div style=\"display:flex;flex-wrap:wrap;gap:4px;\">${contactHtml||'<span style=\"font-size:11px;color:#777;\">No contacts</span>'}</div><div style=\"margin-top:8px;font-size:11px;color:#666;\">Properties</div><div>${customHtml}</div></div><div><div style=\"font-size:11px;color:#666;margin-bottom:2px;\">Tickets</div>${ticketHtml}</div>`;}card.querySelector('[data-cprop]')?.addEventListener('click',()=>openCompanyPropModal(gr));card.querySelectorAll('[data-open-company-ticket]').forEach(btn=>btn.addEventListener('click',()=>{const t=allTickets.find(x=>x.id===btn.dataset.openCompanyTicket);if(t)openEmailModal(t);}));grid.appendChild(card);});}
 function showCompaniesView(){viewMode='companies';setBoardChromeVisible(true);hidePrimaryViews();document.getElementById('companies-view').style.display='block';setSideNavActive(companiesViewType==='report'?'dashboard':'companies');saveLastWorkspaceSession(companiesViewType==='report'?'dashboard':'companies');renderCompaniesView();}
 function renderSpamView(){const spamTickets=getSpamTickets();const listEl=document.getElementById('spam-list');document.getElementById('spam-view-count').textContent=`(${spamTickets.length} ticket${spamTickets.length!==1?'s':''})`;if(!spamTickets.length){listEl.innerHTML='<div class="spam-empty"><div style="font-size:48px;margin-bottom:12px;"></div><div style="font-size:16px;font-weight:700;color:#374151;margin-bottom:6px;">Inbox zero!</div><div style="font-size:13px;color:#94a3b8;">No spam tickets.</div></div>';return;}listEl.innerHTML='';spamTickets.forEach(t=>{const{email,id}=t;const clientEmail=ticketClientEmail[id]||null;const hs=clientEmail?hsCache[clientEmail]:null;const senderDisplay=clientEmail||email.sender||'';const row=document.createElement('div');row.className='spam-row';row.innerHTML=`<div class="spam-row-info"><div class="spam-row-subject">${esc(email.subject||'(no subject)')}</div><div class="spam-row-meta"><span class="spam-sender-chip"> ${esc(senderName(senderDisplay))}</span>${hs?.companyName?`<span class="spam-company-chip"> ${esc(hs.companyName)}</span>`:''}<span class="spam-date">${fmtDate(email.receivedDateTime)}</span></div></div><div class="spam-row-actions"><button class="btn-restore" data-restore="${id}"> Restore</button></div>`;row.querySelector(`[data-restore="${id}"]`).addEventListener('click',()=>{ticketCategory[id]='Other';if(normalizeTicketStage(ticketState[id]||'new')==='res'){ticketState[id]='new';ticketStageTouchedAt[id]=Date.now();}const te=clientEmail||email.sender?.toLowerCase();const otherSpam=allTickets.some(x=>x.id!==id&&normalizeTicketStage(ticketState[x.id]||'new')!=='res'&&(ticketClientEmail[x.id]||x.email.sender?.toLowerCase())===te&&ticketCategory[x.id]==='Spam');if(!otherSpam&&te)spamSenders.delete(te);saveState('spam_ticket_restored');renderSpamView();renderBoard();updateSpamBadge();showToast('Ticket restored to board','ok');});listEl.appendChild(row);});}
+function renderArchiveView(){const archivedTickets=getArchivedTickets();const listEl=document.getElementById('archive-list');document.getElementById('archive-view-count').textContent=`(${archivedTickets.length} ticket${archivedTickets.length!==1?'s':''})`;if(!archivedTickets.length){listEl.innerHTML='<div class="spam-empty"><div style="font-size:48px;margin-bottom:12px;"></div><div style="font-size:16px;font-weight:700;color:#374151;margin-bottom:6px;">Nothing archived</div><div style="font-size:13px;color:#94a3b8;">Archived tickets will show up here.</div></div>';return;}listEl.innerHTML='';archivedTickets.forEach(t=>{const{email,id}=t;const clientEmail=ticketClientEmail[id]||null;const hs=clientEmail?hsCache[clientEmail]:null;const senderDisplay=clientEmail||email.sender||'';const meta=ticketArchived[id]||{};const row=document.createElement('div');row.className='spam-row';row.innerHTML=`<div class="spam-row-info"><div class="spam-row-subject">${esc(email.subject||'(no subject)')}</div><div class="spam-row-meta"><span class="spam-sender-chip"> ${esc(senderName(senderDisplay))}</span>${hs?.companyName?`<span class="spam-company-chip"> ${esc(hs.companyName)}</span>`:''}<span class="spam-date">Archived ${fmtDate(meta.archivedAt?new Date(meta.archivedAt).toISOString():'')}</span></div></div><div class="spam-row-actions"><button class="btn-out" data-archive-open="${id}" style="font-size:11px;"> Open</button><button class="btn-restore" data-restore="${id}"> Restore</button></div>`;row.querySelector(`[data-archive-open="${id}"]`).addEventListener('click',()=>openEmailModal(t));row.querySelector(`[data-restore="${id}"]`).addEventListener('click',()=>{if(ticketResolutionMeta[id])delete ticketResolutionMeta[id].confirmedAt;
+    // ticketArchived[id] must be set to a falsy value (never `delete`d) -
+    // server-side merging spreads the current and incoming maps together
+    // ({...current,...incoming}), which can add/override a key but can
+    // never remove one; a deleted key here would just leave the old
+    // archived value in place on the next state round-trip. Same reason
+    // manualSupportOverride is cleared via `=false` elsewhere, not delete.
+    ticketArchived[id]=null;
+    // A ticket auto-archived via Confirm Resolved is still sitting in the
+    // 'res' stage - isResolvedTicketHidden() would otherwise immediately
+    // re-hide it again (either via the same confirmedAt check, now cleared,
+    // or the 72h retention window if enough time has passed), so move it
+    // back to an active stage the same way the Spam Inbox restore does.
+    if(normalizeTicketStage(ticketState[id]||'new')==='res'){ticketState[id]='new';ticketStageTouchedAt[id]=Date.now();}
+    saveState('ticket_restored_from_archive');renderArchiveView();renderBoard();updateArchiveBadge();showToast('Ticket restored to board','ok');});listEl.appendChild(row);});}
 document.getElementById('btn-clear-spam').addEventListener('click',()=>{const spamTickets=getSpamTickets();const cnt=spamTickets.length;if(!cnt)return;if(!confirm(`Remove all ${cnt} spam ticket(s)?`))return;const touchedAt=Date.now();spamTickets.forEach((t,idx)=>{ticketState[t.id]='res';ticketStageTouchedAt[t.id]=touchedAt+idx;});saveState('spam_inbox_cleared');renderSpamView();renderBoard();updateSpamBadge();showToast(`${cnt} spam ticket${cnt>1?'s':''} cleared`,'ok');});
 document.getElementById('btn-back-board').addEventListener('click',showBoardView);
 document.getElementById('spam-view-btn').addEventListener('click',()=>{if(viewMode==='spam')showBoardView();else showSpamView();});
+document.getElementById('btn-back-board-archive').addEventListener('click',showBoardView);
+document.getElementById('archive-view-btn').addEventListener('click',()=>{if(viewMode==='archive')showBoardView();else showArchiveView();});
 document.getElementById('companies-view-btn').addEventListener('click',()=>{if(viewMode==='companies'&&companiesViewType==='report'){companiesViewType='table';saveState('companies_view_type_change_sidebar');showCompaniesView();return;}if(viewMode==='companies')showBoardView();else showCompaniesView();});
 document.getElementById('board-view-btn').addEventListener('click',showBoardView);
 document.getElementById('dashboard-view-btn').addEventListener('click',()=>{if(viewMode==='companies'&&companiesViewType==='report')showBoardView();else showDashboardView();});
@@ -4931,8 +4975,8 @@ function pickPrimaryCompany(companies,email){
   }
   return best||companies[0];
 }
-function leastLoadedSupportAgent(){const load=Object.fromEntries(SUPPORT_AGENTS.map(a=>[a,0]));allTickets.filter(t=>ticketCategory[t.id]!=='Spam').forEach(t=>{const a=ticketAssignee[t.id];if(a in load)load[a]++;});return SUPPORT_AGENTS.reduce((m,a)=>load[a]<load[m]?a:m,SUPPORT_AGENTS[0]);}
-function leastLoadedCSAgent(){const load=Object.fromEntries(CS_AGENTS.map(a=>[a,0]));allTickets.filter(t=>ticketCategory[t.id]!=='Spam').forEach(t=>{const a=ticketAssignee[t.id];if(a in load)load[a]++;});return CS_AGENTS.reduce((m,a)=>load[a]<load[m]?a:m,CS_AGENTS[0]);}
+function leastLoadedSupportAgent(){const load=Object.fromEntries(SUPPORT_AGENTS.map(a=>[a,0]));allTickets.filter(t=>ticketCategory[t.id]!=='Spam'&&!isArchivedTicket(t.id)).forEach(t=>{const a=ticketAssignee[t.id];if(a in load)load[a]++;});return SUPPORT_AGENTS.reduce((m,a)=>load[a]<load[m]?a:m,SUPPORT_AGENTS[0]);}
+function leastLoadedCSAgent(){const load=Object.fromEntries(CS_AGENTS.map(a=>[a,0]));allTickets.filter(t=>ticketCategory[t.id]!=='Spam'&&!isArchivedTicket(t.id)).forEach(t=>{const a=ticketAssignee[t.id];if(a in load)load[a]++;});return CS_AGENTS.reduce((m,a)=>load[a]<load[m]?a:m,CS_AGENTS[0]);}
 function isSupportAssignedTicket(id){const assignee=String(ticketAssignee[id]||'').trim();return ticketAssignmentMode[id]==='support'||SUPPORT_AGENTS.includes(assignee);}
 function extractBestCompanyCoOwner(companies,primary,email){
   const list=Array.isArray(companies)?companies.filter(Boolean):[];
@@ -5058,15 +5102,15 @@ function ensureTicketCSOwnerResolved(id,emailObj){
   }
   return ticketCSOwner[id]||null;
 }
-function ensureSupportAssignmentForTicket(id,emailObj,opts={}){if(!id||ticketCategory[id]==='Spam')return false;const currentAssignee=ticketAssignee[id]||'';const keepExistingSupport=!!opts.keepExistingSupport&&SUPPORT_AGENTS.includes(currentAssignee);const supportAgent=keepExistingSupport?currentAssignee:leastLoadedSupportAgent();const csOwner=resolveDefaultCSForTicket(id,emailObj);let changed=false;if(csOwner&&ticketCSOwner[id]!==csOwner){ticketCSOwner[id]=csOwner;changed=true;}if(ticketAssignee[id]!==supportAgent||ticketAssignmentMode[id]!=='support'){ticketAssignee[id]=supportAgent;ticketAssignmentMode[id]='support';changed=true;}if(manualSupportOverride[id]!==false){manualSupportOverride[id]=false;changed=true;}return changed;}
-function shouldRefreshHubspotCacheEntry(email){const ce=String(email||'').toLowerCase();if(!ce)return false;if(!(ce in hsCache))return true;const cached=hsCache[ce];const related=allTickets.filter(t=>ticketCategory[t.id]!=='Spam'&&(ticketClientEmail[t.id]||getClientEmail(t.email))===ce);if(!related.length)return false;if(cached===null)return related.some(t=>isSupportAssignedTicket(t.id)&&!ticketCSOwner[t.id]);if(!cached||!cached.companyName||!cached.companyId||!cached.coOwner)return true;return related.some(t=>isSupportAssignedTicket(t.id)&&!ticketCSOwner[t.id]);}
-function applyCompanyCSAssignments(){let changed=0;allTickets.forEach(t=>{if(ticketCategory[t.id]==='Spam')return;const id=t.id;const ce=ticketClientEmail[id]||getClientEmail(t.email);if(!ce)return;const cs=resolveDefaultCSForTicket(id,t.email);if(cs&&ticketCSOwner[id]!==cs){ticketCSOwner[id]=cs;changed++;}if(manualSupportOverride[id])return;if(!SUPPORT_AGENTS.includes(ticketAssignee[id])||ticketAssignmentMode[id]!=='support'){if(ensureSupportAssignmentForTicket(id,t.email,{keepExistingSupport:true}))changed++;}});if(changed){saveState('auto_assign_cs_owner');}}
+function ensureSupportAssignmentForTicket(id,emailObj,opts={}){if(!id||ticketCategory[id]==='Spam'||isArchivedTicket(id))return false;const currentAssignee=ticketAssignee[id]||'';const keepExistingSupport=!!opts.keepExistingSupport&&SUPPORT_AGENTS.includes(currentAssignee);const supportAgent=keepExistingSupport?currentAssignee:leastLoadedSupportAgent();const csOwner=resolveDefaultCSForTicket(id,emailObj);let changed=false;if(csOwner&&ticketCSOwner[id]!==csOwner){ticketCSOwner[id]=csOwner;changed=true;}if(ticketAssignee[id]!==supportAgent||ticketAssignmentMode[id]!=='support'){ticketAssignee[id]=supportAgent;ticketAssignmentMode[id]='support';changed=true;}if(manualSupportOverride[id]!==false){manualSupportOverride[id]=false;changed=true;}return changed;}
+function shouldRefreshHubspotCacheEntry(email){const ce=String(email||'').toLowerCase();if(!ce)return false;if(!(ce in hsCache))return true;const cached=hsCache[ce];const related=allTickets.filter(t=>ticketCategory[t.id]!=='Spam'&&!isArchivedTicket(t.id)&&(ticketClientEmail[t.id]||getClientEmail(t.email))===ce);if(!related.length)return false;if(cached===null)return related.some(t=>isSupportAssignedTicket(t.id)&&!ticketCSOwner[t.id]);if(!cached||!cached.companyName||!cached.companyId||!cached.coOwner)return true;return related.some(t=>isSupportAssignedTicket(t.id)&&!ticketCSOwner[t.id]);}
+function applyCompanyCSAssignments(){let changed=0;allTickets.forEach(t=>{if(ticketCategory[t.id]==='Spam'||isArchivedTicket(t.id))return;const id=t.id;const ce=ticketClientEmail[id]||getClientEmail(t.email);if(!ce)return;const cs=resolveDefaultCSForTicket(id,t.email);if(cs&&ticketCSOwner[id]!==cs){ticketCSOwner[id]=cs;changed++;}if(manualSupportOverride[id])return;if(!SUPPORT_AGENTS.includes(ticketAssignee[id])||ticketAssignmentMode[id]!=='support'){if(ensureSupportAssignmentForTicket(id,t.email,{keepExistingSupport:true}))changed++;}});if(changed){saveState('auto_assign_cs_owner');}}
 
 async function findCompanyByDomain(email,excludeContactId){const domain=(email.split('@')[1]||'').toLowerCase();if(!domain||domain.includes('quinta')||['gmail.com','yahoo.com','hotmail.com','outlook.com','live.com'].includes(domain))return{companies:[],via:null};if(domain in domainCompanyCache)return domainCompanyCache[domain];const domRes=await window.cowork.callMcpTool(HS_SEARCH,{objectType:'companies',filterGroups:[{filters:[{propertyName:'domain',operator:'EQ',value:domain}]}],properties:['name','domain','createdate','co_owner','co-owner','coowner','co_owner_name','cs_owner','customer_success_owner','am_owner','account_manager','am'],sorts:[{propertyName:'createdate',direction:'ASCENDING'}],limit:5,chatInsights:HS_INSIGHTS});const domCos=hsResults(domRes);if(domCos.length){const v={companies:domCos,via:'domain'};domainCompanyCache[domain]=v;saveHsCache();return v;}const peerRes=await window.cowork.callMcpTool(HS_SEARCH,{objectType:'contacts',filterGroups:[{filters:[{propertyName:'email',operator:'CONTAINS_TOKEN',value:'@'+domain}]}],properties:['email'],limit:8,chatInsights:HS_INSIGHTS});const peers=hsResults(peerRes).filter(c=>c.properties?.email&&(!excludeContactId||c.id.toString()!==excludeContactId.toString()));for(const peer of peers.slice(0,4)){const pCoRes=await window.cowork.callMcpTool(HS_SEARCH,{objectType:'companies',filterGroups:[{associatedWith:[{objectType:'contacts',operator:'EQUAL',objectIds:[String(peer.id)]}]}],properties:['name','domain','createdate','co_owner','co-owner','coowner','co_owner_name','cs_owner','customer_success_owner','am_owner','account_manager','am'],sorts:[{propertyName:'createdate',direction:'ASCENDING'}],limit:5,chatInsights:HS_INSIGHTS});const pCos=hsResults(pCoRes);if(pCos.length){const v={companies:pCos,via:'domain-contact'};domainCompanyCache[domain]=v;saveHsCache();return v;}}const v={companies:[],via:null};domainCompanyCache[domain]=v;return v;}
 
 async function enrichWithHubSpot(){try{if(!hasCowork)return;const emailSet=new Set();allTickets.forEach(t=>{const ce=ticketClientEmail[t.id]||getClientEmail(t.email);if(ce){ticketClientEmail[t.id]=ce;if(shouldRefreshHubspotCacheEntry(ce))emailSet.add(ce);}});const emails=[...emailSet];if(!emails.length){await syncUnsyncedTicketsToHubspot();document.getElementById('hs-status').style.display='none';return;}const hsStatus=document.getElementById('hs-status');const hsProgress=document.getElementById('hs-progress');hsStatus.style.display='flex';const foundContacts=[];const notFoundEmails=[];const BATCH=50;for(let i=0;i<emails.length;i+=BATCH){const batch=emails.slice(i,i+BATCH);hsProgress.textContent=`Contacts ${Math.min(i+BATCH,emails.length)}/${emails.length}?`;const cRes=await window.cowork.callMcpTool(HS_SEARCH,{objectType:'contacts',filterGroups:[{filters:[{propertyName:'email',operator:'IN',values:batch}]}],properties:['email','firstname','lastname'],limit:BATCH,chatInsights:HS_INSIGHTS});if(cRes?.isError)throw new Error(cRes.error||'hubspot_error');const contacts=hsResults(cRes);batch.forEach(email=>{if(!contacts.find(c=>c.properties?.email?.toLowerCase()===email))notFoundEmails.push(email);});foundContacts.push(...contacts);}const CONCURRENT=5;for(let i=0;i<foundContacts.length;i+=CONCURRENT){const chunk=foundContacts.slice(i,i+CONCURRENT);hsProgress.textContent=`Companies ${Math.min(i+CONCURRENT,foundContacts.length)}/${foundContacts.length}?`;await Promise.all(chunk.map(async contact=>{const email=(contact.properties?.email||'').toLowerCase();if(!email)return;const contactName=[contact.properties?.firstname,contact.properties?.lastname].filter(Boolean).join(' ')||email;const coRes=await window.cowork.callMcpTool(HS_SEARCH,{objectType:'companies',filterGroups:[{associatedWith:[{objectType:'contacts',operator:'EQUAL',objectIds:[String(contact.id)]}]}],properties:['name','domain','createdate','co_owner','co-owner','coowner','co_owner_name','cs_owner','customer_success_owner','am_owner','account_manager','am'],sorts:[{propertyName:'createdate',direction:'ASCENDING'}],limit:10,chatInsights:HS_INSIGHTS});if(coRes?.isError)throw new Error(coRes.error||'hubspot_error');let companies=hsResults(coRes);let inferredVia=null;if(!companies.length){const fb=await findCompanyByDomain(email,contact.id);companies=fb.companies;inferredVia=fb.via;}const primary=pickPrimaryCompany(companies,email);hsCache[email]={contactId:contact.id,contactName,companyName:primary?.properties?.name||null,companyId:primary?.id||null,coOwner:extractBestCompanyCoOwner(companies,primary,email),contactUrl:`https://app.hubspot.com/contacts/25445053/record/0-1/${contact.id}`,companyUrl:primary?`https://app.hubspot.com/contacts/25445053/record/0-2/${primary.id}`:null,allCompanies:companies.map(c=>c.properties?.name).filter(Boolean),inferredVia};}));applyCompanyCSAssignments();saveHsCache();updateCompanyFilter();renderActiveView();}for(let i=0;i<notFoundEmails.length;i+=CONCURRENT){const chunk=notFoundEmails.slice(i,i+CONCURRENT);await Promise.all(chunk.map(async email=>{const fb=await findCompanyByDomain(email,null);if(fb.companies.length){const primary=pickPrimaryCompany(fb.companies,email);hsCache[email]={contactId:null,contactName:null,companyName:primary?.properties?.name||null,companyId:primary?.id||null,coOwner:extractBestCompanyCoOwner(fb.companies,primary,email),contactUrl:null,companyUrl:primary?`https://app.hubspot.com/contacts/25445053/record/0-2/${primary.id}`:null,allCompanies:fb.companies.map(c=>c.properties?.name).filter(Boolean),inferredVia:fb.via};}else{hsCache[email]=null;}}));applyCompanyCSAssignments();saveHsCache();updateCompanyFilter();renderActiveView();}scheduleCompanyNetworkSync([...collectCompanyIdsFromHsCache()]);await syncUnsyncedTicketsToHubspot();hsStatus.style.display='none';}catch(e){const hsStatus=document.getElementById('hs-status');const hsProgress=document.getElementById('hs-progress');hsStatus.style.display='flex';const msg=String(e?.message||e||'').toLowerCase();if(msg.includes('hubspot_not_connected')){hsProgress.innerHTML='HubSpot not connected. <a href="/auth/hubspot/start" style="color:#4f46e5;font-weight:700;">Connect now</a>';return;}hsProgress.textContent='HubSpot sync error';}}
 
-function updateCompanyFilter(){const companies=new Map();allTickets.filter(t=>ticketCategory[t.id]!=='Spam').forEach(t=>{const ce=ticketClientEmail[t.id];const hs=ce?hsCache[ce]:null;if(hs?.companyName)companies.set(hs.companyName,true);});const sel=document.getElementById('company-filter');const cur=sel.value;sel.innerHTML='<option value="all">All companies</option>';[...companies.keys()].sort((a,b)=>a.localeCompare(b)).forEach(name=>{const cnt=allTickets.filter(t=>ticketCategory[t.id]!=='Spam'&&(()=>{const ce=ticketClientEmail[t.id];return ce&&hsCache[ce]?.companyName===name;})()).length;const o=document.createElement('option');o.value=name;o.textContent=name+' ('+cnt+')';if(name===cur)o.selected=true;sel.appendChild(o);});}
+function updateCompanyFilter(){const companies=new Map();allTickets.filter(t=>ticketCategory[t.id]!=='Spam'&&!isArchivedTicket(t.id)).forEach(t=>{const ce=ticketClientEmail[t.id];const hs=ce?hsCache[ce]:null;if(hs?.companyName)companies.set(hs.companyName,true);});const sel=document.getElementById('company-filter');const cur=sel.value;sel.innerHTML='<option value="all">All companies</option>';[...companies.keys()].sort((a,b)=>a.localeCompare(b)).forEach(name=>{const cnt=allTickets.filter(t=>ticketCategory[t.id]!=='Spam'&&!isArchivedTicket(t.id)&&(()=>{const ce=ticketClientEmail[t.id];return ce&&hsCache[ce]?.companyName===name;})()).length;const o=document.createElement('option');o.value=name;o.textContent=name+' ('+cnt+')';if(name===cur)o.selected=true;sel.appendChild(o);});}
 async function syncTicketToHubspot(ticket,opts={}){
   if(!ticket||!ticket.id)return{ok:false,reason:'missing_ticket'};
   const id=ticket.id;
@@ -5125,7 +5169,7 @@ function getHubspotSyncBlockReason(ticket){
   return null;
 }
 async function syncUnsyncedTicketsToHubspot(){
-  const list=allTickets.filter(t=>ticketCategory[t.id]!=='Spam'&&!ticketHubspotId[t.id]);
+  const list=allTickets.filter(t=>ticketCategory[t.id]!=='Spam'&&!isArchivedTicket(t.id)&&!ticketHubspotId[t.id]);
   if(!list.length)return;
   let changed=false;
   const batchSize=4;
@@ -5139,10 +5183,10 @@ async function syncUnsyncedTicketsToHubspot(){
 function classifyPriority(e){const st=classifySubtype(e);if(st&&SUBTYPE_BY_ID[st])return SUBTYPE_BY_ID[st].priority;const t=((e.subject||'')+(e.summary||'')).toLowerCase();if(e.importance==='high'||/urgent|asap|critical|not working|broken|error|cannot|bloqu/.test(t))return'High';if(/info|question|hello|bonjour|dear/.test(t))return'Low';return'Medium';}
 function classifyCategory(e){const st=classifySubtype(e);if(st&&SUBTYPE_BY_ID[st])return SUBTYPE_BY_ID[st].type;return'Other';}
 function classifySubtype(e){const t=((e.subject||'')+' '+(e.summary||'')).toLowerCase();if(/velma fully down|chatbot not responding|platform down/.test(t))return '4.1';if(/booking engine broken|widget missing|booking widget/.test(t))return '2.2';if(/payment gateway|payment not processing/.test(t))return '2.8';if(/pms sync|availability|rates not flowing/.test(t))return '2.1';if(/channel disconnected|whatsapp|instagram|messenger/.test(t))return '2.3';if(/token expired/.test(t))return '2.4';if(/ota|expedia|booking\.com/.test(t))return '2.5';if(/crm integration/.test(t))return '2.6';if(/script missing|install(ed)? on .*website/.test(t))return '2.7';if(/mapping error|room type|rate mapped/.test(t))return '2.9';if(/wrong language/.test(t))return '1.6';if(/missing dialog/.test(t))return '1.3';if(/partial answer|fields missing/.test(t))return '1.4';if(/broken transactional link|booking\/payment url/.test(t))return '1.5';if(/fallback triggered|unreached/.test(t))return '1.8';if(/outdated answer|policy changed/.test(t))return '1.2';if(/rya|wrong answer|rethink/.test(t))return '1.1';if(/account access|cannot log in|login issue/.test(t))return '4.2';if(/new property|property creation|create.*property|new hotel setup|new account creation|account creation|new user creation|onboard(ing)?/.test(t))return '6.1';if(/prefill|pre-fill/.test(t))return '6.2';if(/content audit/.test(t))return '6.4';if(/double check|content review/.test(t))return '6.3';if(/data validation|validate.*data/.test(t))return '6.5';if(/account status stuck|pending|setup not transitioning/.test(t))return '4.3';if(/feature not activated|q brain|module missing/.test(t))return '4.4';if(/analytics not showing|q-bi|reporting dashboard/.test(t))return '4.5';if(/platform bug/.test(t))return '5.1';if(/connector bug/.test(t))return '5.2';if(/intent detection failure|misclassif/.test(t))return '5.3';if(/infrastructure|timing out|timeout/.test(t))return '5.4';if(/connect|integr|pms|channel|webhook|api|crm/.test(t))return '2.6';if(/velma|chatbot|bot/.test(t))return '1.1';return '3.1';}
-function autoAssignNew(tickets){tickets.forEach(t=>{if(ticketAssignee[t.id]||ticketCategory[t.id]==='Spam')return;ensureSupportAssignmentForTicket(t.id,t.email);});}
+function autoAssignNew(tickets){tickets.forEach(t=>{if(ticketAssignee[t.id]||ticketCategory[t.id]==='Spam'||isArchivedTicket(t.id))return;ensureSupportAssignmentForTicket(t.id,t.email);});}
 function updateWorkload(){
   const load = Object.fromEntries(SUPPORT_AGENTS.map(a=>[a,0]));
-  allTickets.filter(t=>ticketCategory[t.id]!=='Spam').forEach(t=>{const a=ticketAssignee[t.id];if(a in load)load[a]++;});
+  allTickets.filter(t=>ticketCategory[t.id]!=='Spam'&&!isArchivedTicket(t.id)).forEach(t=>{const a=ticketAssignee[t.id];if(a in load)load[a]++;});
   const displayOrder = [
     'ZIO',
     'SGU',
@@ -5358,9 +5402,10 @@ function resolvedReviewHtml(id,csOwner){
 }
 function confirmTicketResolved(id){
   ticketResolutionMeta[id]={...(ticketResolutionMeta[id]||{}),confirmedAt:Date.now(),confirmedBy:currentUser()};
+  ticketArchived[id]={archivedAt:Date.now(),archivedBy:currentUser(),reason:'resolved_confirmed'};
   saveState('resolved_confirmed_by_cs');
   renderBoard();
-  showToast('Resolved ticket confirmed and hidden','ok');
+  showToast('Resolved ticket confirmed and archived','ok');
 }
 async function sendResolvedTicketBack(id){
   const note=prompt('Add a note for why this ticket is being sent back:');
@@ -5479,6 +5524,7 @@ function makeCard(ticket,isNew=false){
         ${jiraBtn}
         ${hsTicketBtn}
         <button class="open-email-btn" data-oe="${id}"> Open</button>
+        <button class="btn-out" data-archive="${id}" title="Archive this ticket" style="font-size:10px;padding:2px 7px;"> Archive</button>
         <div class="agent-assign-wrap" data-agent-menu="${id}">
           <button class="agent-assign-trigger" type="button" data-agent-trigger="${id}" title="${canAssign ? 'Assign support agent' : 'Only admins and the ticket CS can change support assignment'}"${canAssign ? '' : ' disabled'}>
             <span class="agent-assign-label">${esc(agent)}</span>
@@ -5550,6 +5596,7 @@ function makeCard(ticket,isNew=false){
   div.querySelector('[data-hs-open]')?.addEventListener('click',ev=>{ev.preventDefault();ev.stopPropagation();const hsId=ticketHubspotId[id];if(!hsId){showToast('Ticket not synced to HubSpot yet');return;}window.open(`https://app.hubspot.com/contacts/25445053/record/0-5/${encodeURIComponent(hsId)}`,'_blank');});
   div.querySelector('[data-hs-retry]')?.addEventListener('click',async ev=>{ev.preventDefault();ev.stopPropagation();const rs=await syncTicketToHubspot(ticket);if(rs?.ok&&ticketHubspotId[id]){window.open(`https://app.hubspot.com/contacts/25445053/record/0-5/${encodeURIComponent(ticketHubspotId[id])}`,'_blank');showToast('Ticket synced to HubSpot','ok');}else{const reason=rs?.reason||'unknown';if(reason==='missing_company_mapping')showToast('Cannot sync yet: this ticket has no mapped HubSpot company.');else if(reason==='missing_client_email')showToast('Cannot sync yet: no client email found for this ticket.');else if(reason==='api_error')showToast(`HubSpot sync failed: ${rs?.error||'api error'}`);else if(reason==='network_error')showToast(`HubSpot sync network error: ${rs?.error||'unknown'}`);else showToast('Unable to sync this ticket yet.');}renderBoard();});
   div.querySelector('[data-oe]').addEventListener('click',ev=>{ev.stopPropagation();clearNewReplyGlow(id);openEmailModal(ticket);});
+  div.querySelector('[data-archive]')?.addEventListener('click',ev=>{ev.stopPropagation();if(!confirm('Archive this ticket?'))return;ticketArchived[id]={archivedAt:Date.now(),archivedBy:currentUser(),reason:'manual'};saveState('ticket_archived_manual');renderBoard();updateArchiveBadge();showToast('Ticket archived','ok');});
   div.querySelector('[data-inline-toggle]')?.addEventListener('click',ev=>{ev.stopPropagation();inlineCommentOpen[id]=!inlineOpen;if(inlineCommentOpen[id]){markAlertFeedReadForTicket(id,currentUser());clearNewReplyGlow(id);}renderBoard();});
   div.querySelector('[data-inline-bell]')?.addEventListener('click',ev=>{ev.stopPropagation();inlineCommentOpen[id]=true;markAlertFeedReadForTicket(id,currentUser());clearNewReplyGlow(id);renderBoard();});
   div.querySelector('[data-inline-modal]')?.addEventListener('click',ev=>{ev.stopPropagation();clearNewReplyGlow(id);openComModal(ticket);});
@@ -5570,6 +5617,7 @@ function renderBoard(){
   STAGES.forEach(col=>{
     const tickets=allTickets.filter(t=>{
       if(ticketCategory[t.id]==='Spam')return false;
+      if(isArchivedTicket(t.id))return false;
       if(!ticketVisibleToCurrentUser(t))return false;
       const p=ticketPriority[t.id]||t.priority;
       if(activeP!=='all'&&p!==activeP)return false;
@@ -5586,7 +5634,7 @@ function renderBoard(){
     else tickets.forEach(t=>el.appendChild(makeCard(t)));
     document.getElementById('badge-'+col).textContent=tickets.length;
   });
-  updateWorkload();updateSpamBadge();updateJiraBadge();
+  updateWorkload();updateSpamBadge();updateArchiveBadge();updateJiraBadge();
 }
 
 document.getElementById('sort-desc').addEventListener('click',()=>{sortDesc=true;document.getElementById('sort-desc').classList.add('active');document.getElementById('sort-asc').classList.remove('active');saveLastWorkspaceSession();renderBoard();});
@@ -5890,7 +5938,7 @@ async function poll(){if(!hasCowork){startCountdown();return;}const res=await fe
   if(allTickets.length){
     applyCompanyCSAssignments();
     autoAssignNew(allTickets);
-    updateCompanyFilter();restoreLastWorkspaceSession();updateSpamBadge();updateJiraBadge();handleTicketDeepLink();
+    updateCompanyFilter();restoreLastWorkspaceSession();updateSpamBadge();updateArchiveBadge();updateJiraBadge();handleTicketDeepLink();
     await refreshLinkedJiraIssues(true);
     syncUnsyncedTicketsToHubspot();
   }
@@ -5904,7 +5952,7 @@ async function poll(){if(!hasCowork){startCountdown();return;}const res=await fe
       document.getElementById('fstats').textContent='Mailbox sync error: '+(recentRes?.error||'unknown');
     }
     document.getElementById('meta').textContent='Secure web mode active (manual tickets + board workflow available)';
-    updateCompanyFilter();restoreLastWorkspaceSession();updateSpamBadge();updateJiraBadge();handleTicketDeepLink();
+    updateCompanyFilter();restoreLastWorkspaceSession();updateSpamBadge();updateArchiveBadge();updateJiraBadge();handleTicketDeepLink();
     await refreshLinkedJiraIssues(true);
     requestNotificationPermission();
     notifySnapshot=snapshotForNotify({ticketAssignee,ticketState,ticketComments,jiraAlerts,allTickets,ticketCSOwner});
@@ -5925,7 +5973,7 @@ async function poll(){if(!hasCowork){startCountdown();return;}const res=await fe
   const newest=nonSpam[0]?.email?.receivedDateTime;
   document.getElementById('fstats').textContent=`${nonSpam.length} tickets  most recent: ${newest?fmtDate(newest):''}`;
   document.getElementById('meta').textContent=`${allTickets.length} tickets  polling every ${POLL_SECS}s`;
-  updateCompanyFilter();restoreLastWorkspaceSession();updateSpamBadge();updateJiraBadge();startCountdown();handleTicketDeepLink();
+  updateCompanyFilter();restoreLastWorkspaceSession();updateSpamBadge();updateArchiveBadge();updateJiraBadge();startCountdown();handleTicketDeepLink();
   await refreshLinkedJiraIssues(true);
   enrichWithHubSpot();
   requestNotificationPermission();

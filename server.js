@@ -866,6 +866,7 @@ async function safeWriteState(state) {
   nextState.ticketAssignmentMode = mergeTicketMap('ticketAssignmentMode');
   nextState.manualSupportOverride = mergeTicketMap('manualSupportOverride');
   nextState.ticketResolutionMeta = mergeTicketMap('ticketResolutionMeta');
+  nextState.ticketArchived = mergeTicketMap('ticketArchived');
 
   const pruneResolvedHiddenTickets = (stateToPrune) => {
     const nowForPrune = Date.now();
@@ -895,7 +896,7 @@ async function safeWriteState(state) {
   // A stale snapshot (e.g. from a lagging tab) must not blindly overwrite
   // fields it didn't correctly merge - keep the current state as the base and
   // only layer in the fields we've safely reconciled above by id/timestamp.
-  const reconciledFields = ['ticketState', 'ticketStageTouchedAt', 'ticketNumbers', 'ticketNumberCounter', 'allTickets', 'seenIds', 'ticketAssignee', 'ticketCSOwner', 'ticketAssignmentMode', 'manualSupportOverride', 'ticketResolutionMeta'];
+  const reconciledFields = ['ticketState', 'ticketStageTouchedAt', 'ticketNumbers', 'ticketNumberCounter', 'allTickets', 'seenIds', 'ticketAssignee', 'ticketCSOwner', 'ticketAssignmentMode', 'manualSupportOverride', 'ticketResolutionMeta', 'ticketArchived'];
   const finalState = isStale
     ? { ...currentState, ...Object.fromEntries(reconciledFields.map(key => [key, nextState[key]])), _meta: enrichedMeta }
     : { ...nextState, _meta: enrichedMeta };
@@ -948,6 +949,7 @@ async function hydrateStateFromDatabase(baseState = {}) {
   state.ticketCreatedAt = (state.ticketCreatedAt && typeof state.ticketCreatedAt === 'object') ? state.ticketCreatedAt : {};
   state.ticketJira = (state.ticketJira && typeof state.ticketJira === 'object') ? state.ticketJira : {};
   state.ticketHubspotId = (state.ticketHubspotId && typeof state.ticketHubspotId === 'object') ? state.ticketHubspotId : {};
+  state.ticketArchived = (state.ticketArchived && typeof state.ticketArchived === 'object') ? state.ticketArchived : {};
   // Postgres (Ticket.displayNumber) is the source of truth for this, not
   // whatever the client last sent - always overwritten below so the board
   // and MCP tools can never drift apart on what a ticket's number is.
