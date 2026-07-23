@@ -64,12 +64,12 @@
       align-content: start;
     }
     .drop {
-      min-height: 196px;
+      min-height: 160px;
       border: 1px dashed #aeb8c8;
       border-radius: 8px;
       display: grid;
       place-items: center;
-      padding: 24px;
+      padding: 22px;
       text-align: center;
       cursor: pointer;
       background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
@@ -77,7 +77,7 @@
     }
     .drop:hover { border-color: #7f8da3; box-shadow: 0 8px 18px rgba(16, 24, 40, .08); }
     .drop.dragging { border-color: var(--accent); background: #ecfdf9; transform: translateY(-1px); }
-    .drop strong { display: block; font-size: 18px; margin-bottom: 8px; }
+    .drop strong { display: block; font-size: 17px; margin-bottom: 8px; }
     .drop span, .note { color: var(--muted); font-size: 13px; line-height: 1.45; }
     textarea, select, input[type="number"] {
       width: 100%;
@@ -95,13 +95,8 @@
       border-color: var(--accent);
       box-shadow: 0 0 0 3px rgba(15, 118, 110, .12);
     }
-    textarea {
-      min-height: 90px;
-    }
-    select, input[type="number"] {
-      min-height: 42px;
-      resize: none;
-    }
+    textarea { min-height: 74px; }
+    select, input[type="number"] { min-height: 42px; resize: none; }
     label {
       display: grid;
       gap: 7px;
@@ -147,25 +142,6 @@
       background: var(--accent-soft);
     }
     .mode-option:has(input:checked) .mode-dot { background: var(--accent); box-shadow: 0 0 0 4px rgba(15, 118, 110, .14); }
-    .resize-summary {
-      display: none;
-      grid-template-columns: 1fr 1fr;
-      gap: 8px;
-      padding: 10px;
-      border: 1px solid #bfdbfe;
-      border-radius: 8px;
-      background: var(--blue-soft);
-    }
-    .resize-summary.open { display: grid; }
-    .resize-pill {
-      border: 1px solid #dbeafe;
-      border-radius: 8px;
-      padding: 9px 10px;
-      background: #fff;
-    }
-    .resize-pill span { display: block; color: var(--muted); font-size: 11px; font-weight: 800; }
-    .resize-pill strong { display: block; color: #1e3a8a; font-size: 14px; margin-top: 3px; }
-    .resolution-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
     .custom-resolution { display: none; grid-template-columns: 1fr 1fr; gap: 10px; }
     .custom-resolution.open { display: grid; }
     button {
@@ -181,17 +157,17 @@
     button:disabled { opacity: .55; cursor: not-allowed; }
     button:not(:disabled):active { transform: translateY(1px); }
     .primary { background: var(--accent); color: #fff; box-shadow: 0 10px 18px rgba(15, 118, 110, .18); }
-    .primary:hover { background: var(--accent-dark); }
+    .primary:hover:not(:disabled) { background: var(--accent-dark); }
     .secondary { background: #fff; border-color: var(--border); color: #344054; }
-    .secondary:hover { border-color: #aeb8c8; box-shadow: 0 8px 16px rgba(16, 24, 40, .06); }
+    .secondary:hover:not(:disabled) { border-color: #aeb8c8; box-shadow: 0 8px 16px rgba(16, 24, 40, .06); }
     .stage {
       min-height: 0;
       display: grid;
-      grid-template-rows: minmax(0, 1fr) auto;
+      grid-template-rows: minmax(0, 1fr) auto auto;
       overflow: hidden;
     }
     .preview {
-      min-height: 430px;
+      min-height: 360px;
       display: grid;
       place-items: center;
       padding: 18px;
@@ -206,7 +182,7 @@
     }
     .preview img {
       width: min(100%, 1100px);
-      aspect-ratio: 16 / 9;
+      max-height: 56vh;
       object-fit: contain;
       background: #101828;
       border-radius: 8px;
@@ -225,6 +201,49 @@
       padding: 20px;
       box-shadow: inset 0 0 0 1px rgba(255,255,255,.6);
     }
+    /* Queue / batch list */
+    .queue {
+      border-top: 1px solid var(--border);
+      background: #fff;
+      max-height: 210px;
+      overflow: auto;
+      padding: 10px 12px;
+      display: grid;
+      gap: 8px;
+    }
+    .queue:empty { display: none; }
+    .q-item {
+      display: grid;
+      grid-template-columns: 52px 1fr auto;
+      align-items: center;
+      gap: 11px;
+      padding: 7px 8px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: #fff;
+      cursor: pointer;
+    }
+    .q-item.active { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(15,118,110,.12); }
+    .q-thumb {
+      width: 52px; height: 40px;
+      object-fit: cover;
+      border-radius: 5px;
+      background: #101828;
+      border: 1px solid var(--border);
+    }
+    .q-info { min-width: 0; }
+    .q-name { font-size: 12.5px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .q-sub { font-size: 11.5px; color: var(--muted); margin-top: 2px; }
+    .q-badge { font-size: 11px; font-weight: 800; padding: 3px 8px; border-radius: 99px; white-space: nowrap; }
+    .q-badge.pending { background: #f1f5f9; color: #64748b; }
+    .q-badge.working { background: var(--blue-soft); color: #1e40af; }
+    .q-badge.done { background: var(--accent-soft); color: var(--accent-dark); }
+    .q-badge.error { background: #fee4e2; color: var(--danger); }
+    .q-remove {
+      border: none; background: transparent; color: var(--muted);
+      font-size: 16px; line-height: 1; min-height: 0; padding: 4px 6px; font-weight: 900;
+    }
+    .q-remove:hover { color: var(--danger); }
     .meta {
       display: flex;
       align-items: center;
@@ -242,6 +261,7 @@
       main { grid-template-columns: 1fr; }
       .status { text-align: left; }
       header { align-items: flex-start; flex-direction: column; }
+      .preview img { max-height: 44vh; }
     }
   </style>
 </head>
@@ -249,15 +269,15 @@
   <div class="app">
     <header>
       <h1>QT Seize</h1>
-      <div class="status" id="status">Portrait image to locally-filled 16:9 output.</div>
+      <div class="status" id="status">Expand or resize one or many images to a chosen size.</div>
     </header>
     <main>
       <section class="panel controls">
         <div class="drop" id="drop">
-          <input id="file" type="file" accept="image/png,image/jpeg,image/webp" hidden />
+          <input id="file" type="file" accept="image/png,image/jpeg,image/webp" multiple hidden />
           <div>
-            <strong>Drop one portrait image</strong>
-            <span>PNG, JPG, or WebP. QT Seize can expand the frame or resize the image only.</span>
+            <strong>Drop one or more images</strong>
+            <span>PNG, JPG, or WebP. Add several to batch-process them with the same settings.</span>
           </div>
         </div>
         <div class="field-label">Output mode
@@ -274,19 +294,6 @@
             </label>
           </div>
         </div>
-        <div class="resize-summary" id="resize-summary">
-          <div class="resize-pill">
-            <span>Source</span>
-            <strong id="resize-source">No image</strong>
-          </div>
-          <div class="resize-pill">
-            <span>Output</span>
-            <strong id="resize-output">1920 x 1080</strong>
-          </div>
-        </div>
-        <label>Background style note
-          <textarea id="prompt">Local fill preserves the original image and builds a soft 16:9 background from the same photo. No API key or paid model is required.</textarea>
-        </label>
         <label>Resolution
           <select id="resolution">
             <option value="1920x1080">Full HD - 1920 x 1080</option>
@@ -310,20 +317,24 @@
           <button class="primary" id="generate" type="button" disabled>Generate</button>
           <button class="secondary" id="download" type="button" disabled>Download</button>
         </div>
-        <button class="secondary" id="reset" type="button">Reset</button>
-        <div class="note" id="details">Expand fills the frame. Resize fits the original image into the selected PNG size.</div>
+        <button class="secondary" id="reset" type="button">Clear all</button>
+        <div class="note" id="details">Expand fills the frame from the photo. Resize fits the original into the selected size. Download asks where to save.</div>
       </section>
       <section class="panel stage">
-        <div class="preview" id="preview"><div class="empty">Upload a portrait image to start.</div></div>
-        <div class="meta"><span id="sourceMeta">No source selected</span><span id="outputMeta">1920 x 1080 PNG</span></div>
+        <div class="preview" id="preview"><div class="empty">Upload one or more images to start.</div></div>
+        <div class="queue" id="queue"></div>
+        <div class="meta"><span id="sourceMeta">No images selected</span><span id="outputMeta">1920 x 1080 PNG</span></div>
       </section>
     </main>
   </div>
   <script>
-    const state = { file: null, sourceUrl: '', resultUrl: '' };
+    // Each queue entry: { id, file, name, sourceUrl, w, h, resultUrl, status }
+    const state = { items: [], activeId: null, seq: 0 };
+
     const fileInput = document.getElementById('file');
     const drop = document.getElementById('drop');
     const preview = document.getElementById('preview');
+    const queueEl = document.getElementById('queue');
     const statusEl = document.getElementById('status');
     const sourceMeta = document.getElementById('sourceMeta');
     const outputMeta = document.getElementById('outputMeta');
@@ -334,9 +345,6 @@
     const customWidth = document.getElementById('custom-width');
     const customHeight = document.getElementById('custom-height');
     const outputModeInputs = [...document.querySelectorAll('input[name="output-mode"]')];
-    const resizeSummary = document.getElementById('resize-summary');
-    const resizeSource = document.getElementById('resize-source');
-    const resizeOutput = document.getElementById('resize-output');
 
     function getOutputMode() {
       return outputModeInputs.find(input => input.checked)?.value || 'expand';
@@ -378,14 +386,10 @@
         const target = getTargetSize();
         const modeLabel = getOutputMode() === 'resize' ? 'resize' : 'expand';
         outputMeta.textContent = `${target.width} x ${target.height} PNG - ${modeLabel}`;
-        resizeOutput.textContent = `${target.width} x ${target.height}`;
-        preview.style.setProperty('--preview-aspect', `${target.width} / ${target.height}`);
       } catch (_) {
         outputMeta.textContent = 'Custom PNG';
-        resizeOutput.textContent = 'Custom';
       }
       customResolution.classList.toggle('open', resolutionSelect.value === 'custom');
-      resizeSummary.classList.toggle('open', getOutputMode() === 'resize');
     }
 
     function makeCanvas(width, height) {
@@ -424,137 +428,318 @@
       return resizeCanvasHighQuality(start.canvas, width, height);
     }
 
-    async function prepareCanvases(file, target) {
-      const url = URL.createObjectURL(file);
-      const img = await loadImageFromUrl(url);
-      URL.revokeObjectURL(url);
-      const scale = Math.min(target.height / img.naturalHeight, target.width / img.naturalWidth);
-      const drawW = Math.round(img.naturalWidth * scale);
-      const drawH = Math.round(img.naturalHeight * scale);
-      const x = Math.round((target.width - drawW) / 2);
-      const y = Math.round((target.height - drawH) / 2);
-
-      const { canvas: imageCanvas, ctx: imageCtx } = makeCanvas(target.width, target.height);
-      imageCtx.clearRect(0, 0, target.width, target.height);
-      imageCtx.drawImage(img, x, y, drawW, drawH);
-
-      const { canvas: maskCanvas, ctx: maskCtx } = makeCanvas(target.width, target.height);
-      maskCtx.clearRect(0, 0, target.width, target.height);
-      maskCtx.fillStyle = '#ffffff';
-      maskCtx.fillRect(x, y, drawW, drawH);
-
-      return { imageDataUrl: canvasToDataUrl(imageCanvas), maskDataUrl: canvasToDataUrl(maskCanvas), width: img.naturalWidth, height: img.naturalHeight };
+    async function resizeOnly(img, target) {
+      const resizedCanvas = resizeImageHighQuality(img, target.width, target.height);
+      return canvasToDataUrl(resizedCanvas);
     }
 
-    async function normalizeToTarget(dataUrl, target) {
-      const img = await loadImageFromUrl(dataUrl);
-      const { canvas, ctx } = makeCanvas(target.width, target.height);
-      const scale = Math.max(target.width / img.naturalWidth, target.height / img.naturalHeight);
-      const w = img.naturalWidth * scale;
-      const h = img.naturalHeight * scale;
-      ctx.drawImage(img, (target.width - w) / 2, (target.height - h) / 2, w, h);
-      return canvasToDataUrl(canvas);
+    async function generateLocalOutpaint(img, target) {
+      const workScale = target.width < 1600 && target.height < 1000 ? 2 : 1;
+      const workW = target.width * workScale;
+      const workH = target.height * workScale;
+      const { canvas, ctx } = makeCanvas(workW, workH);
+
+      const blur = Math.max(18, Math.round(Math.min(workW, workH) * .032));
+      ctx.filter = `blur(${blur}px) saturate(1.08) brightness(.98)`;
+      drawCover(ctx, img, workW, workH);
+      ctx.filter = 'none';
+
+      const overlay = ctx.createLinearGradient(0, 0, workW, 0);
+      overlay.addColorStop(0, 'rgba(17,24,39,.16)');
+      overlay.addColorStop(.32, 'rgba(17,24,39,.03)');
+      overlay.addColorStop(.68, 'rgba(17,24,39,.03)');
+      overlay.addColorStop(1, 'rgba(17,24,39,.16)');
+      ctx.fillStyle = overlay;
+      ctx.fillRect(0, 0, workW, workH);
+
+      const fgScale = Math.min(workH / img.naturalHeight, workW / img.naturalWidth);
+      const fgW = Math.round(img.naturalWidth * fgScale);
+      const fgH = Math.round(img.naturalHeight * fgScale);
+      const x = Math.round((workW - fgW) / 2);
+      const y = Math.round((workH - fgH) / 2);
+
+      const feather = Math.max(24, Math.round(Math.min(fgW, fgH) * .035));
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(x, y, fgW, fgH);
+      ctx.clip();
+      ctx.drawImage(img, x, y, fgW, fgH);
+
+      ctx.globalCompositeOperation = 'destination-in';
+      const alpha = ctx.createLinearGradient(x, 0, x + fgW, 0);
+      alpha.addColorStop(0, 'rgba(0,0,0,0)');
+      alpha.addColorStop(feather / fgW, 'rgba(0,0,0,1)');
+      alpha.addColorStop(1 - feather / fgW, 'rgba(0,0,0,1)');
+      alpha.addColorStop(1, 'rgba(0,0,0,0)');
+      ctx.fillStyle = alpha;
+      ctx.fillRect(x, y, fgW, fgH);
+      ctx.restore();
+
+      const finalCanvas = resizeCanvasHighQuality(canvas, target.width, target.height);
+      return canvasToDataUrl(finalCanvas);
     }
 
-    async function resizeOnly(file, target) {
-      const url = URL.createObjectURL(file);
-      try {
-        const img = await loadImageFromUrl(url);
-        const resizedCanvas = resizeImageHighQuality(img, target.width, target.height);
-        return canvasToDataUrl(resizedCanvas);
-      } finally {
-        URL.revokeObjectURL(url);
-      }
+    // ---- Queue / batch management ----
+    function activeItem() {
+      return state.items.find(i => i.id === state.activeId) || null;
     }
 
-    async function generateLocalOutpaint(file, target) {
-      const url = URL.createObjectURL(file);
-      try {
-        const img = await loadImageFromUrl(url);
-        const workScale = target.width < 1600 && target.height < 1000 ? 2 : 1;
-        const workW = target.width * workScale;
-        const workH = target.height * workScale;
-        const { canvas, ctx } = makeCanvas(workW, workH);
+    function setActive(id) {
+      state.activeId = id;
+      const item = activeItem();
+      if (item) showImage(item.resultUrl || item.sourceUrl);
+      renderQueue();
+      refreshMeta();
+    }
 
-        const blur = Math.max(18, Math.round(Math.min(workW, workH) * .032));
-        ctx.filter = `blur(${blur}px) saturate(1.08) brightness(.98)`;
-        drawCover(ctx, img, workW, workH);
-        ctx.filter = 'none';
-
-        const overlay = ctx.createLinearGradient(0, 0, workW, 0);
-        overlay.addColorStop(0, 'rgba(17,24,39,.16)');
-        overlay.addColorStop(.32, 'rgba(17,24,39,.03)');
-        overlay.addColorStop(.68, 'rgba(17,24,39,.03)');
-        overlay.addColorStop(1, 'rgba(17,24,39,.16)');
-        ctx.fillStyle = overlay;
-        ctx.fillRect(0, 0, workW, workH);
-
-        const fgScale = Math.min(workH / img.naturalHeight, workW / img.naturalWidth);
-        const fgW = Math.round(img.naturalWidth * fgScale);
-        const fgH = Math.round(img.naturalHeight * fgScale);
-        const x = Math.round((workW - fgW) / 2);
-        const y = Math.round((workH - fgH) / 2);
-
-        const feather = Math.max(24, Math.round(Math.min(fgW, fgH) * .035));
-        ctx.save();
-        ctx.beginPath();
-        ctx.rect(x, y, fgW, fgH);
-        ctx.clip();
-        ctx.drawImage(img, x, y, fgW, fgH);
-
-        ctx.globalCompositeOperation = 'destination-in';
-        const alpha = ctx.createLinearGradient(x, 0, x + fgW, 0);
-        alpha.addColorStop(0, 'rgba(0,0,0,0)');
-        alpha.addColorStop(feather / fgW, 'rgba(0,0,0,1)');
-        alpha.addColorStop(1 - feather / fgW, 'rgba(0,0,0,1)');
-        alpha.addColorStop(1, 'rgba(0,0,0,0)');
-        ctx.fillStyle = alpha;
-        ctx.fillRect(x, y, fgW, fgH);
-        ctx.restore();
-
-        const finalCanvas = resizeCanvasHighQuality(canvas, target.width, target.height);
-        return canvasToDataUrl(finalCanvas);
-      } finally {
-        URL.revokeObjectURL(url);
-      }
+    function refreshMeta() {
+      const n = state.items.length;
+      const done = state.items.filter(i => i.resultUrl).length;
+      if (!n) { sourceMeta.textContent = 'No images selected'; return; }
+      const item = activeItem();
+      const base = item ? `${item.name} - ${item.w} x ${item.h}` : `${n} image${n > 1 ? 's' : ''}`;
+      sourceMeta.textContent = n > 1 ? `${base}  (${n} in queue, ${done} done)` : base;
     }
 
     function showImage(url) {
       preview.innerHTML = '';
+      if (!url) {
+        preview.innerHTML = '<div class="empty">Upload one or more images to start.</div>';
+        return;
+      }
       const img = document.createElement('img');
       img.src = url;
       img.alt = 'QT Seize preview';
-      try {
-        const target = getTargetSize();
-        img.style.aspectRatio = `${target.width} / ${target.height}`;
-      } catch (_) {}
       preview.appendChild(img);
     }
 
-    async function selectFile(file) {
-      if (!file || !file.type.startsWith('image/')) return;
-      cleanup();
-      state.file = file;
-      state.sourceUrl = URL.createObjectURL(file);
-      const img = await loadImageFromUrl(state.sourceUrl);
-      showImage(state.sourceUrl);
-      sourceMeta.textContent = `${file.name} - ${img.naturalWidth} x ${img.naturalHeight}`;
-      resizeSource.textContent = `${img.naturalWidth} x ${img.naturalHeight}`;
-      generateBtn.disabled = false;
-      updateOutputMeta();
-      setStatus(getOutputMode() === 'resize' ? 'Ready to resize.' : (img.naturalHeight >= img.naturalWidth ? 'Ready to generate.' : 'Ready, but this image is not portrait.'));
+    function renderQueue() {
+      queueEl.innerHTML = '';
+      if (state.items.length < 1) return;
+      for (const item of state.items) {
+        const row = document.createElement('div');
+        row.className = 'q-item' + (item.id === state.activeId ? ' active' : '');
+        row.addEventListener('click', (e) => { if (!e.target.classList.contains('q-remove')) setActive(item.id); });
+
+        const thumb = document.createElement('img');
+        thumb.className = 'q-thumb';
+        thumb.src = item.resultUrl || item.sourceUrl;
+        thumb.alt = '';
+
+        const info = document.createElement('div');
+        info.className = 'q-info';
+        const name = document.createElement('div');
+        name.className = 'q-name';
+        name.textContent = item.name;
+        const sub = document.createElement('div');
+        sub.className = 'q-sub';
+        sub.textContent = `${item.w} x ${item.h}`;
+        info.appendChild(name);
+        info.appendChild(sub);
+
+        const badge = document.createElement('span');
+        badge.className = 'q-badge ' + item.status;
+        badge.textContent = { pending: 'Pending', working: 'Working', done: 'Done', error: 'Error' }[item.status] || item.status;
+
+        const remove = document.createElement('button');
+        remove.className = 'q-remove';
+        remove.type = 'button';
+        remove.title = 'Remove';
+        remove.textContent = '×';
+        remove.addEventListener('click', () => removeItem(item.id));
+
+        row.appendChild(thumb);
+        row.appendChild(info);
+        row.appendChild(badge);
+        row.appendChild(remove);
+        queueEl.appendChild(row);
+      }
     }
 
-    function cleanup() {
-      if (state.sourceUrl) URL.revokeObjectURL(state.sourceUrl);
-      state.file = null;
-      state.sourceUrl = '';
-      state.resultUrl = '';
+    function removeItem(id) {
+      const idx = state.items.findIndex(i => i.id === id);
+      if (idx < 0) return;
+      const [removed] = state.items.splice(idx, 1);
+      if (removed.sourceUrl) URL.revokeObjectURL(removed.sourceUrl);
+      if (state.activeId === id) {
+        const next = state.items[idx] || state.items[idx - 1] || null;
+        state.activeId = next ? next.id : null;
+        showImage(next ? (next.resultUrl || next.sourceUrl) : null);
+      }
+      syncButtons();
+      renderQueue();
+      refreshMeta();
+    }
+
+    function syncButtons() {
+      const hasPending = state.items.some(i => i.status !== 'done');
+      generateBtn.disabled = state.items.length < 1 || !hasPending;
+      downloadBtn.disabled = !state.items.some(i => i.resultUrl);
+      const mode = getOutputMode();
+      const verb = mode === 'resize' ? 'Resize' : 'Generate';
+      generateBtn.textContent = state.items.length > 1 ? `${verb} all` : verb;
+      const doneCount = state.items.filter(i => i.resultUrl).length;
+      downloadBtn.textContent = doneCount > 1 ? `Download (${doneCount})` : 'Download';
+    }
+
+    async function addFiles(fileList) {
+      const files = [...fileList].filter(f => f && f.type.startsWith('image/'));
+      if (!files.length) return;
+      for (const file of files) {
+        const id = ++state.seq;
+        const sourceUrl = URL.createObjectURL(file);
+        const item = { id, file, name: file.name || `image-${id}`, sourceUrl, w: 0, h: 0, resultUrl: '', status: 'pending' };
+        state.items.push(item);
+        try {
+          const img = await loadImageFromUrl(sourceUrl);
+          item.w = img.naturalWidth;
+          item.h = img.naturalHeight;
+        } catch (_) {
+          item.status = 'error';
+        }
+      }
+      if (state.activeId === null && state.items.length) setActive(state.items[0].id);
+      syncButtons();
+      renderQueue();
+      refreshMeta();
+      const n = state.items.length;
+      setStatus(n > 1 ? `${n} images ready. ${getOutputMode() === 'resize' ? 'Resize' : 'Generate'} all when ready.` : 'Ready.');
+    }
+
+    async function processItem(item, mode, target) {
+      item.status = 'working';
+      renderQueue();
+      const img = await loadImageFromUrl(item.sourceUrl);
+      const dataUrl = mode === 'resize'
+        ? await resizeOnly(img, target)
+        : await generateLocalOutpaint(img, target);
+      item.resultUrl = dataUrl;
+      item.status = 'done';
+    }
+
+    generateBtn.addEventListener('click', async () => {
+      if (state.items.length < 1) return;
+      let target;
+      try { target = getTargetSize(); }
+      catch (error) { setStatus(error.message, true); return; }
+      const mode = getOutputMode();
+      generateBtn.disabled = true;
       downloadBtn.disabled = true;
+
+      let done = 0, failed = 0;
+      for (const item of state.items) {
+        if (item.resultUrl) continue;
+        try {
+          setStatus(`Processing ${item.name} (${done + failed + 1}/${state.items.length})...`);
+          await processItem(item, mode, target);
+          done++;
+          if (item.id === state.activeId) showImage(item.resultUrl);
+          renderQueue();
+        } catch (error) {
+          item.status = 'error';
+          failed++;
+          renderQueue();
+        }
+      }
+      syncButtons();
+      refreshMeta();
+      setStatus(failed
+        ? `Finished with ${failed} error${failed > 1 ? 's' : ''}. ${done} done at ${target.width} x ${target.height}.`
+        : `Done. ${done} image${done !== 1 ? 's' : ''} at ${target.width} x ${target.height}.`,
+        !!failed);
+    });
+
+    // ---- Download (ask where to save) ----
+    function dataUrlToBlob(dataUrl) {
+      const [head, b64] = dataUrl.split(',');
+      const mime = (head.match(/:(.*?);/) || [,'image/png'])[1];
+      const bin = atob(b64);
+      const arr = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+      return new Blob([arr], { type: mime });
     }
 
+    function outNameFor(item, mode, target) {
+      const base = (item.name || 'image').replace(/\.[^.]+$/, '');
+      return `${base}-qt-${mode}-${target.width}x${target.height}.png`;
+    }
+
+    function fallbackDownload(blob, filename) {
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 4000);
+    }
+
+    downloadBtn.addEventListener('click', async () => {
+      const ready = state.items.filter(i => i.resultUrl);
+      if (!ready.length) return;
+      const mode = getOutputMode();
+      let target;
+      try { target = getTargetSize(); } catch (_) { target = { width: ready[0].w, height: ready[0].h }; }
+
+      // Single image: ask for a save location via the file picker when available.
+      if (ready.length === 1) {
+        const item = ready[0];
+        const blob = dataUrlToBlob(item.resultUrl);
+        const filename = outNameFor(item, mode, target);
+        if (window.showSaveFilePicker) {
+          try {
+            const handle = await window.showSaveFilePicker({
+              suggestedName: filename,
+              types: [{ description: 'PNG image', accept: { 'image/png': ['.png'] } }]
+            });
+            const writable = await handle.createWritable();
+            await writable.write(blob);
+            await writable.close();
+            setStatus(`Saved ${filename}.`);
+            return;
+          } catch (err) {
+            if (err && err.name === 'AbortError') { setStatus('Save cancelled.'); return; }
+            // fall through to normal download on any picker failure
+          }
+        }
+        fallbackDownload(blob, filename);
+        setStatus(`Downloaded ${filename}.`);
+        return;
+      }
+
+      // Multiple images: ask for a destination folder when available.
+      if (window.showDirectoryPicker) {
+        try {
+          const dir = await window.showDirectoryPicker({ mode: 'readwrite' });
+          let saved = 0;
+          for (const item of ready) {
+            const filename = outNameFor(item, mode, target);
+            const handle = await dir.getFileHandle(filename, { create: true });
+            const writable = await handle.createWritable();
+            await writable.write(dataUrlToBlob(item.resultUrl));
+            await writable.close();
+            saved++;
+            setStatus(`Saving to folder... ${saved}/${ready.length}`);
+          }
+          setStatus(`Saved ${saved} images to the chosen folder.`);
+          return;
+        } catch (err) {
+          if (err && err.name === 'AbortError') { setStatus('Save cancelled.'); return; }
+          // fall through to per-file downloads
+        }
+      }
+      // Fallback: trigger individual downloads to the browser's download folder.
+      for (const item of ready) {
+        fallbackDownload(dataUrlToBlob(item.resultUrl), outNameFor(item, mode, target));
+        await new Promise(r => setTimeout(r, 250));
+      }
+      setStatus(`Downloaded ${ready.length} images.`);
+    });
+
+    // ---- Wiring ----
     drop.addEventListener('click', () => fileInput.click());
-    fileInput.addEventListener('change', event => selectFile(event.target.files[0]));
+    fileInput.addEventListener('change', event => { addFiles(event.target.files); fileInput.value = ''; });
     drop.addEventListener('dragover', event => {
       event.preventDefault();
       drop.classList.add('dragging');
@@ -563,69 +748,30 @@
     drop.addEventListener('drop', event => {
       event.preventDefault();
       drop.classList.remove('dragging');
-      selectFile(event.dataTransfer.files[0]);
+      addFiles(event.dataTransfer.files);
     });
-    resolutionSelect.addEventListener('change', updateOutputMeta);
+    resolutionSelect.addEventListener('change', () => { updateOutputMeta(); syncButtons(); });
     customWidth.addEventListener('input', updateOutputMeta);
     customHeight.addEventListener('input', updateOutputMeta);
     outputModeInputs.forEach(input => input.addEventListener('change', () => {
-      const mode = getOutputMode();
-      generateBtn.textContent = mode === 'resize' ? 'Resize' : 'Generate';
       updateOutputMeta();
-      if (state.file) setStatus(mode === 'resize' ? 'Ready to resize.' : 'Ready to generate.');
+      syncButtons();
+      if (state.items.length) setStatus(getOutputMode() === 'resize' ? 'Ready to resize.' : 'Ready to generate.');
     }));
 
-    generateBtn.addEventListener('click', async () => {
-      if (!state.file) return;
-      generateBtn.disabled = true;
-      downloadBtn.disabled = true;
-      try {
-        const target = getTargetSize();
-        const mode = getOutputMode();
-        setStatus(`Preparing ${target.width} x ${target.height} canvas...`);
-        const finalDataUrl = mode === 'resize'
-          ? await (async () => {
-              setStatus(`Resampling to ${target.width} x ${target.height}...`);
-              return resizeOnly(state.file, target);
-            })()
-          : await (async () => {
-              await prepareCanvases(state.file, target);
-              setStatus('Filling and resizing locally...');
-              return generateLocalOutpaint(state.file, target);
-            })();
-        state.resultUrl = finalDataUrl;
-        showImage(finalDataUrl);
-        downloadBtn.disabled = false;
-        setStatus(`Done. Output is ${target.width} x ${target.height}.`);
-      } catch (error) {
-        setStatus(error.message || String(error), true);
-      } finally {
-        generateBtn.disabled = false;
-      }
-    });
-
-    downloadBtn.addEventListener('click', () => {
-      if (!state.resultUrl) return;
-      const link = document.createElement('a');
-      const target = getTargetSize();
-      const mode = getOutputMode();
-      link.href = state.resultUrl;
-      link.download = `qt-seize-${mode}-${target.width}x${target.height}.png`;
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
-    });
-
     document.getElementById('reset').addEventListener('click', () => {
-      cleanup();
-      preview.innerHTML = '<div class="empty">Upload a portrait image to start.</div>';
-      sourceMeta.textContent = 'No source selected';
-      resizeSource.textContent = 'No image';
-      generateBtn.disabled = true;
-      updateOutputMeta();
-      setStatus('Portrait image to locally-filled output.');
+      for (const item of state.items) if (item.sourceUrl) URL.revokeObjectURL(item.sourceUrl);
+      state.items = [];
+      state.activeId = null;
+      showImage(null);
+      renderQueue();
+      syncButtons();
+      refreshMeta();
+      setStatus('Cleared. Upload one or more images to start.');
     });
+
     updateOutputMeta();
+    syncButtons();
   </script>
 </body>
 </html>
