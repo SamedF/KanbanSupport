@@ -3270,6 +3270,7 @@ function isQuintaSender(s){if(!s)return false;const d=(s.split('@')[1]||'').toLo
 function isInternalEmailAddress(value){const addr=String(value||'').trim().toLowerCase();if(!addr)return false;if(SUPPORT_BOX_ALIASES.includes(addr))return true;const domain=addr.split('@')[1]||'';return INTERNAL_EMAIL_DOMAINS.includes(domain);}
 function getClientEmail(emailObj){const sender=(emailObj?.sender||'').toLowerCase();if(!isInternalEmailAddress(sender))return sender||null;const recipients=Array.isArray(emailObj?.recipients)?emailObj.recipients:[];const client=recipients.find(r=>{if(!r||typeof r!=='string')return false;const rl=r.toLowerCase();if(SUPPORT_BOX_ALIASES.includes(rl))return false;if(isInternalEmailAddress(rl))return false;if(NO_REPLY_PATTERNS.some(p=>rl.includes(p)))return false;return true;});return client?client.toLowerCase():null;}
 function csAgentFromSenderEmail(sender){const addr=String(sender||'').trim().toLowerCase();if(!addr.includes('@'))return'';const domain=addr.split('@')[1]||'';if(!INTERNAL_EMAIL_DOMAINS.includes(domain))return'';const local=addr.split('@')[0].toUpperCase();return CS_AGENTS.includes(local)?local:'';}
+function supportAgentFromSenderEmail(sender){const addr=String(sender||'').trim().toLowerCase();if(!addr.includes('@'))return'';const domain=addr.split('@')[1]||'';if(!INTERNAL_EMAIL_DOMAINS.includes(domain))return'';const local=addr.split('@')[0].toUpperCase();return SUPPORT_AGENTS.includes(local)?local:'';}
 function normalizeEmailList(values){return (Array.isArray(values)?values:[]).map(v=>String(v||'').trim().toLowerCase()).filter(Boolean);}
 function isAutomatic(e){if(!e||!e.sender)return true;const sl=e.sender.toLowerCase();if(sl===SUPPORT_BOX)return true;if(BLOCKED_EMAILS.has(sl))return true;const domain=(sl.split('@')[1]||'');if(BLOCKED_DOMAINS.has(domain))return true;if(NO_REPLY_PATTERNS.some(p=>sl.includes(p)))return true;if(!e.subject&&!e.summary)return true;const tl=((e.subject||'')+' '+(e.summary||'')).toLowerCase();if(NO_REPLY_SUBJECTS.some(p=>tl.includes(p)))return true;if(/\b(newsletter|webinar|digest|event reminder)\b/.test(tl))return true;if(/(microsoft teams meeting|join microsoft teams meeting|meeting invitation|accepted:|declined:|tentative:)/.test(tl))return true;return false;}
 function normalizeThreadSubject(subject){return String(subject||'').toLowerCase().replace(/^\s*((re|fw|fwd)\s*:\s*)+/gi,'').replace(/\s+/g,' ').trim();}
@@ -3304,6 +3305,21 @@ function findExistingTicketForEmail(emailObj){const probe={id:'__probe__',email:
   const probeTs=Date.parse(emailObj?.receivedDateTime||'');
   for(const ticket of allTickets){const existingKeys=buildTicketThreadKeys(ticket,{allowSubjectFallback:true,forceSubjectFallback:true,requireReplyLikeSubject:false});if(!existingKeys.some(key=>fallbackKeys.includes(key)))continue;if(Number.isFinite(probeTs)){const existingTs=Date.parse(ticket?.email?.receivedDateTime||ticketCreatedAt[ticket.id]||'');if(Number.isFinite(existingTs)&&Math.abs(probeTs-existingTs)>THREAD_FALLBACK_MAX_GAP_DAYS*86400000)continue;}return ticket;}return null;}
 function mergeEmailIntoExistingTicket(ticket,emailObj,subtypeId){if(!ticket||!ticket.id||!emailObj)return false;ticket.email={...ticket.email,...emailObj};const ce=getClientEmail(emailObj);if(ce)ticketClientEmail[ticket.id]=ce;const csFromSender=csAgentFromSenderEmail(emailObj.sender);if(csFromSender&&!ticketCSOwner[ticket.id])ticketCSOwner[ticket.id]=csFromSender;const st=SUBTYPE_BY_ID[subtypeId]||null;if(!ticketSubtype[ticket.id]&&st)ticketSubtype[ticket.id]=st.id;if(!ticketPriority[ticket.id]&&st)ticketPriority[ticket.id]=st.priority;ticketHasNewReply[ticket.id]=true;
+  // The ticket's support agent was assigned by workload balancing, but if a
+  // DIFFERENT support agent is the one actually replying to the client in
+  // the email loop, the ticket should follow the real handling agent
+  // instead of staying pinned to whoever was assigned when it was created.
+  // Marked as manualSupportOverride so workload-based rebalancing
+  // (applyCompanyCSAssignments) doesn't undo it afterwards - same
+  // protection a manual dropdown reassignment gets.
+  if(ticketCategory[ticket.id]!=='Spam'){
+    const supportFromSender=supportAgentFromSenderEmail(emailObj.sender);
+    if(supportFromSender&&supportFromSender!==ticketAssignee[ticket.id]){
+      ticketAssignee[ticket.id]=supportFromSender;
+      ticketAssignmentMode[ticket.id]='support';
+      manualSupportOverride[ticket.id]=true;
+    }
+  }
   // A genuine client reply (not internal CS staff, e.g. a CC'd @quinta.im
   // address) while waiting on the client means the ball is back in our
   // court - move it out of Waiting on Contact automatically. addTickets()
