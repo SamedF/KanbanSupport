@@ -36,4 +36,6 @@ Thumbs.db
 data/*.json
 versions/*.json
 backups/
+
+# Prisma generated client
 /generated/prisma

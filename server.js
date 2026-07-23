@@ -10,6 +10,7 @@ const bcrypt = require('bcryptjs');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { spawn } = require('child_process');
 
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
@@ -164,7 +165,7 @@ app.use(helmet({
     }
   }
 }));
-app.use(express.json({ limit: '4mb' }));
+app.use(express.json({ limit: '25mb' }));
 // Needed for the OAuth consent form POST and the token endpoint, which per
 // RFC 6749 is submitted as application/x-www-form-urlencoded.
 app.use(express.urlencoded({ extended: true, limit: '1mb' }));
@@ -349,6 +350,39 @@ function normalizeDbStatusForBoard(status) {
   if (value === 'waiting on contact') return 'wct';
   if (value === 'resolved' || value === 'closed') return 'res';
   return 'new';
+}
+function startOfLocalDay(date = new Date()) {
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate());
+}
+function kpiDateBounds(range) {
+  const now = new Date();
+  const dayStart = startOfLocalDay(now);
+  const dayMs = 24 * 60 * 60 * 1000;
+  const key = String(range || 'today').trim().toLowerCase();
+  if (key === 'today' || key === 'day') return { start: dayStart, end: now, label: 'Today' };
+  if (key === 'this_week' || key === 'week') {
+    const dow = (dayStart.getDay() + 6) % 7;
+    return { start: new Date(dayStart.getTime() - dow * dayMs), end: now, label: 'This week' };
+  }
+  if (key === 'last_week') {
+    const dow = (dayStart.getDay() + 6) % 7;
+    const thisWeekStart = dayStart.getTime() - dow * dayMs;
+    return { start: new Date(thisWeekStart - 7 * dayMs), end: new Date(thisWeekStart - 1), label: 'Last week' };
+  }
+  if (key === 'this_month' || key === 'month') return { start: new Date(now.getFullYear(), now.getMonth(), 1), end: now, label: 'This month' };
+  if (key === 'last_30_days') return { start: new Date(dayStart.getTime() - 29 * dayMs), end: now, label: 'Last 30 days' };
+  if (key === 'this_year') return { start: new Date(now.getFullYear(), 0, 1), end: now, label: 'This year' };
+  return { start: dayStart, end: now, label: 'Today' };
+}
+function isDateInBounds(value, bounds) {
+  if (!value || !bounds?.start || !bounds?.end) return false;
+  const date = value instanceof Date ? value : new Date(value);
+  return !Number.isNaN(date.getTime()) && date >= bounds.start && date <= bounds.end;
+}
+function kpiTicketInRange(ticket, bounds) {
+  const statusKey = normalizeDbStatusForBoard(ticket?.status);
+  if (statusKey === 'res') return isDateInBounds(ticket?.resolvedAt, bounds);
+  return isDateInBounds(ticket?.createdAt, bounds) || isDateInBounds(ticket?.updatedAt, bounds);
 }
 function resolvedAtFromState(state, ticketId) {
   const touched = Number(state?.ticketStageTouchedAt?.[ticketId] || 0);
@@ -1844,6 +1878,12 @@ async function upsertBoardTicketsToDatabase(state, req) {
       .map(c => ({ text: String(c?.text || c?.comment || '').trim(), ts: c?.ts || c?.createdAt, tags: Array.isArray(c?.tags) ? c.tags.map(t => String(t)).filter(Boolean) : [] }))
       .filter(c => c.text && !existingCommentTexts.has(c.text));
 
+    const previousStatus = existingTicket?.status || null;
+    const wasResolved = previousStatus === 'Resolved';
+    const resolvedAtForDb = status === 'Resolved'
+      ? (wasResolved ? existingTicket?.resolvedAt || new Date() : new Date())
+      : null;
+
     const fieldsUnchanged = existingTicket
       && existingTicket.subject === subject
       && existingTicket.senderEmail === (senderEmail || null)
@@ -1881,7 +1921,7 @@ async function upsertBoardTicketsToDatabase(state, req) {
         body,
         emailRaw: email,
         createdAt,
-        resolvedAt: status === 'Resolved' ? new Date() : null
+        resolvedAt: resolvedAtForDb
       },
       update: {
         subject,
@@ -1899,7 +1939,7 @@ async function upsertBoardTicketsToDatabase(state, req) {
         jiraTicketKey,
         body,
         emailRaw: email,
-        resolvedAt: status === 'Resolved' ? new Date() : null,
+        resolvedAt: resolvedAtForDb,
         // Leave untouched (undefined) while staying Resolved - the atomic
         // claim above owns setting it. Reset to null on leaving Resolved so
         // a genuine future re-resolve (e.g. after a CS "send back") can
@@ -3406,6 +3446,158 @@ app.get('/api/tickets', requireAuth, async (req, res) => {
   });
   res.json({ tickets });
 });
+app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
+  try {
+    const bounds = kpiDateBounds(req.query.range);
+    const role = normalizeRole(req.session.role) || 'support';
+    const username = String(req.session.username || '').trim().toUpperCase();
+    const team = String(req.query.team || 'all').trim().toLowerCase();
+    const agent = String(req.query.agent || 'all').trim().toUpperCase();
+    const company = String(req.query.company || 'all').trim();
+    const jiraOnly = String(req.query.jiraOnly || '').toLowerCase() === 'true';
+
+    const baseWhere = {
+      NOT: [{ category: { equals: 'Spam', mode: 'insensitive' } }]
+    };
+    if (company && company !== 'all') baseWhere.companyName = company;
+    if (jiraOnly) baseWhere.jiraTicketKey = { not: null };
+
+    const accessWhere = {};
+    if (role === 'cs') accessWhere.csAgent = username;
+    else if (role === 'support') accessWhere.assignedAgent = username;
+    else if (agent && agent !== 'ALL') {
+      if (CS_AGENT_CODES.has(agent)) accessWhere.csAgent = agent;
+      else if (SUPPORT_AGENT_CODES.has(agent)) accessWhere.assignedAgent = agent;
+      else accessWhere.OR = [{ csAgent: agent }, { assignedAgent: agent }];
+    } else if (team === 'cs') {
+      accessWhere.csAgent = { in: Array.from(CS_AGENT_CODES) };
+    } else if (team === 'support') {
+      accessWhere.assignedAgent = { in: Array.from(SUPPORT_AGENT_CODES) };
+    }
+    const rangeWhere = {
+      OR: [
+        { createdAt: { gte: bounds.start, lte: bounds.end } },
+        { updatedAt: { gte: bounds.start, lte: bounds.end } },
+        { resolvedAt: { gte: bounds.start, lte: bounds.end } }
+      ]
+    };
+    const statusWhere = { AND: [baseWhere, accessWhere] };
+    const where = { AND: [baseWhere, accessWhere, rangeWhere] };
+
+    const tickets = await prisma.ticket.findMany({
+      where,
+      select: {
+        id: true,
+        externalId: true,
+        subject: true,
+        status: true,
+        priority: true,
+        category: true,
+        assignedAgent: true,
+        csAgent: true,
+        companyName: true,
+        senderEmail: true,
+        jiraTicketKey: true,
+        createdAt: true,
+        updatedAt: true,
+        resolvedAt: true
+      },
+      orderBy: [{ createdAt: 'desc' }]
+    });
+    const statusTickets = await prisma.ticket.findMany({
+      where: statusWhere,
+      select: {
+        id: true,
+        status: true,
+        assignedAgent: true,
+        csAgent: true,
+        jiraTicketKey: true
+      }
+    });
+    const scopedTickets = tickets.filter(ticket => kpiTicketInRange(ticket, bounds));
+
+    const statusKeys = ['new', 'inp', 'wus', 'dft', 'wct', 'res'];
+    const statusCounts = Object.fromEntries(statusKeys.map(k => [k, 0]));
+    const categoryCounts = {};
+    const priorityCounts = {};
+    const companyCounts = {};
+    const agentRows = {};
+    const csCounts = {};
+    let ticketsWithCs = 0;
+
+    const addAgentRow = (agentCode, statusKey) => {
+      const rowAgent = String(agentCode || 'Unassigned').trim().toUpperCase() || 'Unassigned';
+      if (!agentRows[rowAgent]) agentRows[rowAgent] = { agent: rowAgent, total: 0, new: 0, inp: 0, wus: 0, dft: 0, wct: 0, res: 0 };
+      agentRows[rowAgent].total++;
+      if (statusKey in agentRows[rowAgent]) agentRows[rowAgent][statusKey]++;
+    };
+
+    for (const ticket of statusTickets) {
+      const statusKey = normalizeDbStatusForBoard(ticket.status);
+      if (statusKey in statusCounts) statusCounts[statusKey]++;
+    }
+
+    for (const ticket of scopedTickets) {
+      const statusKey = normalizeDbStatusForBoard(ticket.status);
+      const category = String(ticket.category || 'Uncategorized').trim() || 'Uncategorized';
+      categoryCounts[category] = (categoryCounts[category] || 0) + 1;
+      const priority = String(ticket.priority || 'Normal').trim() || 'Normal';
+      priorityCounts[priority] = (priorityCounts[priority] || 0) + 1;
+      const companyName = String(ticket.companyName || 'Unknown').trim() || 'Unknown';
+      companyCounts[companyName] = (companyCounts[companyName] || 0) + 1;
+
+      const assignee = String(ticket.assignedAgent || '').trim().toUpperCase();
+      const csOwner = String(ticket.csAgent || '').trim().toUpperCase();
+      if (team === 'cs') addAgentRow(csOwner || 'Unassigned', statusKey);
+      else if (team === 'support') addAgentRow(assignee || 'Unassigned', statusKey);
+      else {
+        addAgentRow(assignee || 'Unassigned', statusKey);
+        if (csOwner && csOwner !== assignee) addAgentRow(csOwner, statusKey);
+      }
+      const csLabel = csOwner || 'Unassigned';
+      csCounts[csLabel] = (csCounts[csLabel] || 0) + 1;
+      if (csOwner) ticketsWithCs++;
+    }
+
+    const sortRows = obj => Object.entries(obj).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+    const agents = Array.from(new Set([
+      ...Array.from(SUPPORT_AGENT_CODES),
+      ...Array.from(CS_AGENT_CODES),
+      ...tickets.flatMap(t => [t.assignedAgent, t.csAgent]).filter(Boolean).map(v => String(v).trim().toUpperCase())
+    ])).sort((a, b) => a.localeCompare(b));
+
+    return res.json({
+      ok: true,
+      generatedAt: new Date().toISOString(),
+      range: { key: String(req.query.range || 'today'), label: bounds.label, start: bounds.start.toISOString(), end: bounds.end.toISOString() },
+      filters: { team, agent, company, jiraOnly },
+      totals: {
+        tickets: statusTickets.length,
+        rangeTickets: scopedTickets.length,
+        ticketsWithCs,
+        uniqueCs: Object.keys(csCounts).filter(k => k !== 'Unassigned').length,
+        jiraLinked: statusTickets.filter(t => t.jiraTicketKey).length
+      },
+      statusCounts,
+      categoryRows: sortRows(categoryCounts).map(([category, count]) => ({ category, count })),
+      priorityRows: sortRows(priorityCounts).map(([priority, count]) => ({ priority, count })),
+      companyRows: sortRows(companyCounts).map(([company, count]) => ({ company, count })),
+      csRows: sortRows(csCounts).map(([agent, count]) => ({ agent, count })),
+      agentRows: Object.values(agentRows).sort((a, b) => b.total - a.total || a.agent.localeCompare(b.agent)),
+      jiraRows: scopedTickets.filter(t => t.jiraTicketKey).slice(0, 50).map(t => ({
+        ticket: t.subject || '(no subject)',
+        company: t.companyName || 'Unknown',
+        agent: t.assignedAgent || 'Unassigned',
+        jira: t.jiraTicketKey,
+        createdAt: t.createdAt
+      })),
+      agents
+    });
+  } catch (error) {
+    console.error('Read ticket KPIs failed:', error);
+    return res.status(500).json({ error: 'read_ticket_kpis_failed' });
+  }
+});
 app.get('/api/tickets/:id/audit', requireAdmin, async (req, res) => {
   const ticketId = Number(req.params.id);
 
@@ -4735,6 +4927,54 @@ app.post('/api/mcp-proxy', requireAuth, async (req, res) => {
   } catch (err) {
     return res.status(500).json({ isError: true, error: String(err.message || err) });
   }
+});
+
+app.post('/api/qt-seize/outpaint', requireAuth, async (req, res) => {
+  const imageDataUrl = String(req.body?.imageDataUrl || '');
+  const maskDataUrl = String(req.body?.maskDataUrl || '');
+  const prompt = String(req.body?.prompt || '').trim();
+
+  if (!imageDataUrl || !maskDataUrl) {
+    return res.status(400).json({ error: 'missing_image_or_mask' });
+  }
+
+  if (!process.env.OPENAI_API_KEY) {
+    return res.status(503).json({ error: 'missing_openai_api_key' });
+  }
+
+  const workerPath = path.join(__dirname, 'scripts', 'qt_seize_outpaint.py');
+  const pythonCmd = process.env.PYTHON || process.env.PYTHON_BIN || 'python';
+  const child = spawn(pythonCmd, [workerPath], {
+    cwd: __dirname,
+    env: process.env,
+    stdio: ['pipe', 'pipe', 'pipe']
+  });
+  const timeout = setTimeout(() => child.kill('SIGTERM'), 120000);
+  let stdout = '';
+  let stderr = '';
+
+  child.stdout.on('data', chunk => { stdout += chunk.toString('utf8'); });
+  child.stderr.on('data', chunk => { stderr += chunk.toString('utf8'); });
+  child.stdin.end(JSON.stringify({ imageDataUrl, maskDataUrl, prompt }));
+
+  child.on('error', error => {
+    clearTimeout(timeout);
+    return res.status(500).json({ error: 'python_worker_failed', detail: String(error.message || error) });
+  });
+
+  child.on('close', code => {
+    clearTimeout(timeout);
+    if (code !== 0) {
+      return res.status(500).json({ error: 'outpaint_failed', detail: stderr.slice(0, 1200) || stdout.slice(0, 1200) });
+    }
+    try {
+      const payload = JSON.parse(stdout);
+      if (!payload?.imageDataUrl) return res.status(500).json({ error: 'missing_ai_image' });
+      return res.json(payload);
+    } catch (error) {
+      return res.status(500).json({ error: 'invalid_worker_response', detail: String(error.message || error) });
+    }
+  });
 });
 
 app.get(['/qt-seize', '/qt-seize/'], requireAuth, (req, res) => {
