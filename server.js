@@ -33,13 +33,14 @@ const M365_TENANT_ID = process.env.M365_TENANT_ID || '';
 const M365_CLIENT_ID = process.env.M365_CLIENT_ID || '';
 const M365_CLIENT_SECRET = process.env.M365_CLIENT_SECRET || '';
 const M365_REDIRECT_URI = process.env.M365_REDIRECT_URI || `http://localhost:${PORT}/auth/microsoft/callback`;
-// Chat.Create/Chat.ReadWrite/User.ReadBasic.All intentionally excluded:
-// they're only needed by graphSendTeamsDirectMessage() (via
-// graphFindUserByEmail(), which looks up other users), and nothing currently
-// calls that function - Resolved notifications go through the Power Automate
-// webhook instead. Requesting them anyway forced an admin-consent prompt for
-// permissions the app never actually uses.
-const M365_SCOPES = String(process.env.M365_SCOPES || 'offline_access openid profile email User.Read Mail.Read Mail.Read.Shared').trim();
+// Chat.Create + User.ReadBasic.All are required again: replies arriving on a
+// confirmed-resolved thread DM the ticket's CS owner on Teams, which goes
+// through graphSendTeamsDirectMessage() on this same Outlook connection.
+// Chat.Create opens the 1:1 chat, User.ReadBasic.All resolves the CS agent's
+// Teams account from their email. These were dropped while nothing called that
+// function; re-adding them means the M365 connection needs Azure AD admin
+// consent once and a reconnect at /auth/microsoft/start before DMs deliver.
+const M365_SCOPES = String(process.env.M365_SCOPES || 'offline_access openid profile email User.Read Mail.Read Mail.Read.Shared Chat.Create User.ReadBasic.All').trim();
 const SUPPORT_MAILBOX = String(process.env.SUPPORT_MAILBOX || 'helpdesk@quinta.im').trim().toLowerCase();
 const CONFIGURED_APP_BASE_URL = String(process.env.APP_BASE_URL || process.env.PUBLIC_BASE_URL || '').trim();
 const APP_BASE_URL = String(CONFIGURED_APP_BASE_URL || `http://localhost:${PORT}`).replace(/\/+$/, '');
@@ -385,6 +386,14 @@ function kpiTicketInRange(ticket, bounds) {
   return isDateInBounds(ticket?.createdAt, bounds) || isDateInBounds(ticket?.updatedAt, bounds);
 }
 function resolvedAtFromState(state, ticketId) {
+  // Postgres Ticket.resolvedAt first (seeded by hydrateStateFromDatabase): it
+  // records when the ticket actually became Resolved. ticketStageTouchedAt is
+  // only a fallback because it moves on *any* later edit, which kept pushing
+  // the retention window forward and stopped old resolved tickets from ever
+  // aging out. Reading it from the DB also means the retention rule survives a
+  // lost or absent board-state.json instead of resetting to "nothing hidden".
+  const resolved = Number(state?.ticketResolvedAt?.[ticketId] || 0);
+  if (resolved > 0) return resolved;
   const touched = Number(state?.ticketStageTouchedAt?.[ticketId] || 0);
   if (touched > 0) return touched;
   const created = Date.parse(state?.ticketCreatedAt?.[ticketId] || '');
@@ -396,6 +405,28 @@ function isResolvedHiddenInState(state, ticketId, now = Date.now()) {
   if (meta?.confirmedAt) return true;
   const resolvedAt = resolvedAtFromState(state, ticketId);
   return !!resolvedAt && now - resolvedAt >= RESOLVED_RETENTION_MS;
+}
+// Drops hidden-resolved tickets off a state's board. Shared by the write path
+// and by both read paths (GET /api/state hydration and GET /api/tickets) - the
+// write path used to prune alone, so every read re-injected the same resolved
+// tickets straight back from Postgres and they reappeared on every board.
+function pruneResolvedHiddenTickets(stateToPrune, now = Date.now()) {
+  const tickets = Array.isArray(stateToPrune.allTickets) ? stateToPrune.allTickets : [];
+  const hiddenIds = new Set(
+    tickets
+      .filter(t => t && t.id && isResolvedHiddenInState(stateToPrune, String(t.id), now))
+      .map(t => String(t.id))
+  );
+  if (!hiddenIds.size) return stateToPrune;
+  stateToPrune.allTickets = tickets.filter(t => !hiddenIds.has(String(t?.id || '')));
+  return stateToPrune;
+}
+// True for a DB row that must never be put back on a board. Evaluated against
+// the board state, which is where confirmedAt lives.
+function isTicketRowHidden(state, row, now = Date.now()) {
+  const externalId = String(row?.externalId || row?.emailMessageId || row?.id || '').trim();
+  if (!externalId) return false;
+  return isResolvedHiddenInState(state, externalId, now);
 }
 function safeDateForDb(value) {
   if (!value) return null;
@@ -788,6 +819,26 @@ function writeBackupSnapshot(state) {
     try { fs.unlinkSync(file.fullPath); } catch (_) {}
   });
 }
+// Board state is a single JSON document that every session POSTs wholesale.
+// safeWriteState already reconciles concurrent writes field-by-field, so no
+// agent's change is lost - but nothing told the *other* browsers the document
+// had changed, so a move made by one agent stayed invisible to the rest until
+// they reloaded. stateRev is bumped on every write and pushed to subscribers
+// over SSE so each open board can pull the new state immediately.
+let stateRev = 0;
+const stateSubscribers = new Set();
+
+function broadcastStateRev(payload) {
+  const frame = `data: ${JSON.stringify(payload)}\n\n`;
+  stateSubscribers.forEach((subscriber) => {
+    try {
+      subscriber.write(frame);
+    } catch (_) {
+      stateSubscribers.delete(subscriber);
+    }
+  });
+}
+
 async function safeWriteState(state) {
   const nextState = (state && typeof state === 'object') ? state : {};
   const currentState = safeReadState();
@@ -867,18 +918,10 @@ async function safeWriteState(state) {
   nextState.manualSupportOverride = mergeTicketMap('manualSupportOverride');
   nextState.ticketResolutionMeta = mergeTicketMap('ticketResolutionMeta');
   nextState.ticketArchived = mergeTicketMap('ticketArchived');
+  // Keyed by reply message id rather than ticket id, but the same union applies:
+  // a tab that hasn't polled a reply yet must not delete it for everyone else.
+  nextState.resolvedReplies = mergeTicketMap('resolvedReplies');
 
-  const pruneResolvedHiddenTickets = (stateToPrune) => {
-    const nowForPrune = Date.now();
-    const hiddenIds = new Set(
-      (Array.isArray(stateToPrune.allTickets) ? stateToPrune.allTickets : [])
-        .filter(t => t && t.id && isResolvedHiddenInState(stateToPrune, String(t.id), nowForPrune))
-        .map(t => String(t.id))
-    );
-    if (!hiddenIds.size) return stateToPrune;
-    stateToPrune.allTickets = (Array.isArray(stateToPrune.allTickets) ? stateToPrune.allTickets : []).filter(t => !hiddenIds.has(String(t?.id || '')));
-    return stateToPrune;
-  };
   pruneResolvedHiddenTickets(nextState);
 
   // The "Resolved" Teams DM is no longer tracked here at all - it moved to
@@ -896,7 +939,7 @@ async function safeWriteState(state) {
   // A stale snapshot (e.g. from a lagging tab) must not blindly overwrite
   // fields it didn't correctly merge - keep the current state as the base and
   // only layer in the fields we've safely reconciled above by id/timestamp.
-  const reconciledFields = ['ticketState', 'ticketStageTouchedAt', 'ticketNumbers', 'ticketNumberCounter', 'allTickets', 'seenIds', 'ticketAssignee', 'ticketCSOwner', 'ticketAssignmentMode', 'manualSupportOverride', 'ticketResolutionMeta', 'ticketArchived'];
+  const reconciledFields = ['ticketState', 'ticketStageTouchedAt', 'ticketNumbers', 'ticketNumberCounter', 'allTickets', 'seenIds', 'ticketAssignee', 'ticketCSOwner', 'ticketAssignmentMode', 'manualSupportOverride', 'ticketResolutionMeta', 'ticketArchived', 'resolvedReplies'];
   const finalState = isStale
     ? { ...currentState, ...Object.fromEntries(reconciledFields.map(key => [key, nextState[key]])), _meta: enrichedMeta }
     : { ...nextState, _meta: enrichedMeta };
@@ -914,7 +957,9 @@ async function safeWriteState(state) {
     backupCreated = true;
   }
 
-  return { saved: true, partial: isStale, backupCreated, state: finalState };
+  stateRev += 1;
+
+  return { saved: true, partial: isStale, backupCreated, rev: stateRev, state: finalState };
 }
 async function hydrateStateFromDatabase(baseState = {}) {
   const state = (baseState && typeof baseState === 'object') ? JSON.parse(JSON.stringify(baseState)) : {};
@@ -950,6 +995,7 @@ async function hydrateStateFromDatabase(baseState = {}) {
   state.ticketJira = (state.ticketJira && typeof state.ticketJira === 'object') ? state.ticketJira : {};
   state.ticketHubspotId = (state.ticketHubspotId && typeof state.ticketHubspotId === 'object') ? state.ticketHubspotId : {};
   state.ticketArchived = (state.ticketArchived && typeof state.ticketArchived === 'object') ? state.ticketArchived : {};
+  state.ticketResolvedAt = (state.ticketResolvedAt && typeof state.ticketResolvedAt === 'object') ? state.ticketResolvedAt : {};
   // Postgres (Ticket.displayNumber) is the source of truth for this, not
   // whatever the client last sent - always overwritten below so the board
   // and MCP tools can never drift apart on what a ticket's number is.
@@ -997,6 +1043,7 @@ async function hydrateStateFromDatabase(baseState = {}) {
     if (ticket.assignedAgent || ticket.csAgent) state.ticketAssignmentMode[externalId] = 'support';
     if (ticket.senderEmail) state.ticketClientEmail[externalId] = ticket.senderEmail;
     if (ticket.createdAt) state.ticketCreatedAt[externalId] = ticket.createdAt.toISOString();
+    if (ticket.resolvedAt) state.ticketResolvedAt[externalId] = new Date(ticket.resolvedAt).getTime();
     if (ticket.jiraTicketKey) state.ticketJira[externalId] = ticket.jiraTicketKey;
     if (ticket.hubspotTicketId) state.ticketHubspotId[externalId] = ticket.hubspotTicketId;
     if (ticket.displayNumber) state.ticketNumbers[externalId] = ticket.displayNumber;
@@ -1013,7 +1060,12 @@ async function hydrateStateFromDatabase(baseState = {}) {
   }
 
   state.allTickets = [...ticketsById.values()].sort((a, b) => new Date(b?.email?.receivedDateTime || 0) - new Date(a?.email?.receivedDateTime || 0));
+  // seenIds deliberately keeps hidden-resolved ids: that is what stops the
+  // original email from being re-created as a fresh ticket on the next poll.
   state.seenIds = [...seenIds];
+  // Every ticket above came from Postgres unfiltered, including ones the write
+  // path had already pruned - without this the board got them back on load.
+  pruneResolvedHiddenTickets(state);
   return state;
 }
 
@@ -1275,6 +1327,160 @@ async function claimResolvedTeamsAlert({ ticketDbId, externalId, csAgent, catego
   const claimedRows = await prisma.$executeRaw`UPDATE "Ticket" SET "resolvedTeamsNotifiedAt" = NOW() WHERE id = ${ticketDbId} AND "resolvedTeamsNotifiedAt" IS NULL`;
   if (claimedRows <= 0) return null;
   return { ticketId: externalId, csOwner: csOwnerForAlert, ticketNumber, subject, companyName, jiraKey: jiraTicketKey, assignee: assignedAgent };
+}
+
+// ---- Replies to confirmed-resolved tickets ------------------------------
+// Once a ticket is hidden it is off the board, so the client can no longer
+// thread-match an incoming reply against it (findExistingTicketForEmail only
+// searches allTickets). The match therefore has to happen here, against the
+// Ticket table, which still holds every hidden ticket.
+
+// Strips reply/forward prefixes so "RE: FW: Booking issue" threads with
+// "Booking issue". Deliberately mirrors the client's subject-fallback matching.
+function normalizeThreadSubject(subject) {
+  let out = String(subject || '').trim();
+  // Looped, not a single pass: real threads stack them ("RE: FW: Booking issue"),
+  // and stripping only the outermost left "fw: booking issue" behind, which then
+  // failed to match the ticket's own "Booking issue".
+  for (let i = 0; i < 10; i++) {
+    const next = out.replace(/^\s*(re|fw|fwd|aw|tr|rif|res|antw|sv|vs)\s*(\[\d+\])?\s*:\s*/i, '');
+    if (next === out) break;
+    out = next;
+  }
+  return out.replace(/\s+/g, ' ').trim().toLowerCase();
+}
+
+const HIDDEN_THREAD_CACHE_TTL_MS = 30 * 1000;
+let hiddenThreadCache = { at: 0, byConversation: new Map(), bySubject: new Map() };
+
+// Threads belonging to tickets that are hidden from the board. Cached because
+// this is consulted on every mailbox poll from every open tab.
+async function getHiddenResolvedThreadIndex(force = false) {
+  const now = Date.now();
+  if (!force && now - hiddenThreadCache.at < HIDDEN_THREAD_CACHE_TTL_MS) return hiddenThreadCache;
+
+  const boardState = safeReadState();
+  const rows = await prisma.ticket.findMany({
+    where: { status: 'Resolved' },
+    select: {
+      id: true, externalId: true, emailMessageId: true, subject: true,
+      csAgent: true, assignedAgent: true, companyName: true,
+      displayNumber: true, emailRaw: true
+    }
+  });
+
+  const byConversation = new Map();
+  const bySubject = new Map();
+  for (const row of rows) {
+    if (!isTicketRowHidden(boardState, row, now)) continue;
+    const raw = (row.emailRaw && typeof row.emailRaw === 'object' && !Array.isArray(row.emailRaw)) ? row.emailRaw : {};
+    const entry = {
+      ticketDbId: row.id,
+      externalId: String(row.externalId || row.emailMessageId || row.id),
+      subject: row.subject || raw.subject || '',
+      csAgent: row.csAgent || null,
+      assignedAgent: row.assignedAgent || null,
+      companyName: row.companyName || null,
+      displayNumber: row.displayNumber || null
+    };
+    if (raw.conversationId) byConversation.set(String(raw.conversationId), entry);
+    const subjectKey = normalizeThreadSubject(entry.subject);
+    if (subjectKey) bySubject.set(subjectKey, entry);
+  }
+
+  hiddenThreadCache = { at: now, byConversation, bySubject };
+  return hiddenThreadCache;
+}
+
+// conversationId is authoritative; the normalized subject is a fallback for
+// clients that break threading by starting a fresh message.
+function matchHiddenThread(index, message) {
+  if (!message) return null;
+  if (message.conversationId) {
+    const hit = index.byConversation.get(String(message.conversationId));
+    if (hit) return hit;
+  }
+  const subjectKey = normalizeThreadSubject(message.subject);
+  if (subjectKey) {
+    const hit = index.bySubject.get(subjectKey);
+    if (hit) return hit;
+  }
+  return null;
+}
+
+// Send-once guard. The app is single-instance (board state is a JSON file on
+// local disk), so an in-process set is genuinely atomic here - several agents'
+// tabs polling the same reply at once all funnel through this one server.
+// Behind more than one replica this would need a unique index to claim against
+// instead, the same way claimResolvedTeamsAlert() does.
+const notifiedResolvedReplies = new Set();
+
+async function notifyCsOfResolvedReply({ token, message, thread }) {
+  const messageId = String(message?.id || '');
+  if (!messageId || notifiedResolvedReplies.has(messageId)) return null;
+  notifiedResolvedReplies.add(messageId);
+  // Unbounded growth would leak across a long-lived process; the poll window is
+  // short so old ids can never come back round.
+  if (notifiedResolvedReplies.size > 5000) {
+    for (const id of [...notifiedResolvedReplies].slice(0, 2500)) notifiedResolvedReplies.delete(id);
+  }
+
+  const recipients = csTeamsEmails(thread.csAgent);
+  if (!recipients.length) {
+    await prisma.syncLog.create({
+      data: {
+        provider: 'teams', syncType: 'resolved_reply_alert', status: 'skipped',
+        message: `No CS owner on ticket ${thread.externalId}; nobody to DM.`,
+        metadata: { externalId: thread.externalId, messageId }
+      }
+    }).catch(() => null);
+    return null;
+  }
+
+  const ticketLabel = thread.displayNumber ? `#${String(thread.displayNumber).padStart(4, '0')}` : thread.externalId;
+  const ticketUrl = `${RESOLVED_ALERT_APP_URL}/?ticket=${encodeURIComponent(thread.externalId)}`;
+  const html = [
+    `<p><strong>Client replied on a resolved ticket ${escapeHtml(ticketLabel)}.</strong></p>`,
+    `<p>Subject: ${escapeHtml(message.subject || thread.subject || '(no subject)')}<br>`,
+    `From: ${escapeHtml(message.sender || '')}`,
+    thread.companyName ? `<br>Company: ${escapeHtml(thread.companyName)}` : '',
+    thread.assignedAgent ? `<br>Support: ${escapeHtml(thread.assignedAgent)}` : '',
+    `</p>`,
+    `<p>${escapeHtml(String(message.summary || '').slice(0, 400))}</p>`,
+    `<p><a href="${escapeHtml(ticketUrl)}">Open the Replies inbox</a></p>`
+  ].filter(Boolean).join('');
+
+  // Try each candidate address (override, then both mail domains) and stop at
+  // the first Teams account that actually resolves.
+  let lastError = null;
+  for (const recipient of recipients) {
+    try {
+      const sent = await graphSendTeamsDirectMessage(token, recipient, html);
+      await prisma.syncLog.create({
+        data: {
+          provider: 'teams', syncType: 'resolved_reply_alert', status: 'success',
+          message: `DM sent to ${recipient} for ticket ${thread.externalId}`,
+          metadata: { externalId: thread.externalId, messageId, recipient, chatId: sent?.chatId || null }
+        }
+      }).catch(() => null);
+      return { recipient, ...sent };
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  // Leave the failure on the record and let the id be retried on a later poll,
+  // otherwise a transient Graph error silently swallows the alert forever.
+  notifiedResolvedReplies.delete(messageId);
+  await prisma.syncLog.create({
+    data: {
+      provider: 'teams', syncType: 'resolved_reply_alert', status: 'error',
+      message: `DM failed for ticket ${thread.externalId}: ${lastError?.message || lastError}`,
+      metadata: { externalId: thread.externalId, messageId, tried: recipients }
+    }
+  }).catch(() => null);
+  console.warn(`Resolved-reply Teams DM failed for ${thread.externalId}:`, lastError?.message || lastError);
+  return null;
 }
 
 function mapMessage(msg) {
@@ -3446,7 +3652,17 @@ app.get('/api/tickets', requireAuth, async (req, res) => {
     include: { comments: { include: { user: true }, orderBy: { createdAt: 'asc' } }, events: { include: { user: true }, orderBy: { createdAt: 'asc' } } },
     orderBy: [{ updatedAt: 'desc' }, { createdAt: 'desc' }]
   });
-  res.json({ tickets });
+  // The board merges this straight into allTickets (mergeDatabaseTickets), so
+  // hidden-resolved rows have to be withheld here too or they come back on the
+  // next load. ?includeHidden=true is for reporting/audit callers that want the
+  // full table - the board never asks for it.
+  if (String(req.query.includeHidden || '').toLowerCase() === 'true') {
+    return res.json({ tickets });
+  }
+  const boardState = safeReadState();
+  const now = Date.now();
+  const visible = tickets.filter(row => !isTicketRowHidden(boardState, row, now));
+  res.json({ tickets: visible, hiddenResolved: tickets.length - visible.length });
 });
 app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
   try {
@@ -4393,8 +4609,44 @@ app.get('/api/state', requireAuth, async (req, res) => {
     res.json(safeReadState());
   }
 });
+// Current revision - the polling fallback for browsers where the SSE stream
+// cannot be established (proxies that buffer text/event-stream, mainly).
+app.get('/api/state/rev', requireAuth, (req, res) => {
+  res.json({ rev: stateRev });
+});
+
+// Live board sync. Emits the new revision after every save so other sessions
+// know to pull; carries originId so the session that made the change can
+// ignore its own echo instead of re-fetching its own work.
+app.get('/api/state/stream', requireAuth, (req, res) => {
+  res.set({
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache, no-transform',
+    Connection: 'keep-alive',
+    'X-Accel-Buffering': 'no'
+  });
+  if (typeof res.flushHeaders === 'function') res.flushHeaders();
+  res.write('retry: 3000\n\n');
+  res.write(`data: ${JSON.stringify({ type: 'hello', rev: stateRev })}\n\n`);
+  stateSubscribers.add(res);
+
+  // Idle SSE connections are dropped by proxies and by Node's own socket
+  // timeout; a comment frame every 25s keeps them open without waking clients.
+  const keepAlive = setInterval(() => {
+    try { res.write(': ping\n\n'); } catch (_) {}
+  }, 25000);
+
+  const cleanup = () => {
+    clearInterval(keepAlive);
+    stateSubscribers.delete(res);
+  };
+  req.on('close', cleanup);
+  req.on('error', cleanup);
+});
+
 app.post('/api/state', requireAuth, async (req, res) => {
   const state = req.body || {};
+  const originId = String(req.body?._meta?.originId || '');
   const result = await safeWriteState(state);
   let ticketDb = { count: 0 };
   try {
@@ -4406,6 +4658,15 @@ app.post('/api/state', requireAuth, async (req, res) => {
     }).catch(() => null);
   }
   const { state: _fullState, ...resultSummary } = result;
+  if (result.saved) {
+    broadcastStateRev({
+      type: 'state',
+      rev: result.rev,
+      originId,
+      by: req.session?.username || '',
+      savedAt: Date.now()
+    });
+  }
   res.json({ ok: !!result.saved, ...resultSummary, ticketDb });
 });
 
@@ -4905,7 +5166,42 @@ app.post('/api/mcp-proxy', requireAuth, async (req, res) => {
       const orderBy = '$orderby=receivedDateTime desc';
       const filter = args?.afterDateTime ? `&$filter=receivedDateTime ge ${new Date(args.afterDateTime).toISOString()}` : '';
       const data = await graphGet(`/users/${encodeURIComponent(mailbox)}/messages?$top=${top}&${select}&${orderBy}${filter}`, token);
-      return res.json({ isError: false, structuredContent: (data.value || []).map(mapMessage) });
+      const messages = (data.value || []).map(mapMessage);
+
+      // Tag replies that landed on a ticket which is hidden from the board, so
+      // the client routes them to the Replies inbox instead of creating a new
+      // ticket, and DM the CS owner on Teams.
+      let index = { byConversation: new Map(), bySubject: new Map() };
+      try {
+        index = await getHiddenResolvedThreadIndex();
+      } catch (error) {
+        console.warn('Hidden-resolved thread index failed:', error?.message || error);
+      }
+      if (index.byConversation.size || index.bySubject.size) {
+        const internalDomain = SUPPORT_MAILBOX.split('@')[1] || '';
+        for (const message of messages) {
+          const thread = matchHiddenThread(index, message);
+          if (!thread) continue;
+          // The hidden ticket's own originating email is on the same thread -
+          // that is the ticket, not a reply to it.
+          if (String(message.id) === String(thread.externalId)) continue;
+          // Our own outbound mail on the thread is not a client reply.
+          const senderDomain = String(message.sender || '').split('@')[1] || '';
+          if (internalDomain && senderDomain === internalDomain) continue;
+
+          message.resolvedReplyFor = thread.externalId;
+          message.resolvedReplyCs = thread.csAgent || null;
+          message.resolvedReplySupport = thread.assignedAgent || null;
+          message.resolvedReplyTicketNumber = thread.displayNumber || null;
+          message.resolvedReplySubject = thread.subject || '';
+          message.resolvedReplyCompany = thread.companyName || null;
+
+          // Not awaited: a poll must not block on Teams chat creation. Failures
+          // land in SyncLog and the message id is released for a later retry.
+          notifyCsOfResolvedReply({ token, message, thread }).catch(() => null);
+        }
+      }
+      return res.json({ isError: false, structuredContent: messages });
     }
 
     if (tool.includes('read_resource')) {

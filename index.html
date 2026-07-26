@@ -2040,6 +2040,16 @@ textarea:focus {
   display: flex;
 }
 
+#replies-view {
+  display: none;
+  flex-direction: column;
+  min-height: calc(100vh - 175px);
+}
+
+#replies-view.active {
+  display: flex;
+}
+
 .spam-view-header {
   padding: 16px 24px 12px;
   display: flex;
@@ -2746,6 +2756,7 @@ th {
         </div>
         <button class="crm-nav-btn" id="spam-view-btn"> Spam Inbox <span class="spam-count-badge" id="spam-count" style="display:none">0</span></button>
         <button class="crm-nav-btn" id="archive-view-btn"> Archive Inbox <span class="spam-count-badge" id="archive-count" style="display:none">0</span></button>
+        <button class="crm-nav-btn" id="replies-view-btn"> Replies <span class="spam-count-badge" id="replies-count" style="display:none">0</span></button>
         <button class="crm-nav-btn" id="companies-view-btn"> Companies</button>
         <button class="crm-nav-btn" id="dashboard-view-btn"> Data Hygiene</button>
       </div>
@@ -2816,6 +2827,15 @@ th {
     </div>
   </div>
   <div class="spam-list" id="archive-list"></div>
+</div>
+<div id="replies-view">
+  <div class="spam-view-header">
+    <div class="spam-view-title" style="color:#475569;"> Replies on Resolved Tickets <span id="replies-view-count" style="font-size:14px;font-weight:400;color:#94a3b8;"></span></div>
+    <div class="spam-view-actions">
+      <button class="btn-back" id="btn-back-board-replies"> Back to Board</button>
+    </div>
+  </div>
+  <div class="spam-list" id="replies-list"></div>
 </div>
 <div id="companies-view" style="display:none;min-height:calc(100dvh - 175px);padding:var(--content-pad);">
   <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px;">
@@ -3373,6 +3393,11 @@ let ticketStageTouchedAt={}; // ticketId -> last stage-change timestamp (ms)
 let ticketHasNewReply={}; // ticketId -> true while an unread reply is glowing on the card
 let ticketResolutionMeta={}; // ticketId -> CS confirmation / send-back metadata
 let ticketArchived={}; // ticketId -> {archivedAt,archivedBy,reason:'manual'|'resolved_confirmed'}
+// Client replies that arrived on a ticket already hidden from the board. Keyed
+// by the reply's Outlook message id. The server tags these (resolvedReplyFor)
+// because the hidden ticket is no longer in allTickets for the client to thread
+// against. Shown in the Replies inbox to CS and Support both; CS is DM'd.
+let resolvedReplies={}; // messageId -> {forTicketId,subject,sender,summary,receivedDateTime,uri,webLink,csAgent,supportAgent,ticketNumber,company,readAt}
 function isArchivedTicket(id){return !!ticketArchived[id];}
 let spamSenders=new Set();
 let hsCache={},domainCompanyCache={},readMentions=new Set(),readJiraAlerts=new Set();
@@ -3503,6 +3528,15 @@ let _saveTimer=null;
 let stateVersion=0;
 let saveQueue=Promise.resolve();
 let latestPayloadForRetry=null;
+// Identifies this tab so the live-sync stream can tell our own saves apart from
+// another agent's and skip re-fetching state we already have in memory.
+const CLIENT_ID=(()=>{try{return crypto.randomUUID();}catch(_){return 'c'+Date.now()+Math.random().toString(16).slice(2);}})();
+let pendingSaveCount=0;
+// Set while a live-sync pull is being applied. loadState() ends in
+// normalizeLegacyAssignmentModes(), which saves when it rewrites a legacy
+// assignment - on a live refresh that save would broadcast straight back out to
+// every other board, so the writer that already normalized it owns that save.
+let applyingRemoteState=false;
 async function apiGetState(){
   try{
     const res=await fetch('/api/state',{credentials:'include'});
@@ -3563,9 +3597,9 @@ function buildStatePayload(reason){
   const snapshot={
     allTickets,
     seenIds:Object.keys(seen),
-    ticketState,ticketStageTouchedAt,ticketHasNewReply,ticketResolutionMeta,ticketArchived,ticketPriority,ticketCategory,ticketSubtype,ticketAssignee,ticketAssignmentMode,manualSupportOverride,ticketCSOwner,ticketComments,ticketClientEmail,ticketCreatedAt,ticketNumbers,ticketNumberCounter,ticketJira,ticketHubspotId,
+    ticketState,ticketStageTouchedAt,ticketHasNewReply,ticketResolutionMeta,ticketArchived,resolvedReplies,ticketPriority,ticketCategory,ticketSubtype,ticketAssignee,ticketAssignmentMode,manualSupportOverride,ticketCSOwner,ticketComments,ticketClientEmail,ticketCreatedAt,ticketNumbers,ticketNumberCounter,ticketJira,ticketHubspotId,
     spamSenders:[...spamSenders],hsCache,domainCompanyCache,readMentions:[...readMentions],jiraAlerts,readJiraAlerts:[...readJiraAlerts],jiraStatusSnapshot,companyCustomProps,companyProfiles,companiesViewType,companyNetworkCache,companyFilters,coOwnerMappings,actionHistory,
-    _meta:{clientSavedAt:now,clientVersion:stateVersion}
+    _meta:{clientSavedAt:now,clientVersion:stateVersion,originId:CLIENT_ID}
   };
   latestPayloadForRetry=JSON.parse(JSON.stringify(snapshot));
   return latestPayloadForRetry;
@@ -3579,7 +3613,11 @@ function flushStateWithBeacon(){
 }
 function saveState(reason){
   const payload=buildStatePayload(reason);
-  saveQueue=saveQueue.then(()=>apiSaveState(payload)).catch(()=>false);
+  // Counted so applyRemoteState() can hold off while our own change is still in
+  // flight - pulling server state mid-save would render the pre-move columns
+  // back over the move the user just made.
+  pendingSaveCount++;
+  saveQueue=saveQueue.then(()=>apiSaveState(payload)).catch(()=>false).then((ok)=>{pendingSaveCount=Math.max(0,pendingSaveCount-1);return ok;});
   const ind=document.getElementById('save-indicator');
   if(ind){ind.style.opacity='1';clearTimeout(_saveTimer);_saveTimer=setTimeout(()=>{ind.style.opacity='0';},2500);}
   return saveQueue;
@@ -3805,6 +3843,7 @@ async function loadState(){
   if(s.ticketHasNewReply&&typeof s.ticketHasNewReply==='object')Object.assign(ticketHasNewReply,s.ticketHasNewReply);
   if(s.ticketResolutionMeta&&typeof s.ticketResolutionMeta==='object')Object.assign(ticketResolutionMeta,s.ticketResolutionMeta);
   if(s.ticketArchived&&typeof s.ticketArchived==='object')Object.assign(ticketArchived,s.ticketArchived);
+  if(s.resolvedReplies&&typeof s.resolvedReplies==='object')Object.assign(resolvedReplies,s.resolvedReplies);
   if(s.ticketPriority)Object.assign(ticketPriority,s.ticketPriority);
   if(s.ticketCategory)Object.assign(ticketCategory,s.ticketCategory);if(s.ticketSubtype)Object.assign(ticketSubtype,s.ticketSubtype);
   if(s.ticketAssignee)Object.assign(ticketAssignee,s.ticketAssignee);
@@ -3838,11 +3877,116 @@ async function loadState(){
   normalizeStoredJiraLinks();
   normalizeLegacyAssignmentModes();
 }
-function normalizeLegacyAssignmentModes(){let changed=false;allTickets.forEach(t=>{const id=t.id;if(ticketCategory[id]==='Spam')return;const assignee=normalizeAgentCode(ticketAssignee[id]||'');if(CS_AGENTS.includes(assignee)){if(!ticketCSOwner[id])ticketCSOwner[id]=assignee;ticketAssignee[id]=leastLoadedSupportAgent();ticketAssignmentMode[id]='support';manualSupportOverride[id]=false;changed=true;}else if(SUPPORT_AGENTS.includes(assignee)&&ticketAssignmentMode[id]!=='support'){ticketAssignmentMode[id]='support';changed=true;}if(isSupportAssignedTicket(id)&&!ticketCSOwner[id]){const cs=resolveDefaultCSForTicket(id,t.email);if(cs){ticketCSOwner[id]=cs;changed=true;}}});if(changed)saveState('normalize_legacy_assignment_modes');}
+function normalizeLegacyAssignmentModes(){let changed=false;allTickets.forEach(t=>{const id=t.id;if(ticketCategory[id]==='Spam')return;const assignee=normalizeAgentCode(ticketAssignee[id]||'');if(CS_AGENTS.includes(assignee)){if(!ticketCSOwner[id])ticketCSOwner[id]=assignee;ticketAssignee[id]=leastLoadedSupportAgent();ticketAssignmentMode[id]='support';manualSupportOverride[id]=false;changed=true;}else if(SUPPORT_AGENTS.includes(assignee)&&ticketAssignmentMode[id]!=='support'){ticketAssignmentMode[id]='support';changed=true;}if(isSupportAssignedTicket(id)&&!ticketCSOwner[id]){const cs=resolveDefaultCSForTicket(id,t.email);if(cs){ticketCSOwner[id]=cs;changed=true;}}});if(changed&&!applyingRemoteState)saveState('normalize_legacy_assignment_modes');}
 function saveReads(){saveState();}
 function saveHsCache(){saveState();}
 window.addEventListener('pagehide',flushStateWithBeacon);
 document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='hidden')flushStateWithBeacon();});
+
+//  Live board sync
+// Every save bumps a revision on the server, which pushes it to all other open
+// boards over SSE. On a revision we didn't produce we pull the state and
+// re-render, so one agent moving a ticket shows up on every other agent's board
+// (and on every admin's) in about a second instead of waiting for a reload.
+let lastAppliedRev=0;
+let liveSyncRunning=false;
+let liveSyncTimer=null;
+let liveSyncSource=null;
+let liveSyncPollTimer=null;
+let liveSyncLastActor='';
+
+// Only the shared, server-owned ticket data - so we re-render on a real change
+// and stay quiet on the many saves that don't touch the board (mailbox polls,
+// cache writes, read-receipts).
+function boardSyncFingerprint(){
+  return JSON.stringify([
+    allTickets.length,
+    ticketState,ticketAssignee,ticketCSOwner,ticketPriority,ticketCategory,ticketSubtype,
+    ticketArchived,ticketResolutionMeta,ticketHasNewReply,ticketJira,resolvedReplies,
+    Object.fromEntries(Object.entries(ticketComments).map(([k,v])=>[k,Array.isArray(v)?v.length:0]))
+  ]);
+}
+
+// Never yank the UI out from under someone mid-interaction: a drag would drop
+// onto a re-rendered column, and an open modal or half-typed comment would lose
+// its contents to the re-render. Defer instead.
+function isBoardBusy(){
+  if(document.querySelector('.card.dragging'))return true;
+  if(document.querySelector('.modal-bg.open'))return true;
+  return false;
+}
+
+function scheduleLiveSync(delay){
+  clearTimeout(liveSyncTimer);
+  liveSyncTimer=setTimeout(()=>{applyRemoteState();},Math.max(0,Number(delay)||0));
+}
+
+async function applyRemoteState(){
+  if(liveSyncRunning)return;
+  liveSyncRunning=true;
+  try{
+    // Let our own writes land first - pulling mid-save would paint the pre-move
+    // columns back over the move the user just made.
+    if(pendingSaveCount>0){await saveQueue.catch(()=>null);}
+    if(isBoardBusy()){scheduleLiveSync(1500);return;}
+    const before=boardSyncFingerprint();
+    applyingRemoteState=true;
+    try{await loadState();}finally{applyingRemoteState=false;}
+    if(boardSyncFingerprint()===before)return;
+    renderActiveView();
+    try{updateSpamBadge();updateArchiveBadge();updateRepliesBadge();updateMentionsBadge();refreshSLABadges();}catch(_){}
+    showToast(liveSyncLastActor?('Board updated by '+liveSyncLastActor):'Board updated');
+  }catch(_){}
+  finally{liveSyncRunning=false;}
+}
+
+function onRemoteRev(msg){
+  const rev=Number(msg?.rev||0);
+  if(!rev)return;
+  // Our own save echoing back - we already have this state in memory.
+  if(msg.originId&&msg.originId===CLIENT_ID){lastAppliedRev=Math.max(lastAppliedRev,rev);return;}
+  if(rev<=lastAppliedRev)return;
+  lastAppliedRev=rev;
+  liveSyncLastActor=String(msg.by||'');
+  scheduleLiveSync(250);
+}
+
+function startLiveSyncPolling(){
+  if(liveSyncPollTimer)return;
+  // Also the self-healing path: if an SSE frame is ever missed, this picks the
+  // revision gap up on the next tick.
+  liveSyncPollTimer=setInterval(async()=>{
+    if(document.visibilityState==='hidden')return;
+    try{
+      const res=await fetch('/api/state/rev',{credentials:'include'});
+      if(!res.ok)return;
+      const out=await res.json();
+      onRemoteRev({type:'poll',rev:Number(out?.rev||0)});
+    }catch(_){}
+  },20000);
+}
+
+function startLiveSync(){
+  if(typeof EventSource!=='undefined'&&!liveSyncSource){
+    try{
+      liveSyncSource=new EventSource('/api/state/stream',{withCredentials:true});
+      liveSyncSource.addEventListener('message',(ev)=>{
+        let msg=null;
+        try{msg=JSON.parse(ev.data);}catch(_){return;}
+        // The opening frame is just the current revision - adopt it as our
+        // baseline so we don't re-fetch the state we loaded a moment ago.
+        if(msg&&msg.type==='hello'){lastAppliedRev=Math.max(lastAppliedRev,Number(msg.rev||0));return;}
+        onRemoteRev(msg);
+      });
+      // EventSource reconnects on its own (the server sends retry: 3000); the
+      // poll below covers the gap and any proxy that kills event streams.
+    }catch(_){}
+  }
+  startLiveSyncPolling();
+  document.addEventListener('visibilitychange',()=>{
+    if(document.visibilityState==='visible')scheduleLiveSync(150);
+  });
+}
 
 //  SLA 
 function fmtDuration(ms){const h=Math.floor(ms/3600000);const m=Math.floor((ms%3600000)/60000);if(h>=24){const d=Math.floor(h/24);const rh=h%24;return rh?`${d}d ${rh}h`:`${d}d`;}if(h>0)return m?`${h}h ${m}m`:`${h}h`;return Math.max(0,m)+'m';}
@@ -3856,10 +4000,69 @@ function getSpamTickets(){return allTickets.filter(t=>ticketCategory[t.id]==='Sp
 function updateSpamBadge(){const cnt=getSpamTickets().length;const badge=document.getElementById('spam-count');const btn=document.getElementById('spam-view-btn');if(cnt>0){badge.textContent=cnt>99?'99+':cnt;badge.style.display='inline-flex';}else{badge.style.display='none';}(cnt>0&&!btn.classList.contains('active'))&&(btn.style.fontWeight='700');}
 function getArchivedTickets(){return allTickets.filter(t=>isArchivedTicket(t.id)&&ticketVisibleToCurrentUser(t)).sort((a,b)=>(ticketArchived[b.id]?.archivedAt||0)-(ticketArchived[a.id]?.archivedAt||0));}
 function updateArchiveBadge(){const cnt=getArchivedTickets().length;const badge=document.getElementById('archive-count');const btn=document.getElementById('archive-view-btn');if(!badge||!btn)return;if(cnt>0){badge.textContent=cnt>99?'99+':cnt;badge.style.display='inline-flex';}else{badge.style.display='none';}}
+// Visible to CS and Support alike - a reply on a closed ticket concerns both -
+// so unlike the board there is no per-agent visibility filter here. Viewers
+// still only ever see what the board itself would show them.
+function getResolvedReplies(){
+  return Object.entries(resolvedReplies)
+    .map(([id,r])=>({id,...(r||{})}))
+    .filter(r=>r&&r.forTicketId)
+    .sort((a,b)=>new Date(b.receivedDateTime||0)-new Date(a.receivedDateTime||0));
+}
+function getUnreadResolvedReplies(){return getResolvedReplies().filter(r=>!r.readAt);}
+function updateRepliesBadge(){
+  const cnt=getUnreadResolvedReplies().length;
+  const badge=document.getElementById('replies-count');
+  const btn=document.getElementById('replies-view-btn');
+  if(!badge||!btn)return;
+  if(cnt>0){badge.textContent=cnt>99?'99+':cnt;badge.style.display='inline-flex';}
+  else{badge.style.display='none';}
+}
+function renderRepliesView(){
+  const rows=getResolvedReplies();
+  const listEl=document.getElementById('replies-list');
+  if(!listEl)return;
+  document.getElementById('replies-view-count').textContent=`(${rows.length} repl${rows.length!==1?'ies':'y'})`;
+  if(!rows.length){
+    listEl.innerHTML='<div class="spam-empty"><div style="font-size:16px;font-weight:700;color:#374151;margin-bottom:6px;">No replies on resolved tickets</div><div style="font-size:13px;color:#94a3b8;">When a client writes back about a ticket that was already resolved, it lands here instead of reopening the board.</div></div>';
+    return;
+  }
+  listEl.innerHTML='';
+  rows.forEach(r=>{
+    const ticketLabel=r.ticketNumber?('#'+String(r.ticketNumber).padStart(4,'0')):r.forTicketId;
+    const row=document.createElement('div');
+    row.className='spam-row';
+    row.style.opacity=r.readAt?'0.6':'1';
+    row.innerHTML=`<div class="spam-row-info"><div class="spam-row-subject">${esc(r.subject||'(no subject)')}${r.readAt?'':' <span style="color:#dc2626;font-size:11px;font-weight:700;">NEW</span>'}</div><div class="spam-row-meta"><span class="spam-sender-chip"> ${esc(senderName(r.sender||''))}</span>${r.company?`<span class="spam-company-chip"> ${esc(r.company)}</span>`:''}<span class="spam-company-chip">resolved ${esc(ticketLabel)}</span>${r.csAgent?`<span class="spam-company-chip">CS ${esc(r.csAgent)}</span>`:''}${r.supportAgent?`<span class="spam-company-chip">Support ${esc(r.supportAgent)}</span>`:''}<span class="spam-date">${fmtDate(r.receivedDateTime)}</span></div><div class="spam-row-meta" style="color:#64748b;">${esc(String(r.summary||'').slice(0,180))}</div></div><div class="spam-row-actions">${r.webLink?`<button class="btn-out" data-reply-outlook="${esc(r.id)}" style="font-size:11px;">Open in Outlook</button>`:''}<button class="btn-out" data-reply-read="${esc(r.id)}" style="font-size:11px;">${r.readAt?'Mark unread':'Mark read'}</button><button class="btn-restore" data-reply-reopen="${esc(r.id)}">Reopen ticket</button></div>`;
+    row.querySelector(`[data-reply-outlook="${r.id}"]`)?.addEventListener('click',()=>{window.open(r.webLink,'_blank','noopener');});
+    row.querySelector(`[data-reply-read="${r.id}"]`)?.addEventListener('click',()=>{
+      resolvedReplies[r.id].readAt=r.readAt?null:Date.now();
+      saveState('resolved_reply_read_toggle');renderRepliesView();updateRepliesBadge();
+    });
+    // Puts the original ticket back on the board: clears the confirmation that
+    // hid it, so the server stops pruning it and the next load brings it back.
+    row.querySelector(`[data-reply-reopen="${r.id}"]`)?.addEventListener('click',async()=>{
+      const id=r.forTicketId;
+      if(!confirm('Reopen the resolved ticket for this reply?'))return;
+      if(ticketResolutionMeta[id])delete ticketResolutionMeta[id].confirmedAt;
+      ticketArchived[id]=null;
+      ticketState[id]='wus';
+      ticketStageTouchedAt[id]=Date.now();
+      ticketHasNewReply[id]=true;
+      resolvedReplies[r.id].readAt=Date.now();
+      await saveState('resolved_reply_reopen_ticket');
+      showToast('Ticket reopened into Waiting on Us','ok');
+      renderRepliesView();updateRepliesBadge();
+    });
+    listEl.appendChild(row);
+  });
+}
+function showRepliesView(){viewMode='replies';setBoardChromeVisible(true);hidePrimaryViews();document.getElementById('replies-view').classList.add('active');setSideNavActive('replies');saveLastWorkspaceSession('replies');renderRepliesView();}
 function setSideNavActive(mode){
   document.getElementById('board-view-btn')?.classList.toggle('active',mode==='board'||mode==='kpi');
   document.getElementById('spam-view-btn')?.classList.toggle('active',mode==='spam');
   document.getElementById('archive-view-btn')?.classList.toggle('active',mode==='archive');
+  document.getElementById('replies-view-btn')?.classList.toggle('active',mode==='replies');
   document.getElementById('companies-view-btn')?.classList.toggle('active',mode==='companies');
   document.getElementById('dashboard-view-btn')?.classList.toggle('active',mode==='dashboard');
   document.getElementById('ticket-kpi-view-btn')?.classList.toggle('active',mode==='kpi');
@@ -3914,6 +4117,7 @@ function restoreLastWorkspaceSession(){
   if(typeof session?.kpiAgentFilter==='string')kpiAgentFilter=session.kpiAgentFilter;
   applyRestoredWorkspaceControls();
   if(mode==='spam')return showSpamView();
+  if(mode==='replies')return showRepliesView();
   if(mode==='companies')return showCompaniesView();
   if(mode==='dashboard')return showDashboardView();
   if(mode==='kpi')return showKpiView();
@@ -4363,14 +4567,14 @@ document.getElementById('ct-submit').addEventListener('click',async()=>{
 });
 
 //  View switching 
-function hidePrimaryViews(){document.getElementById('main-board').style.display='none';document.getElementById('spam-view').classList.remove('active');document.getElementById('archive-view').classList.remove('active');document.getElementById('companies-view').style.display='none';document.getElementById('kpi-view').style.display='none';document.getElementById('qt-seize-view').style.display='none';}
+function hidePrimaryViews(){document.getElementById('main-board').style.display='none';document.getElementById('spam-view').classList.remove('active');document.getElementById('archive-view').classList.remove('active');document.getElementById('replies-view').classList.remove('active');document.getElementById('companies-view').style.display='none';document.getElementById('kpi-view').style.display='none';document.getElementById('qt-seize-view').style.display='none';}
 function showBoardView(){viewMode='board';setBoardChromeVisible(true);hidePrimaryViews();document.getElementById('main-board').style.display='flex';setSideNavActive('board');saveLastWorkspaceSession('board');renderBoard();}
 function showSpamView(){viewMode='spam';setBoardChromeVisible(true);hidePrimaryViews();document.getElementById('spam-view').classList.add('active');setSideNavActive('spam');saveLastWorkspaceSession('spam');renderSpamView();}
 function showArchiveView(){viewMode='archive';setBoardChromeVisible(true);hidePrimaryViews();document.getElementById('archive-view').classList.add('active');setSideNavActive('archive');saveLastWorkspaceSession('archive');renderArchiveView();}
 function showDashboardView(){companiesViewType='report';viewMode='companies';setBoardChromeVisible(true);hidePrimaryViews();document.getElementById('companies-view').style.display='block';setSideNavActive('dashboard');saveLastWorkspaceSession('dashboard');renderCompaniesView();}
 function showKpiView(){viewMode='kpi';setBoardChromeVisible(true);hidePrimaryViews();document.getElementById('kpi-view').style.display='block';setSideNavActive('kpi');saveLastWorkspaceSession('kpi');renderKpiView();}
 function showQtSeizeView(){viewMode='qtSeize';setBoardChromeVisible(false);hidePrimaryViews();const frame=document.getElementById('qt-seize-frame');if(frame&&!frame.src)frame.src='/qt-seize/';document.getElementById('qt-seize-view').style.display='block';setSideNavActive('qtSeize');saveLastWorkspaceSession('qtSeize');}
-function renderActiveView(){if(viewMode==='board')renderBoard();else if(viewMode==='spam')renderSpamView();else if(viewMode==='archive')renderArchiveView();else if(viewMode==='kpi')renderKpiView();else if(viewMode==='qtSeize')return;else renderCompaniesView();}
+function renderActiveView(){if(viewMode==='board')renderBoard();else if(viewMode==='spam')renderSpamView();else if(viewMode==='archive')renderArchiveView();else if(viewMode==='replies')renderRepliesView();else if(viewMode==='kpi')renderKpiView();else if(viewMode==='qtSeize')return;else renderCompaniesView();}
 function ticketTimestampMs(t){
   const id=t?.id;
   const raw=t?.email?.receivedDateTime||ticketCreatedAt[id]||null;
@@ -4855,6 +5059,8 @@ document.getElementById('btn-back-board').addEventListener('click',showBoardView
 document.getElementById('spam-view-btn').addEventListener('click',()=>{if(viewMode==='spam')showBoardView();else showSpamView();});
 document.getElementById('btn-back-board-archive').addEventListener('click',showBoardView);
 document.getElementById('archive-view-btn').addEventListener('click',()=>{if(viewMode==='archive')showBoardView();else showArchiveView();});
+document.getElementById('btn-back-board-replies').addEventListener('click',showBoardView);
+document.getElementById('replies-view-btn').addEventListener('click',()=>{if(viewMode==='replies')showBoardView();else showRepliesView();});
 document.getElementById('companies-view-btn').addEventListener('click',()=>{if(viewMode==='companies'&&companiesViewType==='report'){companiesViewType='table';saveState('companies_view_type_change_sidebar');showCompaniesView();return;}if(viewMode==='companies')showBoardView();else showCompaniesView();});
 document.getElementById('board-view-btn').addEventListener('click',showBoardView);
 document.getElementById('dashboard-view-btn').addEventListener('click',()=>{if(viewMode==='companies'&&companiesViewType==='report')showBoardView();else showDashboardView();});
@@ -5634,7 +5840,7 @@ function renderBoard(){
     else tickets.forEach(t=>el.appendChild(makeCard(t)));
     document.getElementById('badge-'+col).textContent=tickets.length;
   });
-  updateWorkload();updateSpamBadge();updateArchiveBadge();updateJiraBadge();
+  updateWorkload();updateSpamBadge();updateArchiveBadge();updateRepliesBadge();updateJiraBadge();
 }
 
 document.getElementById('sort-desc').addEventListener('click',()=>{sortDesc=true;document.getElementById('sort-desc').classList.add('active');document.getElementById('sort-asc').classList.remove('active');saveLastWorkspaceSession();renderBoard();});
@@ -5918,8 +6124,19 @@ function addTickets(emails){
   // duplicate tickets with identical createdAt and the reply's id lower
   // than the original's, i.e. the reply was inserted first).
   const ordered=[...emails].sort((a,b)=>new Date(a?.receivedDateTime||0)-new Date(b?.receivedDateTime||0));
-  let n=0;let merged=0;ordered.filter(e=>e.id&&!seen[e.id]&&!isAutomatic(e)).forEach(e=>{seen[e.id]=true;ensureTicketNumber(e.id);const subtype=classifySubtype(e);const existingTicket=findExistingTicketForEmail(e);if(existingTicket){if(mergeEmailIntoExistingTicket(existingTicket,e,subtype))merged++;return;}const st=SUBTYPE_BY_ID[subtype]||null;const t={id:e.id,email:e,priority:st?.priority||classifyPriority(e)};const ce=getClientEmail(e);if(ce)ticketClientEmail[e.id]=ce;const csFromSender=csAgentFromSenderEmail(e.sender);if(csFromSender&&!ticketCSOwner[e.id])ticketCSOwner[e.id]=csFromSender;if(!ticketCreatedAt[e.id])ticketCreatedAt[e.id]=e.receivedDateTime||new Date().toISOString();if(!ticketState[e.id])ticketState[e.id]='new';else ticketState[e.id]=normalizeTicketStage(ticketState[e.id]);const effectiveEmail=ce||e.sender?.toLowerCase();if(effectiveEmail&&spamSenders.has(effectiveEmail)){ticketCategory[e.id]='Spam';}else if(!ticketCategory[e.id]){ticketCategory[e.id]=st?.type||classifyCategory(e);}if(!ticketSubtype[e.id]&&st)ticketSubtype[e.id]=st.id;if(st)ticketPriority[e.id]=st.priority;if(!ticketAssignee[e.id]&&ticketCategory[e.id]!=='Spam'){ensureSupportAssignmentForTicket(e.id,e);}allTickets.push(t);n++;});if(n>0||merged>0){allTickets.sort((a,b)=>new Date(b?.email?.receivedDateTime||0)-new Date(a?.email?.receivedDateTime||0));applyCompanyCSAssignments();syncUnsyncedTicketsToHubspot();}return{created:n,merged};}
-async function poll(){if(!hasCowork){startCountdown();return;}const res=await fetchMailboxWindow(buildPollAfterDateTime());const outcome=addTickets(extractEmails(res));document.getElementById('last-poll').textContent='Checked: '+new Date().toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'});if(outcome.created>0||outcome.merged>0){saveState(outcome.merged>0?'mailbox_poll_thread_merge':'mailbox_poll_new_messages');const parts=[];if(outcome.merged>0)parts.push('New message'+(outcome.merged>1?'s':''));if(outcome.created>0)parts.push(`${outcome.created} new ticket${outcome.created>1?'s':''}`);if(outcome.merged>0)parts.push(`${outcome.merged} reply${outcome.merged>1?'ies':'y'} merged into existing ticket${outcome.merged>1?'s':''}`);showToast(parts.join('  '));renderActiveView();enrichWithHubSpot();}
+  let n=0;let merged=0;let replies=0;ordered.filter(e=>e.id&&!seen[e.id]&&!isAutomatic(e)).forEach(e=>{seen[e.id]=true;
+  // A reply on a ticket that is hidden from the board: record it in the Replies
+  // inbox rather than opening a new ticket for an issue already closed out. The
+  // server tagged it and has already DM'd the CS owner.
+  if(e.resolvedReplyFor){
+    if(!resolvedReplies[e.id]){
+      resolvedReplies[e.id]={forTicketId:e.resolvedReplyFor,subject:e.subject||e.resolvedReplySubject||'',sender:e.sender||'',summary:e.summary||'',receivedDateTime:e.receivedDateTime||new Date().toISOString(),uri:e.uri||null,webLink:e.webLink||null,csAgent:e.resolvedReplyCs||null,supportAgent:e.resolvedReplySupport||null,ticketNumber:e.resolvedReplyTicketNumber||null,company:e.resolvedReplyCompany||null,readAt:null};
+      replies++;
+    }
+    return;
+  }
+  ensureTicketNumber(e.id);const subtype=classifySubtype(e);const existingTicket=findExistingTicketForEmail(e);if(existingTicket){if(mergeEmailIntoExistingTicket(existingTicket,e,subtype))merged++;return;}const st=SUBTYPE_BY_ID[subtype]||null;const t={id:e.id,email:e,priority:st?.priority||classifyPriority(e)};const ce=getClientEmail(e);if(ce)ticketClientEmail[e.id]=ce;const csFromSender=csAgentFromSenderEmail(e.sender);if(csFromSender&&!ticketCSOwner[e.id])ticketCSOwner[e.id]=csFromSender;if(!ticketCreatedAt[e.id])ticketCreatedAt[e.id]=e.receivedDateTime||new Date().toISOString();if(!ticketState[e.id])ticketState[e.id]='new';else ticketState[e.id]=normalizeTicketStage(ticketState[e.id]);const effectiveEmail=ce||e.sender?.toLowerCase();if(effectiveEmail&&spamSenders.has(effectiveEmail)){ticketCategory[e.id]='Spam';}else if(!ticketCategory[e.id]){ticketCategory[e.id]=st?.type||classifyCategory(e);}if(!ticketSubtype[e.id]&&st)ticketSubtype[e.id]=st.id;if(st)ticketPriority[e.id]=st.priority;if(!ticketAssignee[e.id]&&ticketCategory[e.id]!=='Spam'){ensureSupportAssignmentForTicket(e.id,e);}allTickets.push(t);n++;});if(n>0||merged>0){allTickets.sort((a,b)=>new Date(b?.email?.receivedDateTime||0)-new Date(a?.email?.receivedDateTime||0));applyCompanyCSAssignments();syncUnsyncedTicketsToHubspot();}if(replies>0)updateRepliesBadge();return{created:n,merged,replies};}
+async function poll(){if(!hasCowork){startCountdown();return;}const res=await fetchMailboxWindow(buildPollAfterDateTime());const outcome=addTickets(extractEmails(res));document.getElementById('last-poll').textContent='Checked: '+new Date().toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'});if(outcome.created>0||outcome.merged>0||outcome.replies>0){saveState(outcome.replies>0&&!outcome.created&&!outcome.merged?'mailbox_poll_resolved_replies':(outcome.merged>0?'mailbox_poll_thread_merge':'mailbox_poll_new_messages'));const parts=[];if(outcome.replies>0)parts.push(`${outcome.replies} repl${outcome.replies>1?'ies':'y'} on resolved ticket${outcome.replies>1?'s':''}`);if(outcome.merged>0)parts.push('New message'+(outcome.merged>1?'s':''));if(outcome.created>0)parts.push(`${outcome.created} new ticket${outcome.created>1?'s':''}`);if(outcome.merged>0)parts.push(`${outcome.merged} reply${outcome.merged>1?'ies':'y'} merged into existing ticket${outcome.merged>1?'s':''}`);showToast(parts.join('  '));renderActiveView();enrichWithHubSpot();}
   // Retry here too (not just at initial load) - a deep link clicked into an
   // already-open tab, or for a ticket not yet synced at bootstrap, would
   // otherwise never resolve since the three init-time calls only run once.
@@ -5938,7 +6155,7 @@ async function poll(){if(!hasCowork){startCountdown();return;}const res=await fe
   if(allTickets.length){
     applyCompanyCSAssignments();
     autoAssignNew(allTickets);
-    updateCompanyFilter();restoreLastWorkspaceSession();updateSpamBadge();updateArchiveBadge();updateJiraBadge();handleTicketDeepLink();
+    updateCompanyFilter();restoreLastWorkspaceSession();updateSpamBadge();updateArchiveBadge();updateRepliesBadge();updateJiraBadge();handleTicketDeepLink();
     await refreshLinkedJiraIssues(true);
     syncUnsyncedTicketsToHubspot();
   }
@@ -5952,11 +6169,12 @@ async function poll(){if(!hasCowork){startCountdown();return;}const res=await fe
       document.getElementById('fstats').textContent='Mailbox sync error: '+(recentRes?.error||'unknown');
     }
     document.getElementById('meta').textContent='Secure web mode active (manual tickets + board workflow available)';
-    updateCompanyFilter();restoreLastWorkspaceSession();updateSpamBadge();updateArchiveBadge();updateJiraBadge();handleTicketDeepLink();
+    updateCompanyFilter();restoreLastWorkspaceSession();updateSpamBadge();updateArchiveBadge();updateRepliesBadge();updateJiraBadge();handleTicketDeepLink();
     await refreshLinkedJiraIssues(true);
     requestNotificationPermission();
     notifySnapshot=snapshotForNotify({ticketAssignee,ticketState,ticketComments,jiraAlerts,allTickets,ticketCSOwner});
     setInterval(checkForBrowserNotifications,30000);
+    startLiveSync();
     setInterval(refreshSLABadges,60000);
     setInterval(()=>refreshLinkedJiraIssues(true),JIRA_REFRESH_MS);
     window.addEventListener('focus',()=>{void refreshLinkedJiraIssues(true);});
@@ -5973,12 +6191,13 @@ async function poll(){if(!hasCowork){startCountdown();return;}const res=await fe
   const newest=nonSpam[0]?.email?.receivedDateTime;
   document.getElementById('fstats').textContent=`${nonSpam.length} tickets  most recent: ${newest?fmtDate(newest):''}`;
   document.getElementById('meta').textContent=`${allTickets.length} tickets  polling every ${POLL_SECS}s`;
-  updateCompanyFilter();restoreLastWorkspaceSession();updateSpamBadge();updateArchiveBadge();updateJiraBadge();startCountdown();handleTicketDeepLink();
+  updateCompanyFilter();restoreLastWorkspaceSession();updateSpamBadge();updateArchiveBadge();updateRepliesBadge();updateJiraBadge();startCountdown();handleTicketDeepLink();
   await refreshLinkedJiraIssues(true);
   enrichWithHubSpot();
   requestNotificationPermission();
   notifySnapshot=snapshotForNotify({ticketAssignee,ticketState,ticketComments,jiraAlerts,allTickets,ticketCSOwner});
   setInterval(checkForBrowserNotifications,30000);
+  startLiveSync();
   scheduleCompanyNetworkSync([...collectCompanyIdsFromHsCache()]);
   setInterval(()=>scheduleCompanyNetworkSync([...collectCompanyIdsFromHsCache()]),120000);
   setInterval(()=>syncUnsyncedTicketsToHubspot(),45000);
