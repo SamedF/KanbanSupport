@@ -5182,7 +5182,53 @@ async function syncUnsyncedTicketsToHubspot(){
 }
 function classifyPriority(e){const st=classifySubtype(e);if(st&&SUBTYPE_BY_ID[st])return SUBTYPE_BY_ID[st].priority;const t=((e.subject||'')+(e.summary||'')).toLowerCase();if(e.importance==='high'||/urgent|asap|critical|not working|broken|error|cannot|bloqu/.test(t))return'High';if(/info|question|hello|bonjour|dear/.test(t))return'Low';return'Medium';}
 function classifyCategory(e){const st=classifySubtype(e);if(st&&SUBTYPE_BY_ID[st])return SUBTYPE_BY_ID[st].type;return'Other';}
-function classifySubtype(e){const t=((e.subject||'')+' '+(e.summary||'')).toLowerCase();if(/velma fully down|chatbot not responding|platform down/.test(t))return '4.1';if(/booking engine broken|widget missing|booking widget/.test(t))return '2.2';if(/payment gateway|payment not processing/.test(t))return '2.8';if(/pms sync|availability|rates not flowing/.test(t))return '2.1';if(/channel disconnected|whatsapp|instagram|messenger/.test(t))return '2.3';if(/token expired/.test(t))return '2.4';if(/ota|expedia|booking\.com/.test(t))return '2.5';if(/crm integration/.test(t))return '2.6';if(/script missing|install(ed)? on .*website/.test(t))return '2.7';if(/mapping error|room type|rate mapped/.test(t))return '2.9';if(/wrong language/.test(t))return '1.6';if(/missing dialog/.test(t))return '1.3';if(/partial answer|fields missing/.test(t))return '1.4';if(/broken transactional link|booking\/payment url/.test(t))return '1.5';if(/fallback triggered|unreached/.test(t))return '1.8';if(/outdated answer|policy changed/.test(t))return '1.2';if(/rya|wrong answer|rethink/.test(t))return '1.1';if(/account access|cannot log in|login issue/.test(t))return '4.2';if(/new property|property creation|create.*property|new hotel setup|new account creation|account creation|new user creation|onboard(ing)?/.test(t))return '6.1';if(/prefill|pre-fill/.test(t))return '6.2';if(/content audit/.test(t))return '6.4';if(/double check|content review/.test(t))return '6.3';if(/data validation|validate.*data/.test(t))return '6.5';if(/account status stuck|pending|setup not transitioning/.test(t))return '4.3';if(/feature not activated|q brain|module missing/.test(t))return '4.4';if(/analytics not showing|q-bi|reporting dashboard/.test(t))return '4.5';if(/platform bug/.test(t))return '5.1';if(/connector bug/.test(t))return '5.2';if(/intent detection failure|misclassif/.test(t))return '5.3';if(/infrastructure|timing out|timeout/.test(t))return '5.4';if(/connect|integr|pms|channel|webhook|api|crm/.test(t))return '2.6';if(/velma|chatbot|bot/.test(t))return '1.1';return '3.1';}
+function normalizeForClassification(s){return String(s||'').toLowerCase().normalize('NFD').replace(new RegExp('[̀-ͯ]','g'),'');}
+// Ordered list, first match wins - this MUST stay in the exact same order
+// as the original English-only if-chain it replaced, so every ticket that
+// already classified correctly in English keeps classifying the same way.
+// Each pattern keeps its original English alternatives and adds Spanish/
+// French/Italian equivalents (the languages actually seen in this ticket
+// dataset) - matched against normalizeForClassification()'d text, so no
+// accented characters appear in the patterns themselves.
+const SUBTYPE_MATCHERS=[
+{id:'4.1',pattern:/velma fully down|chatbot not responding|platform down|velma.*(caida|no responde)|plataforma caida|el chatbot no responde|velma.*en panne|le chatbot ne repond pas|plateforme en panne|velma.*completamente.*(giu|down)|il chatbot non risponde|piattaforma non disponibile/},
+{id:'2.2',pattern:/booking engine broken|widget missing|booking widget|motor de reservas (roto|no funciona)|falta el widget|widget de reservas|moteur de reservation (casse|ne fonctionne pas)|widget manquant|widget de reservation|motore di prenotazione (rotto|non funziona)|widget mancante|widget di prenotazione/},
+{id:'2.8',pattern:/payment gateway|payment not processing|pasarela de pago|el pago no se procesa|no se puede pagar|passerelle de paiement|le paiement ne passe pas|gateway di pagamento|il pagamento non va a buon fine/},
+{id:'2.1',pattern:/pms sync(hronization)?( failure| issue)?|availability (not syncing|sync failure|not updating)|rates not flowing|(fallo|error) de sincronizacion (con el|del) pms|la disponibilidad no (se sincroniza|se actualiza)|las tarifas no (se actualizan|fluyen)|(echec|erreur) de synchronisation (avec le|du) pms|la disponibilite ne se (synchronise|met a jour)|les tarifs ne remontent pas|(errore|fallimento) di sincronizzazione (con il|del) pms|la disponibilita non si (sincronizza|aggiorna)|le tariffe non si aggiornano/},
+{id:'2.3',pattern:/channel disconnected|whatsapp|instagram|messenger|canal desconectado|canal deconnecte|canale disconnesso/},
+{id:'2.4',pattern:/token expired|token expirado|el token ha expirado|token caducado|jeton.*expire|token.*scaduto/},
+{id:'2.5',pattern:/ota|expedia|booking\.com/},
+{id:'2.6',pattern:/crm integration|integracion (con el|del) crm|integration (avec le|du) crm|integrazione (con il|del) crm/},
+{id:'2.7',pattern:/script missing|install(ed)? on .*website|falta el script|script no instalado|instalar en (el|la) (sitio web|pagina web)|script.*manquant|script non installe|installer sur le site (web)?|script mancante|script non installato|installare sul sito (web)?/},
+{id:'2.9',pattern:/mapping error|room type (mapping|not mapped)|rate not mapped|rate mapped|error de mapeo|tipo de habitacion no mapead[oa]|tarifa no mapeada|erreur de mapping|type de chambre non mappe|tarif non mappe|errore di mappatura|tipo di camera non mappat[oa]|tariffa non mappata/},
+{id:'1.6',pattern:/wrong language|idioma.*(incorrecto|equivocado)|responde en el idioma equivocado|mauvaise langue|repond dans la mauvaise langue|lingua sbagliata|risponde nella lingua sbagliata/},
+{id:'1.3',pattern:/missing dialog|falta (el|un) dialogo|dialogo no configurado|dialogue manquant|dialogue non configure|dialogo mancante|dialogo non configurato/},
+{id:'1.4',pattern:/partial answer|fields missing|respuesta parcial|faltan campos|reponse partielle|champs manquants|risposta parziale|campi mancanti/},
+{id:'1.5',pattern:/broken transactional link|booking\/payment url|enlace.*roto|url de (reserva|pago) rota|lien.*casse|url de (reservation|paiement) cassee|link.*rotto|url di (prenotazione|pagamento) rotto/},
+{id:'1.8',pattern:/fallback triggered|unreached|se activo el fallback|dialogo no alcanzado|fallback.*declenche|dialogue non atteint|fallback.*attivato|dialogo non raggiunto/},
+{id:'1.2',pattern:/outdated answer|policy changed|respuesta desactualizada|la politica cambio|cambio de politica|reponse obsolete|la politique a change|risposta obsoleta|la politica e cambiata/},
+{id:'1.1',pattern:/rya|wrong answer|rethink|respuesta (incorrecta|equivocada)|mauvaise reponse|reponse incorrecte|risposta (sbagliata|errata)/},
+{id:'4.2',pattern:/account access|cannot log in|login issue|no (puedo|puede) (acceder|entrar|iniciar sesion)|no me deja (entrar|acceder|iniciar sesion)|acceso denegado|problema (de|para) acceder|impossible de (me connecter|se connecter|acceder)|(ne |n.?)(peux|arrive) pas (a )?(me connecter|se connecter|acceder)|acces refuse|probleme de connexion( au compte)?|non ri(esco|esce) ad accedere|impossibile accedere|accesso negato|problema di accesso|non (posso|puo) accedere/},
+{id:'6.1',pattern:/new property|property creation|create.*property|new hotel setup|new account creation|account creation|new user creation|onboard(ing)?|nueva propiedad|creacion de propiedad|crear (una )?propiedad|nuevo hotel|creacion de cuenta|nuevo usuario|incorporacion|nouvelle propriete|creation de propriete|creer une propriete|nouvel hotel|creation de compte|nouvel utilisateur|nuova proprieta|creazione (della )?proprieta|creare una proprieta|creazione (dell.?)?account|nuovo utente/},
+{id:'6.2',pattern:/prefill|pre-fill|prellenado|pre-relleno|pre-remplissage|pre-compilazione/},
+{id:'6.4',pattern:/content audit|auditoria de contenido|audit de contenu|controllo dei contenuti/},
+{id:'6.3',pattern:/double check|content review|doble verificacion|revision de contenido|double verification|revision de contenu|doppio controllo|revisione dei contenuti/},
+{id:'6.5',pattern:/data validation|validate.*data|validacion de datos|validation des donnees|convalida dei dati/},
+{id:'4.3',pattern:/account status stuck|setup not transitioning|(account |cuenta )?(stuck|atascada|estancada) (in )?pending|pending activation|configuracion no avanza|pendiente de activacion|compte.*bloque|configuration ne progresse pas|en attente d.?activation|account bloccato|configurazione non avanza|in attesa di attivazione/},
+{id:'4.4',pattern:/feature not activated|q brain|module missing|funcion.*activada|modulo faltante|fonctionnalite (n.?est pas|non) activ|module manquant|funzionalita.*attivata|modulo mancante/},
+{id:'4.5',pattern:/analytics not showing|q-bi|reporting dashboard|las analiticas no (aparecen|se muestran)|panel de informes|les analyses ne s.?affichent pas|tableau de bord de reporting|le analitiche non (appaiono|si vedono)|dashboard dei report/},
+{id:'5.1',pattern:/platform bug|error de la plataforma|bug de la plataforma|bug de la plateforme|bug della piattaforma/},
+{id:'5.2',pattern:/connector bug|bug del conector|bug du connecteur|bug del connettore/},
+{id:'5.3',pattern:/intent detection failure|misclassif|fallo (de|en la) deteccion de intencion|clasificacion incorrecta|echec de detection d.?intention|mauvaise classification|errore di rilevamento dell.?intento|classificazione errata/},
+{id:'5.4',pattern:/infrastructure|timing out|timeout|infraestructura|tiempo de espera agotado|se agoto el tiempo|delai d.?attente depasse|infrastruttura|tempo scaduto/},
+// Broad fallbacks - kept conservative and last on purpose (per Codex review):
+// only generic integration nouns/verbs, deliberately NOT login/access verbs,
+// so a non-English access complaint that somehow slips past 4.2 above still
+// doesn't get absorbed into this Integration catch-all.
+{id:'2.6',pattern:/connect|integr|pms|channel|webhook|api|crm|conectar|integracion|canal|conector|integration|integrazione/},
+{id:'1.1',pattern:/velma|chatbot|bot/}
+];
+function classifySubtype(e){const t=normalizeForClassification((e.subject||'')+' '+(e.summary||''));for(const m of SUBTYPE_MATCHERS){if(m.pattern.test(t))return m.id;}return '3.1';}
 function autoAssignNew(tickets){tickets.forEach(t=>{if(ticketAssignee[t.id]||ticketCategory[t.id]==='Spam'||isArchivedTicket(t.id))return;ensureSupportAssignmentForTicket(t.id,t.email);});}
 function updateWorkload(){
   const load = Object.fromEntries(SUPPORT_AGENTS.map(a=>[a,0]));
