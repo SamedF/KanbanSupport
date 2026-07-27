@@ -2770,7 +2770,7 @@ th {
   <select class="filter-sel" id="company-filter"><option value="all">All companies</option></select>
   <div class="sep"></div>
   <span class="filter-label">Search:</span>
-  <input class="filter-sel ticket-number-filter" id="ticket-number-filter" type="text" autocomplete="off" placeholder="e.g. #0012, QS-8634 or client@email.com"/>
+  <input class="filter-sel ticket-number-filter" id="ticket-number-filter" type="text" autocomplete="off" placeholder="e.g. #0012, QS-8634, client@email.com or a keyword"/>
   <div class="sep"></div>
   <button class="chip" id="tagged-filter" data-af="tagged" style="display:none"> Tagged me</button>
   <div class="sep"></div>
@@ -3069,6 +3069,33 @@ th {
     </div>
   </div>
 </div>
+<div class="modal-bg" id="edit-manual-modal">
+  <div class="modal" style="max-width:500px;">
+    <div class="modal-head"><h2> Edit Manual Ticket</h2><button class="modal-close-x" data-close="edit-manual-modal"></button></div>
+    <div style="padding:16px 18px;display:flex;flex-direction:column;gap:12px;overflow-y:auto;">
+      <div class="form-field">
+        <label>Subject *</label>
+        <input id="emt-subject" class="form-input" type="text"/>
+      </div>
+      <div class="form-field">
+        <label>Description</label>
+        <textarea id="emt-desc" class="form-input" rows="3" style="resize:vertical;font-family:inherit;"></textarea>
+      </div>
+      <div class="form-field">
+        <label>Client email <span style="color:#94a3b8;font-weight:400;">(optional)</span></label>
+        <input id="emt-email" class="form-input" type="email" placeholder="client@hotel.com"/>
+      </div>
+      <div class="form-field">
+        <label>CS owner</label>
+        <select id="emt-cs" class="form-input"></select>
+      </div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn-out" data-close="edit-manual-modal">Cancel</button>
+      <button class="btn-primary" id="emt-submit">Save Changes</button>
+    </div>
+  </div>
+</div>
 
 <!--  Templates manager modal  -->
 <div class="modal-bg" id="templates-modal">
@@ -3363,6 +3390,7 @@ const seen={};
 let ticketState={},ticketPriority={},ticketCategory={},ticketSubtype={},ticketAssignee={},ticketComments={},ticketClientEmail={};
 let ticketAssignmentMode={};
 let manualSupportOverride={};
+let manualCSOverride={}; // ticketId -> true once CS owner was set by an explicit human action (manual ticket creation, or the manual-ticket edit modal) - protects it from being silently overwritten by the HubSpot-company-derived default the same way manualSupportOverride protects the support agent
 let ticketCSOwner={};
 let ticketCreatedAt={};
 let ticketNumbers={};
@@ -3712,11 +3740,15 @@ function ticketMatchesNumberQuery(ticket){
   const queryCompact=cleaned.replace(/[^a-z0-9]/g,'');
   const emailSender=String(ticket?.email?.sender||'').trim().toLowerCase();
   const clientEmail=String(ticketClientEmail[id]||'').trim().toLowerCase();
+  const subject=String(ticket?.email?.subject||'').trim().toLowerCase();
+  const summary=String(ticket?.email?.summary||'').trim().toLowerCase();
   return pretty.includes(cleaned)
     || raw.includes(cleaned.replace(/^#/,''))
     || (!!jiraKey && (jiraKey.includes(cleaned) || jiraCompact.includes(queryCompact)))
     || (!!emailSender && emailSender.includes(q))
-    || (!!clientEmail && clientEmail.includes(q));
+    || (!!clientEmail && clientEmail.includes(q))
+    || (!!subject && subject.includes(q))
+    || (!!summary && summary.includes(q));
 }
 function inlineSelectedTags(id){return Array.isArray(inlineTagDrafts[id])?inlineTagDrafts[id]:[];}
 function toggleInlineTag(id,tag){const next=new Set(inlineSelectedTags(id));if(next.has(tag))next.delete(tag);else next.add(tag);inlineTagDrafts[id]=[...next];}
@@ -4351,7 +4383,7 @@ document.getElementById('ct-submit').addEventListener('click',async()=>{
   ticketAssignee[id]=normalizeSupportAgent(document.getElementById('ct-agent').value)||leastLoadedSupportAgent();
   ticketAssignmentMode[id]='support';
   const creatorCS=currentUserCSAgent();
-  if(creatorCS)ticketCSOwner[id]=creatorCS;
+  if(creatorCS){ticketCSOwner[id]=creatorCS;manualCSOverride[id]=true;}
   if(jiraKey)ticketJira[id]=jiraKey;
   allTickets.unshift(ticket);
   saveState();renderBoard();updateJiraBadge();
@@ -4362,7 +4394,43 @@ document.getElementById('ct-submit').addEventListener('click',async()=>{
   await syncTicketToHubspot(ticket);
 });
 
-//  View switching 
+//  Edit manual ticket modal
+let editManualTicketId=null;
+function editManualCSOptionsHtml(selected){return ['<option value="">Unassigned</option>'].concat(CS_AGENTS.map(a=>`<option value="${a}"${a===selected?' selected':''}>${a}</option>`)).join('');}
+function openEditManualModal(ticket){
+  if(!ticket?.isManual)return;
+  editManualTicketId=ticket.id;
+  document.getElementById('emt-subject').value=ticket.email?.subject||'';
+  document.getElementById('emt-desc').value=ticket.email?.summary||'';
+  document.getElementById('emt-email').value=ticketClientEmail[ticket.id]||'';
+  document.getElementById('emt-cs').innerHTML=editManualCSOptionsHtml(ticketCSOwner[ticket.id]||'');
+  document.getElementById('edit-manual-modal').classList.add('open');
+  setTimeout(()=>document.getElementById('emt-subject').focus(),100);
+}
+document.getElementById('emt-submit').addEventListener('click',async()=>{
+  const id=editManualTicketId;
+  if(!id)return;
+  const ticket=allTickets.find(t=>t.id===id);
+  if(!ticket){showToast('Ticket no longer exists');document.getElementById('edit-manual-modal').classList.remove('open');return;}
+  const subject=document.getElementById('emt-subject').value.trim();
+  if(!subject){document.getElementById('emt-subject').focus();return;}
+  const newClientEmail=(document.getElementById('emt-email').value.trim()||'').toLowerCase();
+  const oldClientEmail=ticketClientEmail[id]||'';
+  const newCS=normalizeCSAgent(document.getElementById('emt-cs').value)||'';
+  ticket.email.subject=subject;
+  ticket.email.summary=document.getElementById('emt-desc').value.trim();
+  if(newClientEmail)ticketClientEmail[id]=newClientEmail;else delete ticketClientEmail[id];
+  ticketCSOwner[id]=newCS||null;
+  manualCSOverride[id]=true;
+  saveState('manual_ticket_edited');
+  renderBoard();
+  document.getElementById('edit-manual-modal').classList.remove('open');
+  showToast('Manual ticket updated','ok');
+  if(newClientEmail&&newClientEmail!==oldClientEmail)await enrichWithHubSpot();
+  await syncTicketToHubspot(ticket);
+});
+
+//  View switching
 function hidePrimaryViews(){document.getElementById('main-board').style.display='none';document.getElementById('spam-view').classList.remove('active');document.getElementById('archive-view').classList.remove('active');document.getElementById('companies-view').style.display='none';document.getElementById('kpi-view').style.display='none';document.getElementById('qt-seize-view').style.display='none';}
 function showBoardView(){viewMode='board';setBoardChromeVisible(true);hidePrimaryViews();document.getElementById('main-board').style.display='flex';setSideNavActive('board');saveLastWorkspaceSession('board');renderBoard();}
 function showSpamView(){viewMode='spam';setBoardChromeVisible(true);hidePrimaryViews();document.getElementById('spam-view').classList.add('active');setSideNavActive('spam');saveLastWorkspaceSession('spam');renderSpamView();}
@@ -5095,6 +5163,7 @@ function resolveDefaultCSForTicket(id,emailObj){
   return null;
 }
 function ensureTicketCSOwnerResolved(id,emailObj){
+  if(manualCSOverride[id])return ticketCSOwner[id]||null;
   const resolved=resolveDefaultCSForTicket(id,emailObj);
   if(resolved){
     ticketCSOwner[id]=resolved;
@@ -5102,9 +5171,9 @@ function ensureTicketCSOwnerResolved(id,emailObj){
   }
   return ticketCSOwner[id]||null;
 }
-function ensureSupportAssignmentForTicket(id,emailObj,opts={}){if(!id||ticketCategory[id]==='Spam'||isArchivedTicket(id))return false;const currentAssignee=ticketAssignee[id]||'';const keepExistingSupport=!!opts.keepExistingSupport&&SUPPORT_AGENTS.includes(currentAssignee);const supportAgent=keepExistingSupport?currentAssignee:leastLoadedSupportAgent();const csOwner=resolveDefaultCSForTicket(id,emailObj);let changed=false;if(csOwner&&ticketCSOwner[id]!==csOwner){ticketCSOwner[id]=csOwner;changed=true;}if(ticketAssignee[id]!==supportAgent||ticketAssignmentMode[id]!=='support'){ticketAssignee[id]=supportAgent;ticketAssignmentMode[id]='support';changed=true;}if(manualSupportOverride[id]!==false){manualSupportOverride[id]=false;changed=true;}return changed;}
+function ensureSupportAssignmentForTicket(id,emailObj,opts={}){if(!id||ticketCategory[id]==='Spam'||isArchivedTicket(id))return false;const currentAssignee=ticketAssignee[id]||'';const keepExistingSupport=!!opts.keepExistingSupport&&SUPPORT_AGENTS.includes(currentAssignee);const supportAgent=keepExistingSupport?currentAssignee:leastLoadedSupportAgent();const csOwner=resolveDefaultCSForTicket(id,emailObj);let changed=false;if(csOwner&&ticketCSOwner[id]!==csOwner&&!manualCSOverride[id]){ticketCSOwner[id]=csOwner;changed=true;}if(ticketAssignee[id]!==supportAgent||ticketAssignmentMode[id]!=='support'){ticketAssignee[id]=supportAgent;ticketAssignmentMode[id]='support';changed=true;}if(manualSupportOverride[id]!==false){manualSupportOverride[id]=false;changed=true;}return changed;}
 function shouldRefreshHubspotCacheEntry(email){const ce=String(email||'').toLowerCase();if(!ce)return false;if(!(ce in hsCache))return true;const cached=hsCache[ce];const related=allTickets.filter(t=>ticketCategory[t.id]!=='Spam'&&!isArchivedTicket(t.id)&&(ticketClientEmail[t.id]||getClientEmail(t.email))===ce);if(!related.length)return false;if(cached===null)return related.some(t=>isSupportAssignedTicket(t.id)&&!ticketCSOwner[t.id]);if(!cached||!cached.companyName||!cached.companyId||!cached.coOwner)return true;return related.some(t=>isSupportAssignedTicket(t.id)&&!ticketCSOwner[t.id]);}
-function applyCompanyCSAssignments(){let changed=0;allTickets.forEach(t=>{if(ticketCategory[t.id]==='Spam'||isArchivedTicket(t.id))return;const id=t.id;const ce=ticketClientEmail[id]||getClientEmail(t.email);if(!ce)return;const cs=resolveDefaultCSForTicket(id,t.email);if(cs&&ticketCSOwner[id]!==cs){ticketCSOwner[id]=cs;changed++;}if(manualSupportOverride[id])return;if(!SUPPORT_AGENTS.includes(ticketAssignee[id])||ticketAssignmentMode[id]!=='support'){if(ensureSupportAssignmentForTicket(id,t.email,{keepExistingSupport:true}))changed++;}});if(changed){saveState('auto_assign_cs_owner');}}
+function applyCompanyCSAssignments(){let changed=0;allTickets.forEach(t=>{if(ticketCategory[t.id]==='Spam'||isArchivedTicket(t.id))return;const id=t.id;const ce=ticketClientEmail[id]||getClientEmail(t.email);if(!ce)return;const cs=resolveDefaultCSForTicket(id,t.email);if(cs&&ticketCSOwner[id]!==cs&&!manualCSOverride[id]){ticketCSOwner[id]=cs;changed++;}if(manualSupportOverride[id])return;if(!SUPPORT_AGENTS.includes(ticketAssignee[id])||ticketAssignmentMode[id]!=='support'){if(ensureSupportAssignmentForTicket(id,t.email,{keepExistingSupport:true}))changed++;}});if(changed){saveState('auto_assign_cs_owner');}}
 
 async function findCompanyByDomain(email,excludeContactId){const domain=(email.split('@')[1]||'').toLowerCase();if(!domain||domain.includes('quinta')||['gmail.com','yahoo.com','hotmail.com','outlook.com','live.com'].includes(domain))return{companies:[],via:null};if(domain in domainCompanyCache)return domainCompanyCache[domain];const domRes=await window.cowork.callMcpTool(HS_SEARCH,{objectType:'companies',filterGroups:[{filters:[{propertyName:'domain',operator:'EQ',value:domain}]}],properties:['name','domain','createdate','co_owner','co-owner','coowner','co_owner_name','cs_owner','customer_success_owner','am_owner','account_manager','am'],sorts:[{propertyName:'createdate',direction:'ASCENDING'}],limit:5,chatInsights:HS_INSIGHTS});const domCos=hsResults(domRes);if(domCos.length){const v={companies:domCos,via:'domain'};domainCompanyCache[domain]=v;saveHsCache();return v;}const peerRes=await window.cowork.callMcpTool(HS_SEARCH,{objectType:'contacts',filterGroups:[{filters:[{propertyName:'email',operator:'CONTAINS_TOKEN',value:'@'+domain}]}],properties:['email'],limit:8,chatInsights:HS_INSIGHTS});const peers=hsResults(peerRes).filter(c=>c.properties?.email&&(!excludeContactId||c.id.toString()!==excludeContactId.toString()));for(const peer of peers.slice(0,4)){const pCoRes=await window.cowork.callMcpTool(HS_SEARCH,{objectType:'companies',filterGroups:[{associatedWith:[{objectType:'contacts',operator:'EQUAL',objectIds:[String(peer.id)]}]}],properties:['name','domain','createdate','co_owner','co-owner','coowner','co_owner_name','cs_owner','customer_success_owner','am_owner','account_manager','am'],sorts:[{propertyName:'createdate',direction:'ASCENDING'}],limit:5,chatInsights:HS_INSIGHTS});const pCos=hsResults(pCoRes);if(pCos.length){const v={companies:pCos,via:'domain-contact'};domainCompanyCache[domain]=v;saveHsCache();return v;}}const v={companies:[],via:null};domainCompanyCache[domain]=v;return v;}
 
@@ -5570,6 +5639,7 @@ function makeCard(ticket,isNew=false){
         ${jiraBtn}
         ${hsTicketBtn}
         <button class="open-email-btn" data-oe="${id}"> Open</button>
+        ${ticket.isManual?`<button class="btn-out" data-edit-manual="${id}" title="Edit this manual ticket" style="font-size:10px;padding:2px 7px;"> Edit</button>`:''}
         <button class="btn-out" data-archive="${id}" title="Archive this ticket" style="font-size:10px;padding:2px 7px;"> Archive</button>
         <div class="agent-assign-wrap" data-agent-menu="${id}">
           <button class="agent-assign-trigger" type="button" data-agent-trigger="${id}" title="${canAssign ? 'Assign support agent' : 'Only admins and the ticket CS can change support assignment'}"${canAssign ? '' : ' disabled'}>
@@ -5642,6 +5712,7 @@ function makeCard(ticket,isNew=false){
   div.querySelector('[data-hs-open]')?.addEventListener('click',ev=>{ev.preventDefault();ev.stopPropagation();const hsId=ticketHubspotId[id];if(!hsId){showToast('Ticket not synced to HubSpot yet');return;}window.open(`https://app.hubspot.com/contacts/25445053/record/0-5/${encodeURIComponent(hsId)}`,'_blank');});
   div.querySelector('[data-hs-retry]')?.addEventListener('click',async ev=>{ev.preventDefault();ev.stopPropagation();const rs=await syncTicketToHubspot(ticket);if(rs?.ok&&ticketHubspotId[id]){window.open(`https://app.hubspot.com/contacts/25445053/record/0-5/${encodeURIComponent(ticketHubspotId[id])}`,'_blank');showToast('Ticket synced to HubSpot','ok');}else{const reason=rs?.reason||'unknown';if(reason==='missing_company_mapping')showToast('Cannot sync yet: this ticket has no mapped HubSpot company.');else if(reason==='missing_client_email')showToast('Cannot sync yet: no client email found for this ticket.');else if(reason==='api_error')showToast(`HubSpot sync failed: ${rs?.error||'api error'}`);else if(reason==='network_error')showToast(`HubSpot sync network error: ${rs?.error||'unknown'}`);else showToast('Unable to sync this ticket yet.');}renderBoard();});
   div.querySelector('[data-oe]').addEventListener('click',ev=>{ev.stopPropagation();clearNewReplyGlow(id);openEmailModal(ticket);});
+  div.querySelector('[data-edit-manual]')?.addEventListener('click',ev=>{ev.stopPropagation();openEditManualModal(ticket);});
   div.querySelector('[data-archive]')?.addEventListener('click',ev=>{ev.stopPropagation();if(!confirm('Archive this ticket?'))return;ticketArchived[id]={archivedAt:Date.now(),archivedBy:currentUser(),reason:'manual'};saveState('ticket_archived_manual');renderBoard();updateArchiveBadge();showToast('Ticket archived','ok');});
   div.querySelector('[data-inline-toggle]')?.addEventListener('click',ev=>{ev.stopPropagation();inlineCommentOpen[id]=!inlineOpen;if(inlineCommentOpen[id]){markAlertFeedReadForTicket(id,currentUser());clearNewReplyGlow(id);}renderBoard();});
   div.querySelector('[data-inline-bell]')?.addEventListener('click',ev=>{ev.stopPropagation();inlineCommentOpen[id]=true;markAlertFeedReadForTicket(id,currentUser());clearNewReplyGlow(id);renderBoard();});
