@@ -3393,6 +3393,7 @@ let manualSupportOverride={};
 let manualCSOverride={}; // ticketId -> true once CS owner was set by an explicit human action (manual ticket creation, or the manual-ticket edit modal) - protects it from being silently overwritten by the HubSpot-company-derived default the same way manualSupportOverride protects the support agent
 let ticketCSOwner={};
 let ticketCreatedAt={};
+let ticketCreatedBy={}; // ticketId -> creator's agent code, set once at manual-ticket creation - gates who can use the Edit Manual Ticket action
 let ticketNumbers={};
 let ticketNumberCounter=0;
 let ticketJira={};   // ticketId  Jira key (e.g. 'QT-1234') | null
@@ -3508,6 +3509,11 @@ function currentUserCanAssignTicket(ticket){
   if(currentUserIsAdmin())return true;
   return ticketVisibleToCurrentUser(ticket);
 }
+function currentUserCanEditManualTicket(ticket){
+  if(!ticket?.isManual)return false;
+  if(currentUserIsAdmin())return true;
+  return normalizeAgentCode(ticketCreatedBy[ticket.id])===currentUser();
+}
 function enforcedAgentFilter(){
   if(currentUserCanViewAllTickets())return activeA;
   const role=currentUserRole();
@@ -3591,7 +3597,7 @@ function buildStatePayload(reason){
   const snapshot={
     allTickets,
     seenIds:Object.keys(seen),
-    ticketState,ticketStageTouchedAt,ticketHasNewReply,ticketResolutionMeta,ticketArchived,ticketPriority,ticketCategory,ticketSubtype,ticketAssignee,ticketAssignmentMode,manualSupportOverride,ticketCSOwner,ticketComments,ticketClientEmail,ticketCreatedAt,ticketNumbers,ticketNumberCounter,ticketJira,ticketHubspotId,
+    ticketState,ticketStageTouchedAt,ticketHasNewReply,ticketResolutionMeta,ticketArchived,ticketPriority,ticketCategory,ticketSubtype,ticketAssignee,ticketAssignmentMode,manualSupportOverride,manualCSOverride,ticketCSOwner,ticketComments,ticketClientEmail,ticketCreatedAt,ticketCreatedBy,ticketNumbers,ticketNumberCounter,ticketJira,ticketHubspotId,
     spamSenders:[...spamSenders],hsCache,domainCompanyCache,readMentions:[...readMentions],jiraAlerts,readJiraAlerts:[...readJiraAlerts],jiraStatusSnapshot,companyCustomProps,companyProfiles,companiesViewType,companyNetworkCache,companyFilters,coOwnerMappings,actionHistory,
     _meta:{clientSavedAt:now,clientVersion:stateVersion}
   };
@@ -3842,10 +3848,12 @@ async function loadState(){
   if(s.ticketAssignee)Object.assign(ticketAssignee,s.ticketAssignee);
   if(s.ticketAssignmentMode)Object.assign(ticketAssignmentMode,s.ticketAssignmentMode);
   if(s.manualSupportOverride&&typeof s.manualSupportOverride==='object')Object.assign(manualSupportOverride,s.manualSupportOverride);
+  if(s.manualCSOverride&&typeof s.manualCSOverride==='object')Object.assign(manualCSOverride,s.manualCSOverride);
   if(s.ticketCSOwner&&typeof s.ticketCSOwner==='object')Object.assign(ticketCSOwner,s.ticketCSOwner);
   if(s.ticketComments)Object.assign(ticketComments,s.ticketComments);
   if(s.ticketClientEmail)Object.assign(ticketClientEmail,s.ticketClientEmail);
   if(s.ticketCreatedAt)Object.assign(ticketCreatedAt,s.ticketCreatedAt);
+  if(s.ticketCreatedBy&&typeof s.ticketCreatedBy==='object')Object.assign(ticketCreatedBy,s.ticketCreatedBy);
   if(s.ticketNumbers&&typeof s.ticketNumbers==='object')Object.entries(s.ticketNumbers).forEach(([k,v])=>{const n=Number(v||0);if(k&&n>0)ticketNumbers[k]=n;});
   ticketNumberCounter=Math.max(ticketNumberCounter,Number(s.ticketNumberCounter||0),...Object.values(ticketNumbers).map(v=>Number(v)||0),0);
   if(s.ticketJira&&typeof s.ticketJira==='object'){
@@ -4372,6 +4380,7 @@ document.getElementById('ct-submit').addEventListener('click',async()=>{
   const fakeEmail={id,subject,summary:document.getElementById('ct-desc').value.trim(),sender:clientEmail||'manual@ticket',recipients:null,receivedDateTime:now,sentDateTime:now,webLink:null,uri:null,importance:'normal',isRead:true,isManual:true};
   seen[id]=true;
   ticketCreatedAt[id]=now;
+  ticketCreatedBy[id]=currentUser();
   const priority=document.getElementById('ct-priority').value;
   const category=document.getElementById('ct-category').value||'Other';
   const subtype=document.getElementById('ct-subtype').value||'';
@@ -4398,7 +4407,7 @@ document.getElementById('ct-submit').addEventListener('click',async()=>{
 let editManualTicketId=null;
 function editManualCSOptionsHtml(selected){return ['<option value="">Unassigned</option>'].concat(CS_AGENTS.map(a=>`<option value="${a}"${a===selected?' selected':''}>${a}</option>`)).join('');}
 function openEditManualModal(ticket){
-  if(!ticket?.isManual)return;
+  if(!currentUserCanEditManualTicket(ticket)){showToast('Only admins and the ticket creator can edit this ticket','warn');return;}
   editManualTicketId=ticket.id;
   document.getElementById('emt-subject').value=ticket.email?.subject||'';
   document.getElementById('emt-desc').value=ticket.email?.summary||'';
@@ -4412,6 +4421,7 @@ document.getElementById('emt-submit').addEventListener('click',async()=>{
   if(!id)return;
   const ticket=allTickets.find(t=>t.id===id);
   if(!ticket){showToast('Ticket no longer exists');document.getElementById('edit-manual-modal').classList.remove('open');return;}
+  if(!currentUserCanEditManualTicket(ticket)){showToast('Only admins and the ticket creator can edit this ticket','warn');document.getElementById('edit-manual-modal').classList.remove('open');return;}
   const subject=document.getElementById('emt-subject').value.trim();
   if(!subject){document.getElementById('emt-subject').focus();return;}
   const newClientEmail=(document.getElementById('emt-email').value.trim()||'').toLowerCase();
@@ -5546,6 +5556,7 @@ function makeCard(ticket,isNew=false){
   const csOwner=ensureTicketCSOwnerResolved(id,email)||normalizeCSAgent(ticketCSOwner[id]||'');
   const showCSBadge=!!csOwner;
   const canAssign = currentUserCanAssignTicket(ticket);
+  const canEditManual = currentUserCanEditManualTicket(ticket);
   const cat=ticketCategory[id];
   const comments=ticketComments[id]||[];
   const isTagged=taggedTickets.has(id);
@@ -5639,7 +5650,7 @@ function makeCard(ticket,isNew=false){
         ${jiraBtn}
         ${hsTicketBtn}
         <button class="open-email-btn" data-oe="${id}"> Open</button>
-        ${ticket.isManual?`<button class="btn-out" data-edit-manual="${id}" title="Edit this manual ticket" style="font-size:10px;padding:2px 7px;"> Edit</button>`:''}
+        ${canEditManual?`<button class="btn-out" data-edit-manual="${id}" title="Edit this manual ticket" style="font-size:10px;padding:2px 7px;"> Edit</button>`:''}
         <button class="btn-out" data-archive="${id}" title="Archive this ticket" style="font-size:10px;padding:2px 7px;"> Archive</button>
         <div class="agent-assign-wrap" data-agent-menu="${id}">
           <button class="agent-assign-trigger" type="button" data-agent-trigger="${id}" title="${canAssign ? 'Assign support agent' : 'Only admins and the ticket CS can change support assignment'}"${canAssign ? '' : ' disabled'}>
