@@ -402,11 +402,100 @@
       return { canvas, ctx };
     }
 
-    function drawCover(ctx, img, width, height) {
-      const scale = Math.max(width / img.naturalWidth, height / img.naturalHeight);
-      const w = img.naturalWidth * scale;
-      const h = img.naturalHeight * scale;
-      ctx.drawImage(img, (width - w) / 2, (height - h) / 2, w, h);
+    // Centered "contain" placement of a source inside a target frame.
+    function containRect(iw, ih, tw, th) {
+      const scale = Math.min(tw / iw, th / ih);
+      const w = Math.round(iw * scale);
+      const h = Math.round(ih * scale);
+      return { x: Math.round((tw - w) / 2), y: Math.round((th - h) / 2), w, h };
+    }
+
+    // Seamlessly fill a canvas by mirror-tiling the source around a centered
+    // rect: every neighbouring tile is a reflection, so edges line up and a
+    // subsequent blur erases the seams. This continues the photo's own edge
+    // content into the expanded area instead of a generic centre-zoom.
+    function mirrorTile(ctx, img, r, cw, ch) {
+      const nx = Math.ceil(Math.max(r.x, cw - (r.x + r.w)) / r.w) + 1;
+      const ny = Math.ceil(Math.max(r.y, ch - (r.y + r.h)) / r.h) + 1;
+      for (let i = -nx; i <= nx; i++) {
+        for (let j = -ny; j <= ny; j++) {
+          const flipX = (((i % 2) + 2) % 2) === 1;
+          const flipY = (((j % 2) + 2) % 2) === 1;
+          ctx.save();
+          ctx.translate(r.x + (i + (flipX ? 1 : 0)) * r.w, r.y + (j + (flipY ? 1 : 0)) * r.h);
+          ctx.scale(flipX ? -1 : 1, flipY ? -1 : 1);
+          ctx.drawImage(img, 0, 0, r.w, r.h);
+          ctx.restore();
+        }
+      }
+    }
+
+    // Stretch the subject's own edge pixels outward into a gap, fading away
+    // from the subject boundary, so real edge content (a horizon, wall, sky)
+    // appears to continue instead of a symmetric mirror. Rendered on a small
+    // buffer for a cheap blur, then upscaled into place.
+    function edgeExtend(ctx, img, r, gaps) {
+      const iw = img.naturalWidth, ih = img.naturalHeight;
+      const strip = 0.16; // fraction of the image used as the seed edge
+      const place = (sx, sy, sw, sh, dx, dy, dw, dh, axis, subjectAt) => {
+        if (dw <= 1 || dh <= 1) return;
+        const scale = Math.min(1, 420 / Math.max(dw, dh));
+        const bw = Math.max(2, Math.round(dw * scale));
+        const bh = Math.max(2, Math.round(dh * scale));
+        const { canvas: buf, ctx: bx } = makeCanvas(bw, bh);
+        const blurPx = Math.max(2, Math.round((axis === 'x' ? bw : bh) * 0.25));
+        bx.filter = `blur(${blurPx}px)`;
+        bx.drawImage(img, sx, sy, sw, sh, 0, 0, bw, bh);
+        bx.filter = 'none';
+        // Fade the strip out as it moves away from the subject edge.
+        bx.globalCompositeOperation = 'destination-in';
+        const g = axis === 'x'
+          ? bx.createLinearGradient(0, 0, bw, 0)
+          : bx.createLinearGradient(0, 0, 0, bh);
+        const near = subjectAt === 'start' ? 0 : 1;
+        g.addColorStop(0, near === 0 ? 'rgba(0,0,0,1)' : 'rgba(0,0,0,0)');
+        g.addColorStop(1, near === 0 ? 'rgba(0,0,0,0)' : 'rgba(0,0,0,1)');
+        bx.fillStyle = g;
+        bx.fillRect(0, 0, bw, bh);
+        bx.globalCompositeOperation = 'source-over';
+        ctx.drawImage(buf, dx, dy, dw, dh);
+      };
+      // Left / right gaps seed from the matching vertical edge strip.
+      if (gaps.gapR > 1) place(iw * (1 - strip), 0, iw * strip, ih, r.x + r.w, r.y, gaps.gapR, r.h, 'x', 'start');
+      if (gaps.gapL > 1) place(0, 0, iw * strip, ih, 0, r.y, gaps.gapL, r.h, 'x', 'end');
+      // Top / bottom gaps seed from the matching horizontal edge strip.
+      if (gaps.gapB > 1) place(0, ih * (1 - strip), iw, ih * strip, r.x, r.y + r.h, r.w, gaps.gapB, 'y', 'start');
+      if (gaps.gapT > 1) place(0, 0, iw, ih * strip, r.x, 0, r.w, gaps.gapT, 'y', 'end');
+    }
+
+    // A cached low-res monochrome noise tile, generated once and reused.
+    let _noiseTile = null;
+    function noiseTile() {
+      if (_noiseTile) return _noiseTile;
+      const size = 160;
+      const { canvas, ctx } = makeCanvas(size, size);
+      const id = ctx.createImageData(size, size);
+      for (let i = 0; i < id.data.length; i += 4) {
+        const v = 90 + Math.random() * 90;
+        id.data[i] = id.data[i + 1] = id.data[i + 2] = v;
+        id.data[i + 3] = 255;
+      }
+      ctx.putImageData(id, 0, 0);
+      _noiseTile = canvas;
+      return canvas;
+    }
+
+    // Tile subtle film-grain across the frame with an 'overlay' blend so the
+    // fill reads as textured photography rather than a glassy gradient.
+    function addGrain(ctx, w, h, alpha) {
+      const n = noiseTile();
+      ctx.save();
+      ctx.globalAlpha = alpha;
+      ctx.globalCompositeOperation = 'overlay';
+      for (let y = 0; y < h; y += n.height) {
+        for (let x = 0; x < w; x += n.width) ctx.drawImage(n, x, y);
+      }
+      ctx.restore();
     }
 
     function resizeCanvasHighQuality(sourceCanvas, width, height) {
@@ -434,49 +523,80 @@
     }
 
     async function generateLocalOutpaint(img, target) {
-      const workScale = target.width < 1600 && target.height < 1000 ? 2 : 1;
-      const workW = target.width * workScale;
-      const workH = target.height * workScale;
-      const { canvas, ctx } = makeCanvas(workW, workH);
+      const tw = target.width, th = target.height;
+      const iw = img.naturalWidth, ih = img.naturalHeight;
 
-      const blur = Math.max(18, Math.round(Math.min(workW, workH) * .032));
-      ctx.filter = `blur(${blur}px) saturate(1.08) brightness(.98)`;
-      drawCover(ctx, img, workW, workH);
-      ctx.filter = 'none';
+      // --- 1. Background, built at a capped low resolution (the fast part) ---
+      // A large-radius blur costs ~O(pixels), so blurring a <=512px canvas
+      // instead of the full (up to 4K) target is the key efficiency win. The
+      // final upscale to target size smooths it further at no extra cost.
+      const MAX_BG = 512;
+      const bgScale = Math.min(1, MAX_BG / Math.max(tw, th));
+      const bw = Math.max(8, Math.round(tw * bgScale));
+      const bh = Math.max(8, Math.round(th * bgScale));
+      const rb = containRect(iw, ih, bw, bh);
 
-      const overlay = ctx.createLinearGradient(0, 0, workW, 0);
-      overlay.addColorStop(0, 'rgba(17,24,39,.16)');
-      overlay.addColorStop(.32, 'rgba(17,24,39,.03)');
-      overlay.addColorStop(.68, 'rgba(17,24,39,.03)');
-      overlay.addColorStop(1, 'rgba(17,24,39,.16)');
-      ctx.fillStyle = overlay;
-      ctx.fillRect(0, 0, workW, workH);
+      const { canvas: bgCanvas, ctx: bg } = makeCanvas(bw, bh);
+      const blur = Math.max(6, Math.round(Math.min(bw, bh) * 0.06));
+      bg.filter = `blur(${blur}px) saturate(1.12) brightness(0.97)`;
+      mirrorTile(bg, img, rb, bw, bh);
+      bg.filter = 'none';
 
-      const fgScale = Math.min(workH / img.naturalHeight, workW / img.naturalWidth);
-      const fgW = Math.round(img.naturalWidth * fgScale);
-      const fgH = Math.round(img.naturalHeight * fgScale);
-      const x = Math.round((workW - fgW) / 2);
-      const y = Math.round((workH - fgH) / 2);
+      // --- 2. Compose at full target resolution ---
+      const { canvas, ctx } = makeCanvas(tw, th);
+      ctx.drawImage(bgCanvas, 0, 0, tw, th);
 
-      const feather = Math.max(24, Math.round(Math.min(fgW, fgH) * .035));
-      ctx.save();
-      ctx.beginPath();
-      ctx.rect(x, y, fgW, fgH);
-      ctx.clip();
-      ctx.drawImage(img, x, y, fgW, fgH);
+      const r = containRect(iw, ih, tw, th);
+      const gapL = r.x, gapR = tw - (r.x + r.w);
+      const gapT = r.y, gapB = th - (r.y + r.h);
+      const gaps = { gapL, gapR, gapT, gapB };
 
-      ctx.globalCompositeOperation = 'destination-in';
-      const alpha = ctx.createLinearGradient(x, 0, x + fgW, 0);
-      alpha.addColorStop(0, 'rgba(0,0,0,0)');
-      alpha.addColorStop(feather / fgW, 'rgba(0,0,0,1)');
-      alpha.addColorStop(1 - feather / fgW, 'rgba(0,0,0,1)');
-      alpha.addColorStop(1, 'rgba(0,0,0,0)');
-      ctx.fillStyle = alpha;
-      ctx.fillRect(x, y, fgW, fgH);
-      ctx.restore();
+      // --- 3. Continue the subject's real edge content into the gaps ---
+      // Layered over the blurred colour base, strongest at the subject edge.
+      edgeExtend(ctx, img, r, gaps);
 
-      const finalCanvas = resizeCanvasHighQuality(canvas, target.width, target.height);
-      return canvasToDataUrl(finalCanvas);
+      // --- 4. Film grain so the fill reads as photography, not a gradient ---
+      addGrain(ctx, tw, th, 0.05);
+
+      // Barely-there corner falloff (no obvious vignette "effect").
+      const vig = ctx.createRadialGradient(
+        tw / 2, th / 2, Math.min(tw, th) * 0.35,
+        tw / 2, th / 2, Math.max(tw, th) * 0.72);
+      vig.addColorStop(0, 'rgba(10,15,25,0)');
+      vig.addColorStop(1, 'rgba(10,15,25,0.10)');
+      ctx.fillStyle = vig;
+      ctx.fillRect(0, 0, tw, th);
+
+      // --- 5. Subject on top, with a wide seamless feather on extended sides ---
+      const { canvas: fgCanvas, ctx: fx } = makeCanvas(r.w, r.h);
+      fx.drawImage(img, 0, 0, r.w, r.h);
+      fx.globalCompositeOperation = 'destination-in';
+      // Wider feather (~9%) blends the sharp subject into the generated fill so
+      // there is no detectable seam.
+      if (gapL > 1 || gapR > 1) {
+        const f = Math.min(0.5, Math.max(3, Math.round(r.w * 0.09)) / r.w);
+        const g = fx.createLinearGradient(0, 0, r.w, 0);
+        g.addColorStop(0, gapL > 1 ? 'rgba(0,0,0,0)' : 'rgba(0,0,0,1)');
+        g.addColorStop(f, 'rgba(0,0,0,1)');
+        g.addColorStop(1 - f, 'rgba(0,0,0,1)');
+        g.addColorStop(1, gapR > 1 ? 'rgba(0,0,0,0)' : 'rgba(0,0,0,1)');
+        fx.fillStyle = g;
+        fx.fillRect(0, 0, r.w, r.h);
+      }
+      if (gapT > 1 || gapB > 1) {
+        const f = Math.min(0.5, Math.max(3, Math.round(r.h * 0.09)) / r.h);
+        const g = fx.createLinearGradient(0, 0, 0, r.h);
+        g.addColorStop(0, gapT > 1 ? 'rgba(0,0,0,0)' : 'rgba(0,0,0,1)');
+        g.addColorStop(f, 'rgba(0,0,0,1)');
+        g.addColorStop(1 - f, 'rgba(0,0,0,1)');
+        g.addColorStop(1, gapB > 1 ? 'rgba(0,0,0,0)' : 'rgba(0,0,0,1)');
+        fx.fillStyle = g;
+        fx.fillRect(0, 0, r.w, r.h);
+      }
+      fx.globalCompositeOperation = 'source-over';
+      ctx.drawImage(fgCanvas, r.x, r.y);
+
+      return canvasToDataUrl(canvas);
     }
 
     // ---- Queue / batch management ----
