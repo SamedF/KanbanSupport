@@ -2277,6 +2277,21 @@ header {
   color: var(--gray-700);
 }
 
+/* Raw email HTML injected into #em-body carries its own inline color/background
+   styles from whatever mail client composed it - those win over our page CSS
+   by specificity, so in dark mode some threads render illegible (e.g. black
+   text on our now-dark background) while others happen to be fine. Force a
+   single, always-readable text color and strip any inline background so
+   every thread reads the same regardless of the source email's own styling. */
+[data-theme="dark"] #em-body,
+[data-theme="dark"] #em-body * {
+  color: var(--text) !important;
+  background-color: transparent !important;
+}
+[data-theme="dark"] #em-body a {
+  color: var(--sky-400) !important;
+}
+
 .modal-actions {
   padding: 12px 18px;
   border-top: 1px solid var(--border);
@@ -3273,10 +3288,23 @@ th {
   <span class="filter-label">Company:</span>
   <select class="filter-sel" id="company-filter"><option value="all">All companies</option></select>
   <div class="sep"></div>
+  <span class="filter-label">Stage:</span>
+  <select class="filter-sel" id="stage-filter">
+    <option value="all">All stages</option>
+    <option value="new">New</option>
+    <option value="inp">In Progress</option>
+    <option value="wus">Waiting On Us</option>
+    <option value="dft">Due for test</option>
+    <option value="wct">Waiting On Contact</option>
+    <option value="res">Resolved</option>
+  </select>
+  <div class="sep"></div>
   <span class="filter-label">Search:</span>
   <input class="filter-sel ticket-number-filter" id="ticket-number-filter" type="text" autocomplete="off" placeholder="e.g. #0012, QS-8634, client@email.com or a keyword"/>
   <div class="sep"></div>
   <button class="chip" id="tagged-filter" data-af="tagged" style="display:none"> Tagged me</button>
+  <div class="sep"></div>
+  <button class="chip" id="sla-filter-btn" title="Show only overdue tickets"> Overdue</button>
   <div class="sep"></div>
   <button class="jira-chip" id="jira-filter-btn"> Jira <span class="jira-ct" id="jira-count" style="display:none">0</span></button>
   <div class="sep"></div>
@@ -3977,7 +4005,7 @@ const taggedTickets=new Set();
 let inlineCommentOpen={};
 let inlineCommentDrafts={};
 let inlineTagDrafts={};
-let allTickets=[],pollSecsLeft=POLL_SECS,activeP='all',activeA='all',activeCompany='all',activeJira=false,sortDesc=true;
+let allTickets=[],pollSecsLeft=POLL_SECS,activeP='all',activeA='all',activeCompany='all',activeJira=false,sortDesc=true,activeStage='all',activeSLA=false;
 let viewMode='board',comTicketId=null,jiraTicketId=null,selectedTags=new Set();
 function normalizeAgentCode(value){
   const code=String(value||'').trim().toUpperCase();
@@ -4427,6 +4455,8 @@ function saveLastWorkspaceSession(mode){
       activeA,
       activeCompany,
       activeJira,
+      activeStage,
+      activeSLA,
       sortDesc,
       kpiTimeFilter,
       kpiTeamFilter,
@@ -4452,6 +4482,8 @@ function restoreLastWorkspaceSession(){
   if(typeof session?.activeA==='string')activeA=session.activeA;
   if(typeof session?.activeCompany==='string')activeCompany=session.activeCompany;
   activeJira=session?.activeJira===true;
+  if(session?.activeStage==='all'||STAGES.includes(session?.activeStage))activeStage=session.activeStage;
+  activeSLA=session?.activeSLA===true;
   if(typeof session?.sortDesc==='boolean')sortDesc=session.sortDesc;
   if(typeof session?.kpiTimeFilter==='string')kpiTimeFilter=session.kpiTimeFilter;
   if(typeof session?.kpiTeamFilter==='string')kpiTeamFilter=session.kpiTeamFilter;
@@ -4474,6 +4506,9 @@ function applyRestoredWorkspaceControls(){
   if(companyEl&&[...companyEl.options].some(o=>o.value===activeCompany))companyEl.value=activeCompany;
   const jiraBtn=document.getElementById('jira-filter-btn');
   jiraBtn?.classList.toggle('active',activeJira);
+  const stageEl=document.getElementById('stage-filter');
+  if(stageEl&&[...stageEl.options].some(o=>o.value===activeStage))stageEl.value=activeStage;
+  document.getElementById('sla-filter-btn')?.classList.toggle('active',activeSLA);
   const timeEl=document.getElementById('kpi-time-filter');
   if(timeEl&&[...timeEl.options].some(o=>o.value===kpiTimeFilter))timeEl.value=kpiTimeFilter;
   const teamEl=document.getElementById('kpi-team-filter');
@@ -6253,6 +6288,7 @@ function renderBoard(){
   document.getElementById('ticket-number-filter').value=activeTicketNumber;
   const agentFilter=enforcedAgentFilter();
   STAGES.forEach(col=>{
+    document.querySelector('.col-'+col).style.display=(activeStage!=='all'&&activeStage!==col)?'none':'';
     const tickets=allTickets.filter(t=>{
       if(ticketCategory[t.id]==='Spam')return false;
       if(isArchivedTicket(t.id))return false;
@@ -6262,6 +6298,7 @@ function renderBoard(){
       if(!ticketMatchesAgentFilter(t,agentFilter))return false;
       if(activeCompany!=='all'){const ce=ticketClientEmail[t.id];const hs=ce?hsCache[ce]:null;if(!hs||hs.companyName!==activeCompany)return false;}
       if(activeJira&&!ticketJira[t.id])return false; // Jira filter
+      if(activeSLA&&!getSLAStatus(t.id)?.overdue)return false; // Overdue filter
       if(!ticketMatchesNumberQuery(t))return false;
       if(isResolvedTicketHidden(t.id))return false;
       return normalizeTicketStage(ticketState[t.id]||'new')===col;
@@ -6280,6 +6317,8 @@ document.getElementById('sort-asc').addEventListener('click',()=>{sortDesc=false
 document.querySelectorAll('[data-pf]').forEach(b=>b.addEventListener('click',()=>{document.querySelectorAll('[data-pf]').forEach(x=>x.classList.remove('active'));b.classList.add('active');activeP=b.dataset.pf;saveLastWorkspaceSession();renderBoard();}));
 document.getElementById('agent-filter').addEventListener('change',e=>{activeA=e.target.value;saveLastWorkspaceSession();renderBoard();});
 document.getElementById('company-filter').addEventListener('change',e=>{activeCompany=e.target.value;saveLastWorkspaceSession();if(viewMode==='kpi')renderKpiView();else renderBoard();});
+document.getElementById('stage-filter').addEventListener('change',e=>{activeStage=e.target.value;saveLastWorkspaceSession();renderBoard();});
+document.getElementById('sla-filter-btn').addEventListener('click',()=>{activeSLA=!activeSLA;document.getElementById('sla-filter-btn').classList.toggle('active',activeSLA);saveLastWorkspaceSession();renderBoard();});
 document.getElementById('ticket-number-filter').addEventListener('input',e=>{activeTicketNumber=e.target.value||'';renderBoard();});
 // Some browsers restore a text input's previously typed value on reload or
 // back/forward-cache navigation even with autocomplete off, and can apply
