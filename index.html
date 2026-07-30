@@ -1009,8 +1009,8 @@ header {
   max-width: min(42vw, 430px);
   padding: 3px;
   border-radius: 999px;
-  background: rgba(var(--white-rgb), 0.06);
-  border: 1px solid rgba(var(--white-rgb), 0.08);
+  background: rgba(var(--ink-text-rgb), 0.06);
+  border: 1px solid rgba(var(--ink-text-rgb), 0.08);
   overflow-x: auto;
   overflow-y: hidden;
   scrollbar-width: none;
@@ -1029,7 +1029,7 @@ header {
   content: "Load";
   flex: 0 0 auto;
   padding: 0 5px 0 7px;
-  color: rgba(var(--white-rgb), 0.46);
+  color: rgba(var(--ink-text-rgb), 0.46);
   font-size: 10px;
   font-weight: 800;
   letter-spacing: .04em;
@@ -6318,6 +6318,15 @@ document.querySelectorAll('[data-pf]').forEach(b=>b.addEventListener('click',()=
 document.getElementById('agent-filter').addEventListener('change',e=>{activeA=e.target.value;saveLastWorkspaceSession();renderBoard();});
 document.getElementById('company-filter').addEventListener('change',e=>{activeCompany=e.target.value;saveLastWorkspaceSession();if(viewMode==='kpi')renderKpiView();else renderBoard();});
 document.getElementById('stage-filter').addEventListener('change',e=>{activeStage=e.target.value;saveLastWorkspaceSession();renderBoard();});
+// The workload bar hides its scrollbar for a cleaner header look, which
+// leaves no way to reach the rest of the agent list with a normal mouse
+// wheel (only touch/trackpad swipes scroll it natively) - translate a
+// vertical wheel scroll into horizontal movement so it's reachable either way.
+document.getElementById('workload-bar').addEventListener('wheel',e=>{
+  if(e.deltaY===0)return;
+  e.preventDefault();
+  e.currentTarget.scrollLeft+=e.deltaY;
+},{passive:false});
 document.getElementById('sla-filter-btn').addEventListener('click',()=>{activeSLA=!activeSLA;document.getElementById('sla-filter-btn').classList.toggle('active',activeSLA);saveLastWorkspaceSession();renderBoard();});
 document.getElementById('ticket-number-filter').addEventListener('input',e=>{activeTicketNumber=e.target.value||'';renderBoard();});
 // Some browsers restore a text input's previously typed value on reload or
