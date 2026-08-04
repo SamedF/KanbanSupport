@@ -700,6 +700,31 @@ header {
   animation: pulse 1.5s infinite;
 }
 
+/* This badge used to be decorative (permanently green "LIVE"). It now
+   reflects the real SSE connection state, so a broken stream is visible
+   instead of being advertised as live. */
+.live-indicator.live-connecting,
+.live-indicator.live-reconnecting {
+  background: rgba(var(--amber-500-rgb), 0.14);
+  border-color: rgba(var(--amber-500-rgb), 0.32);
+  color: var(--amber-200);
+}
+.live-indicator.live-connecting .live-dot,
+.live-indicator.live-reconnecting .live-dot {
+  background: var(--amber-500);
+  box-shadow: 0 0 0 4px rgba(var(--amber-500-rgb), 0.16);
+}
+.live-indicator.live-off {
+  background: rgba(148, 163, 184, 0.14);
+  border-color: rgba(148, 163, 184, 0.30);
+  color: var(--slate-300);
+}
+.live-indicator.live-off .live-dot {
+  background: var(--slate-400);
+  box-shadow: none;
+  animation: none;
+}
+
 @keyframes pulse {
   0%, 100% {
     opacity: 1;
@@ -3183,7 +3208,7 @@ th {
 <header>
   <div class="header-left">
     <h1> Support Kanban <small>helpdesk@quinta.im</small></h1>
-    <div class="meta"><span class="live-indicator"><span class="live-dot"></span>LIVE</span><span id="meta">Loading</span><span class="poll-countdown" id="poll-cd"></span></div>
+    <div class="meta"><span class="live-indicator" id="live-indicator" title="Live sync"><span class="live-dot"></span>LIVE</span><span id="meta">Loading</span><span class="poll-countdown" id="poll-cd"></span></div>
   </div>
   <div class="header-right">
     <button class="theme-toggle-btn" id="theme-toggle-btn" type="button" title="Toggle dark mode" aria-label="Toggle dark mode"></button>
@@ -3935,6 +3960,21 @@ let ticketHasNewReply={}; // ticketId -> true while an unread reply is glowing o
 let ticketResolutionMeta={}; // ticketId -> CS confirmation / send-back metadata
 let ticketArchived={}; // ticketId -> {archivedAt,archivedBy,reason:'manual'|'resolved_confirmed'}
 function isArchivedTicket(id){return !!ticketArchived[id];}
+// A ticket only counts toward an agent's workload while it is still open.
+// Resolved tickets used to be counted here, which inflated every agent pill
+// (an agent with 17 open and 18 resolved showed 35) and - worse - made
+// leastLoadedSupportAgent() balance on LIFETIME volume instead of current
+// load, so it drove agents to equal all-time totals while their real open
+// counts drifted far apart.
+function isOpenWorkloadTicket(id){
+  if(ticketCategory[id]==='Spam'||isArchivedTicket(id))return false;
+  return normalizeTicketStage(ticketState[id]||'new')!=='res';
+}
+function openWorkloadByAgent(){
+  const load=Object.fromEntries(SUPPORT_AGENTS.map(a=>[a,0]));
+  allTickets.forEach(t=>{if(!isOpenWorkloadTicket(t.id))return;const a=ticketAssignee[t.id];if(a in load)load[a]++;});
+  return load;
+}
 let spamSenders=new Set();
 let hsCache={},domainCompanyCache={},readMentions=new Set(),readJiraAlerts=new Set();
 let jiraAlerts=[],jiraStatusSnapshot={};
@@ -4131,7 +4171,7 @@ function buildStatePayload(reason){
     seenIds:Object.keys(seen),
     ticketState,ticketStageTouchedAt,ticketHasNewReply,ticketResolutionMeta,ticketArchived,ticketPriority,ticketCategory,ticketSubtype,ticketAssignee,ticketAssignmentMode,manualSupportOverride,manualCSOverride,ticketCSOwner,ticketComments,ticketClientEmail,ticketCreatedAt,ticketCreatedBy,ticketNumbers,ticketNumberCounter,ticketJira,ticketHubspotId,
     spamSenders:[...spamSenders],hsCache,domainCompanyCache,readMentions:[...readMentions],jiraAlerts,readJiraAlerts:[...readJiraAlerts],jiraStatusSnapshot,companyCustomProps,companyProfiles,companiesViewType,companyNetworkCache,companyFilters,coOwnerMappings,actionHistory,
-    _meta:{clientSavedAt:now,clientVersion:stateVersion}
+    _meta:{clientSavedAt:now,clientVersion:stateVersion,clientId:LIVE_CLIENT_ID}
   };
   latestPayloadForRetry=JSON.parse(JSON.stringify(snapshot));
   return latestPayloadForRetry;
@@ -4359,9 +4399,117 @@ function mergeDatabaseTickets(dbTickets){
   allTickets=[...byId.values()].sort((a,b)=>new Date(b?.email?.receivedDateTime||0)-new Date(a?.email?.receivedDateTime||0));
   return changes;
 }
+// ---------------------------------------------------------------------------
+// Live sync client
+//
+// The board renders everything out of flat, ticket-id-keyed maps, so a remote
+// change can be applied by writing the same keys and re-rendering - no reload
+// and no loss of local UI state (open modal, scroll position, filters).
+// ---------------------------------------------------------------------------
+const LIVE_CLIENT_ID=(()=>{
+  try{
+    const k='kanban-client-id';
+    let v=sessionStorage.getItem(k);
+    // sessionStorage (not localStorage) so two tabs in the same browser get
+    // distinct ids and therefore still sync with each other.
+    if(!v){v=Math.random().toString(36).slice(2)+Date.now().toString(36);sessionStorage.setItem(k,v);}
+    return v;
+  }catch(_){return Math.random().toString(36).slice(2);}
+})();
+let liveRev=0,liveSource=null,liveReloadTimer=null;
+// Registry of the maps a patch may write. These are all mutated in place
+// (never reassigned), so holding references here stays valid for the session.
+function liveSyncTargets(){
+  return {ticketState,ticketStageTouchedAt,ticketAssignee,ticketCSOwner,ticketAssignmentMode,
+    manualSupportOverride,manualCSOverride,ticketPriority,ticketCategory,ticketSubtype,
+    ticketJira,ticketHubspotId,ticketArchived,ticketResolutionMeta,ticketHasNewReply,
+    ticketNumbers,ticketComments,ticketCreatedBy};
+}
+function setLiveIndicator(state,detail){
+  const el=document.getElementById('live-indicator');
+  if(!el)return;
+  // Keep the base class - the state class only layers colour on top of it.
+  el.className='live-indicator live-'+state;
+  el.title=detail||('Live sync: '+state);
+}
+function applyBoardPatch(p){
+  if(!p)return;
+  // Our own save echoing back - applying it could clobber an edit the user
+  // has made since, and it is already in our maps anyway.
+  if(p.origin&&p.origin===LIVE_CLIENT_ID)return;
+  const targets=liveSyncTargets();
+  let touched=0;
+  (p.removed||[]).forEach(id=>{
+    const key=String(id);
+    const before=allTickets.length;
+    allTickets=allTickets.filter(t=>String(t.id)!==key);
+    if(allTickets.length!==before)touched++;
+  });
+  (p.added||[]).forEach(t=>{
+    if(!t||!t.id||!t.email)return;
+    if(allTickets.some(x=>String(x.id)===String(t.id)))return;
+    allTickets.push(t);touched++;
+  });
+  (p.changes||[]).forEach(c=>{
+    if(!c||!c.field)return;
+    const map=targets[c.field];
+    if(!map)return;
+    const id=String(c.id);
+    if(c.value===null||c.value===undefined){if(id in map){delete map[id];touched++;}return;}
+    const next=c.field==='ticketState'?normalizeTicketStage(c.value):c.value;
+    if(JSON.stringify(map[id])===JSON.stringify(next))return;
+    map[id]=next;touched++;
+  });
+  if(!touched)return;
+  allTickets.sort((a,b)=>new Date(b?.email?.receivedDateTime||0)-new Date(a?.email?.receivedDateTime||0));
+  allTickets.forEach(t=>ensureTicketNumber(t.id));
+  rebuildTagged();
+  updateWorkload();updateSpamBadge();updateArchiveBadge();updateJiraBadge();
+  updateCompanyFilter();
+  renderActiveView();
+  if(p.actor&&p.actor!==currentUser()){
+    setLiveIndicator('active','Last update from '+p.actor+' at '+new Date().toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit',second:'2-digit'}));
+  }
+}
+async function reloadBoardFromServer(reason){
+  // Used when a patch stream can't be trusted (replay gap, oversized diff).
+  clearTimeout(liveReloadTimer);
+  liveReloadTimer=setTimeout(async()=>{
+    await loadState();
+    const dbTickets=await apiGetTickets();
+    if(dbTickets)mergeDatabaseTickets(dbTickets);
+    updateWorkload();updateSpamBadge();updateArchiveBadge();updateJiraBadge();
+    updateCompanyFilter();renderActiveView();
+    setLiveIndicator('active','Resynced ('+(reason||'reload')+')');
+  },250);
+}
+function startLiveSync(){
+  if(!window.EventSource){setLiveIndicator('off','This browser has no EventSource support');return;}
+  if(liveSource){try{liveSource.close();}catch(_){}}
+  setLiveIndicator('connecting');
+  const es=new EventSource('/api/events',{withCredentials:true});
+  liveSource=es;
+  es.addEventListener('hello',e=>{
+    try{liveRev=Number(JSON.parse(e.data)?.rev)||liveRev;}catch(_){}
+    setLiveIndicator('active','Live');
+  });
+  es.addEventListener('board_patch',e=>{
+    liveRev=Number(e.lastEventId)||liveRev;
+    try{applyBoardPatch(JSON.parse(e.data));}catch(err){console.warn('live patch failed',err);}
+  });
+  es.addEventListener('board_reload',e=>{
+    liveRev=Number(e.lastEventId)||liveRev;
+    let reason='';try{reason=JSON.parse(e.data)?.reason||'';}catch(_){}
+    reloadBoardFromServer(reason);
+  });
+  // EventSource reconnects on its own (honouring the server's retry:) and
+  // replays via Last-Event-ID, so this only needs to reflect status.
+  es.onerror=()=>{setLiveIndicator('reconnecting','Reconnecting to live updates');};
+}
 async function loadState(){
   const s=await apiGetState();
   if(!s)return;
+  if(Number(s._liveRev))liveRev=Number(s._liveRev);
   if(Array.isArray(s.allTickets)){
     allTickets=s.allTickets.filter(t=>t&&t.id&&t.email);
   }
@@ -5598,7 +5746,7 @@ function pickPrimaryCompany(companies,email){
   }
   return best||companies[0];
 }
-function leastLoadedSupportAgent(){const load=Object.fromEntries(SUPPORT_AGENTS.map(a=>[a,0]));allTickets.filter(t=>ticketCategory[t.id]!=='Spam'&&!isArchivedTicket(t.id)).forEach(t=>{const a=ticketAssignee[t.id];if(a in load)load[a]++;});return SUPPORT_AGENTS.reduce((m,a)=>load[a]<load[m]?a:m,SUPPORT_AGENTS[0]);}
+function leastLoadedSupportAgent(){const load=openWorkloadByAgent();return SUPPORT_AGENTS.reduce((m,a)=>load[a]<load[m]?a:m,SUPPORT_AGENTS[0]);}
 function leastLoadedCSAgent(){const load=Object.fromEntries(CS_AGENTS.map(a=>[a,0]));allTickets.filter(t=>ticketCategory[t.id]!=='Spam'&&!isArchivedTicket(t.id)).forEach(t=>{const a=ticketAssignee[t.id];if(a in load)load[a]++;});return CS_AGENTS.reduce((m,a)=>load[a]<load[m]?a:m,CS_AGENTS[0]);}
 function isSupportAssignedTicket(id){const assignee=String(ticketAssignee[id]||'').trim();return ticketAssignmentMode[id]==='support'||SUPPORT_AGENTS.includes(assignee);}
 function extractBestCompanyCoOwner(companies,primary,email){
@@ -5855,8 +6003,7 @@ const SUBTYPE_MATCHERS=[
 function classifySubtype(e){const t=normalizeForClassification((e.subject||'')+' '+(e.summary||''));for(const m of SUBTYPE_MATCHERS){if(m.pattern.test(t))return m.id;}return '3.1';}
 function autoAssignNew(tickets){tickets.forEach(t=>{if(ticketAssignee[t.id]||ticketCategory[t.id]==='Spam'||isArchivedTicket(t.id))return;ensureSupportAssignmentForTicket(t.id,t.email);});}
 function updateWorkload(){
-  const load = Object.fromEntries(SUPPORT_AGENTS.map(a=>[a,0]));
-  allTickets.filter(t=>ticketCategory[t.id]!=='Spam'&&!isArchivedTicket(t.id)).forEach(t=>{const a=ticketAssignee[t.id];if(a in load)load[a]++;});
+  const load = openWorkloadByAgent();
   const displayOrder = [
     'ZIO',
     'SGU',
@@ -6616,6 +6763,10 @@ async function poll(){if(!hasCowork){startCountdown();return;}const res=await fe
   await buildAgentUI();
   await refreshJiraStatus();
   await loadState();
+  // Started right after the first load (before the mailbox sync, which can
+  // take a while and has its own early-return path) so the board is live in
+  // every case, including when Microsoft 365 is not connected.
+  startLiveSync();
   const dbTickets=await apiGetTickets();
   if(mergeDatabaseTickets(dbTickets)){
     applyCompanyCSAssignments();

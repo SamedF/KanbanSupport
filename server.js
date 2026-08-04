@@ -4388,17 +4388,135 @@ app.post('/mcp', requireApiToken, mcpApiLimiter, handleMcpRequest);
 // without colliding with that org-level registration.
 app.post('/mcp-plugin', requireApiToken, mcpApiLimiter, handleMcpRequest);
 
+// ---------------------------------------------------------------------------
+// Live sync (SSE)
+//
+// Before this, loadState() ran exactly once at boot and nothing ever re-read
+// server state, so every open tab held its own drifting copy of the board:
+// an agent's move was invisible to everyone else until they refreshed, and a
+// lagging tab's next full-snapshot save would silently revert it.
+//
+// Rather than rewrite every mutation into a granular endpoint at once, the
+// server diffs consecutive board snapshots on save and pushes just the
+// changed ticket fields. Clients apply those patches into the same keyed maps
+// they already render from, so the board updates in place.
+//
+// Single-instance only: SSE_CLIENTS is per-process. If this ever runs with
+// more than one replica, sseBroadcast() needs to fan out through Postgres
+// LISTEN/NOTIFY so clients on other replicas still get patches.
+// ---------------------------------------------------------------------------
+const SSE_CLIENTS = new Set();
+const SSE_BUFFER = [];
+const SSE_BUFFER_MAX = 500;
+// Above this many changed fields in one save, patching costs more than a
+// reload - tell clients to re-pull instead of shipping a huge frame.
+const SSE_PATCH_MAX = 400;
+let sseRev = 0;
+
+// Per-ticket keyed maps that clients render from. Anything not listed here is
+// session-local (caches, read-receipts) and deliberately not broadcast.
+const LIVE_SYNC_FIELDS = [
+  'ticketState', 'ticketStageTouchedAt', 'ticketAssignee', 'ticketCSOwner',
+  'ticketAssignmentMode', 'manualSupportOverride', 'manualCSOverride',
+  'ticketPriority', 'ticketCategory', 'ticketSubtype', 'ticketJira',
+  'ticketHubspotId', 'ticketArchived', 'ticketResolutionMeta',
+  'ticketHasNewReply', 'ticketNumbers', 'ticketComments', 'ticketCreatedBy'
+];
+
+function sseFrame(rev, type, data) {
+  return `id: ${rev}\nevent: ${type}\ndata: ${JSON.stringify(data)}\n\n`;
+}
+
+function sseBroadcast(type, data) {
+  sseRev += 1;
+  const rev = sseRev;
+  SSE_BUFFER.push({ rev, type, data });
+  if (SSE_BUFFER.length > SSE_BUFFER_MAX) SSE_BUFFER.splice(0, SSE_BUFFER.length - SSE_BUFFER_MAX);
+  const frame = sseFrame(rev, type, data);
+  SSE_CLIENTS.forEach((client) => {
+    try { client.write(frame); } catch (_) { SSE_CLIENTS.delete(client); }
+  });
+  return rev;
+}
+
+function diffBoardMaps(before, after) {
+  const changes = [];
+  for (const field of LIVE_SYNC_FIELDS) {
+    const prev = (before && typeof before[field] === 'object' && before[field]) || {};
+    const next = (after && typeof after[field] === 'object' && after[field]) || {};
+    for (const id of new Set([...Object.keys(prev), ...Object.keys(next)])) {
+      // JSON compare so object-valued maps (ticketResolutionMeta, comment
+      // arrays) diff by content rather than by reference.
+      if (JSON.stringify(prev[id]) === JSON.stringify(next[id])) continue;
+      changes.push({ id, field, value: next[id] === undefined ? null : next[id] });
+      if (changes.length > SSE_PATCH_MAX) return { changes, overflow: true };
+    }
+  }
+  return { changes, overflow: false };
+}
+
+function diffBoardTickets(before, after) {
+  const prevIds = new Set((Array.isArray(before?.allTickets) ? before.allTickets : []).map(t => String(t?.id || '')));
+  const nextList = Array.isArray(after?.allTickets) ? after.allTickets : [];
+  const nextIds = new Set(nextList.map(t => String(t?.id || '')));
+  return {
+    added: nextList.filter(t => t && t.id && !prevIds.has(String(t.id))),
+    removed: [...prevIds].filter(id => id && !nextIds.has(id))
+  };
+}
+
+app.get('/api/events', requireAuth, (req, res) => {
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache, no-transform',
+    Connection: 'keep-alive',
+    // Stops nginx/ingress from buffering the stream into uselessness.
+    'X-Accel-Buffering': 'no'
+  });
+  res.write('retry: 3000\n\n');
+
+  // Replay anything the client missed while disconnected. EventSource sends
+  // Last-Event-ID automatically on reconnect, so a dropped connection
+  // resumes instead of silently losing patches.
+  const lastEventId = Number(req.headers['last-event-id'] || req.query.lastEventId || 0);
+  if (Number.isFinite(lastEventId) && lastEventId > 0) {
+    const missed = SSE_BUFFER.filter(e => e.rev > lastEventId);
+    // Gap wider than the buffer - can't prove we're complete, so make the
+    // client re-pull rather than hand it a partial history.
+    if (missed.length && missed[0].rev > lastEventId + 1) {
+      res.write(sseFrame(sseRev, 'board_reload', { reason: 'replay_gap' }));
+    } else {
+      missed.forEach(e => res.write(sseFrame(e.rev, e.type, e.data)));
+    }
+  }
+
+  res.write(sseFrame(sseRev, 'hello', { rev: sseRev, actor: String(req.session.username || '').toUpperCase() }));
+  SSE_CLIENTS.add(res);
+
+  const keepAlive = setInterval(() => {
+    try { res.write(': ping\n\n'); } catch (_) {}
+  }, 25000);
+
+  req.on('close', () => {
+    clearInterval(keepAlive);
+    SSE_CLIENTS.delete(res);
+    try { res.end(); } catch (_) {}
+  });
+});
+
 app.get('/api/state', requireAuth, async (req, res) => {
   try {
     const state = await hydrateStateFromDatabase(safeReadState());
-    res.json(state);
+    res.json({ ...state, _liveRev: sseRev });
   } catch (error) {
     console.error('State hydrate failed:', error);
-    res.json(safeReadState());
+    res.json({ ...safeReadState(), _liveRev: sseRev });
   }
 });
 app.post('/api/state', requireAuth, async (req, res) => {
   const state = req.body || {};
+  // Snapshot before the write so we can broadcast just what actually changed.
+  const beforeState = safeReadState();
   const result = await safeWriteState(state);
   let ticketDb = { count: 0 };
   try {
@@ -4410,7 +4528,30 @@ app.post('/api/state', requireAuth, async (req, res) => {
     }).catch(() => null);
   }
   const { state: _fullState, ...resultSummary } = result;
-  res.json({ ok: !!result.saved, ...resultSummary, ticketDb });
+
+  // Push the delta to every other open board. Note this reflects the MERGED
+  // post-write state, not the raw payload - so a stale tab's rejected fields
+  // broadcast as the value that actually won, which self-heals that tab.
+  let liveRev = sseRev;
+  try {
+    const afterState = result.state || safeReadState();
+    const { changes, overflow } = diffBoardMaps(beforeState, afterState);
+    const { added, removed } = diffBoardTickets(beforeState, afterState);
+    const actor = String(req.session.username || '').toUpperCase() || null;
+    // origin lets the sending tab ignore its own echo, so a patch in flight
+    // can't roll back an edit the user made in the meantime.
+    const origin = String(state?._meta?.clientId || '') || null;
+    if (overflow) {
+      liveRev = sseBroadcast('board_reload', { reason: 'patch_overflow', actor });
+    } else if (changes.length || added.length || removed.length) {
+      liveRev = sseBroadcast('board_patch', { actor, origin, changes, added, removed });
+    }
+  } catch (error) {
+    // A broadcast failure must never fail the save that already succeeded.
+    console.error('Live sync broadcast failed:', error?.message || error);
+  }
+
+  res.json({ ok: !!result.saved, ...resultSummary, ticketDb, liveRev });
 });
 
 app.post('/api/hubspot/companies/:companyId/custom-property', requireAuth, async (req, res) => {
