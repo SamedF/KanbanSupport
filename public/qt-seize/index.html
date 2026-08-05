@@ -522,6 +522,262 @@
       return canvasToDataUrl(resizedCanvas);
     }
 
+    function clampInt(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+
+    // Feather a subject canvas so it dissolves into the fill on the sides that
+    // were actually extended (transparent gap side, opaque interior).
+    function featherSubject(fx, w, h, gaps, frac) {
+      fx.globalCompositeOperation = 'destination-in';
+      if (gaps.gapL > 1 || gaps.gapR > 1) {
+        const f = Math.min(0.5, Math.max(3, Math.round(w * frac)) / w);
+        const g = fx.createLinearGradient(0, 0, w, 0);
+        g.addColorStop(0, gaps.gapL > 1 ? 'rgba(0,0,0,0)' : 'rgba(0,0,0,1)');
+        g.addColorStop(f, 'rgba(0,0,0,1)');
+        g.addColorStop(1 - f, 'rgba(0,0,0,1)');
+        g.addColorStop(1, gaps.gapR > 1 ? 'rgba(0,0,0,0)' : 'rgba(0,0,0,1)');
+        fx.fillStyle = g;
+        fx.fillRect(0, 0, w, h);
+      }
+      if (gaps.gapT > 1 || gaps.gapB > 1) {
+        const f = Math.min(0.5, Math.max(3, Math.round(h * frac)) / h);
+        const g = fx.createLinearGradient(0, 0, 0, h);
+        g.addColorStop(0, gaps.gapT > 1 ? 'rgba(0,0,0,0)' : 'rgba(0,0,0,1)');
+        g.addColorStop(f, 'rgba(0,0,0,1)');
+        g.addColorStop(1 - f, 'rgba(0,0,0,1)');
+        g.addColorStop(1, gaps.gapB > 1 ? 'rgba(0,0,0,0)' : 'rgba(0,0,0,1)');
+        fx.fillStyle = g;
+        fx.fillRect(0, 0, w, h);
+      }
+      fx.globalCompositeOperation = 'source-over';
+    }
+
+    // Sum of squared RGB differences between the PxP patch around (tx,ty) and
+    // the one around (sx,sy) in a float RGB buffer. Bails early past `cutoff`.
+    function patchDist(buf, W, H, tx, ty, sx, sy, P, cutoff) {
+      let sum = 0;
+      for (let dy = -P; dy <= P; dy++) {
+        const ty2 = clampInt(ty + dy, 0, H - 1), sy2 = clampInt(sy + dy, 0, H - 1);
+        for (let dx = -P; dx <= P; dx++) {
+          const tx2 = clampInt(tx + dx, 0, W - 1), sx2 = clampInt(sx + dx, 0, W - 1);
+          const ti = (ty2 * W + tx2) * 3, si = (sy2 * W + sx2) * 3;
+          const dr = buf[ti] - buf[si], dg = buf[ti + 1] - buf[si + 1], db = buf[ti + 2] - buf[si + 2];
+          sum += dr * dr + dg * dg + db * db;
+        }
+        if (sum >= cutoff) return sum;
+      }
+      return sum;
+    }
+
+    // PatchMatch-based hole filling (Barnes et al. + Wexler-style EM
+    // reconstruction). `hole` marks pixels to synthesise; known pixels are the
+    // photo itself and are never sampled from anything but real content, so the
+    // fill is grown from the picture's own colours and textures.
+    function patchMatchInpaint(buf, hole, W, H) {
+      const P = 2;              // 5x5 patches
+      const N = W * H;
+
+      // Source centres whose whole patch is in-bounds AND fully known.
+      const validSrc = new Uint8Array(N);
+      const srcList = [];
+      for (let y = P; y < H - P; y++) {
+        for (let x = P; x < W - P; x++) {
+          let ok = 1;
+          for (let dy = -P; dy <= P && ok; dy++) {
+            for (let dx = -P; dx <= P; dx++) {
+              if (hole[(y + dy) * W + (x + dx)]) { ok = 0; break; }
+            }
+          }
+          if (ok) { validSrc[y * W + x] = 1; srcList.push(y * W + x); }
+        }
+      }
+      if (srcList.length === 0) return;
+
+      // Target centres = any patch overlapping the hole (hole dilated by P).
+      const active = new Uint8Array(N);
+      for (let y = 0; y < H; y++) {
+        for (let x = 0; x < W; x++) {
+          if (!hole[y * W + x]) continue;
+          for (let dy = -P; dy <= P; dy++) {
+            const yy = y + dy; if (yy < 0 || yy >= H) continue;
+            for (let dx = -P; dx <= P; dx++) {
+              const xx = x + dx; if (xx < 0 || xx >= W) continue;
+              active[yy * W + xx] = 1;
+            }
+          }
+        }
+      }
+
+      const nnx = new Int32Array(N), nny = new Int32Array(N), nnd = new Float32Array(N);
+      for (let i = 0; i < N; i++) {
+        if (!active[i]) { nnd[i] = Infinity; continue; }
+        const tx = i % W, ty = (i / W) | 0;
+        const s = srcList[(Math.random() * srcList.length) | 0];
+        const sx = s % W, sy = (s / W) | 0;
+        nnx[i] = sx; nny[i] = sy;
+        nnd[i] = patchDist(buf, W, H, tx, ty, sx, sy, P, Infinity);
+      }
+
+      const maxR = Math.max(W, H);
+      const ITERS = 6;
+      const accR = new Float32Array(N), accG = new Float32Array(N), accB = new Float32Array(N), accW = new Float32Array(N);
+      const norm = 25 * 3 * ((2 * P + 1) * (2 * P + 1));
+
+      for (let it = 0; it < ITERS; it++) {
+        const forward = (it % 2 === 0);
+        const xs = forward ? 0 : W - 1, xe = forward ? W : -1;
+        const ys = forward ? 0 : H - 1, ye = forward ? H : -1;
+        const step = forward ? 1 : -1;
+
+        for (let ty = ys; ty !== ye; ty += step) {
+          for (let tx = xs; tx !== xe; tx += step) {
+            const i = ty * W + tx;
+            if (!active[i]) continue;
+            let bx = nnx[i], by = nny[i], bd = nnd[i];
+
+            const px = tx - step;
+            if (px >= 0 && px < W) {
+              const ni = i - step;
+              if (active[ni]) {
+                const cx = nnx[ni] + step, cy = nny[ni];
+                if (cx >= P && cx < W - P && validSrc[cy * W + cx]) {
+                  const d = patchDist(buf, W, H, tx, ty, cx, cy, P, bd);
+                  if (d < bd) { bd = d; bx = cx; by = cy; }
+                }
+              }
+            }
+            const py = ty - step;
+            if (py >= 0 && py < H) {
+              const ni = i - step * W;
+              if (active[ni]) {
+                const cx = nnx[ni], cy = nny[ni] + step;
+                if (cy >= P && cy < H - P && validSrc[cy * W + cx]) {
+                  const d = patchDist(buf, W, H, tx, ty, cx, cy, P, bd);
+                  if (d < bd) { bd = d; bx = cx; by = cy; }
+                }
+              }
+            }
+            for (let radius = maxR; radius >= 1; radius = (radius / 2) | 0) {
+              const rx = bx + (((Math.random() * 2 - 1) * radius) | 0);
+              const ry = by + (((Math.random() * 2 - 1) * radius) | 0);
+              if (rx >= P && ry >= P && rx < W - P && ry < H - P && validSrc[ry * W + rx]) {
+                const d = patchDist(buf, W, H, tx, ty, rx, ry, P, bd);
+                if (d < bd) { bd = d; bx = rx; by = ry; }
+              }
+            }
+            nnx[i] = bx; nny[i] = by; nnd[i] = bd;
+          }
+        }
+
+        // EM reconstruction: each hole pixel is the similarity-weighted average
+        // of the matched source pixel from every patch that covers it.
+        accR.fill(0); accG.fill(0); accB.fill(0); accW.fill(0);
+        for (let ty = 0; ty < H; ty++) {
+          for (let tx = 0; tx < W; tx++) {
+            const i = ty * W + tx;
+            if (!active[i]) continue;
+            const sx = nnx[i], sy = nny[i];
+            const w = 1 / (1 + nnd[i] / norm);
+            for (let dy = -P; dy <= P; dy++) {
+              const pyy = ty + dy; if (pyy < 0 || pyy >= H) continue;
+              const syy = clampInt(sy + dy, 0, H - 1);
+              for (let dx = -P; dx <= P; dx++) {
+                const pxx = tx + dx; if (pxx < 0 || pxx >= W) continue;
+                const hp = pyy * W + pxx;
+                if (!hole[hp]) continue;
+                const sxx = clampInt(sx + dx, 0, W - 1);
+                const sidx = (syy * W + sxx) * 3;
+                accR[hp] += buf[sidx] * w; accG[hp] += buf[sidx + 1] * w;
+                accB[hp] += buf[sidx + 2] * w; accW[hp] += w;
+              }
+            }
+          }
+        }
+        for (let p = 0; p < N; p++) {
+          if (hole[p] && accW[p] > 0) {
+            buf[p * 3] = accR[p] / accW[p];
+            buf[p * 3 + 1] = accG[p] / accW[p];
+            buf[p * 3 + 2] = accB[p] / accW[p];
+          }
+        }
+      }
+    }
+
+    // Content-aware Expand: synthesise the extended area from the photo's own
+    // patches, then composite the sharp original on top. Falls back to the
+    // fast blurred fill if anything goes wrong (e.g. a tainted canvas).
+    async function contentAwareExpand(img, target) {
+      try {
+        const tw = target.width, th = target.height;
+        const iw = img.naturalWidth, ih = img.naturalHeight;
+        const r = containRect(iw, ih, tw, th);
+        const gaps = { gapL: r.x, gapR: tw - (r.x + r.w), gapT: r.y, gapB: th - (r.y + r.h) };
+        if (gaps.gapL < 2 && gaps.gapR < 2 && gaps.gapT < 2 && gaps.gapB < 2) {
+          return resizeOnly(img, target);
+        }
+
+        // Small working frame - synthesis is done here, the subject is re-added
+        // at full resolution afterwards so its detail is never downsampled.
+        const WORK_MAX = 224;
+        const s = Math.min(1, WORK_MAX / Math.max(tw, th));
+        const W = Math.max(24, Math.round(tw * s));
+        const H = Math.max(24, Math.round(th * s));
+        const rw = containRect(iw, ih, W, H);
+
+        const { canvas: wc, ctx: wx } = makeCanvas(W, H);
+        // Seed the hole with a blurred mirror estimate so EM converges fast.
+        wx.filter = `blur(${Math.max(2, Math.round(Math.min(W, H) * 0.05))}px)`;
+        mirrorTile(wx, img, rw, W, H);
+        wx.filter = 'none';
+        // Overwrite the known region with the real (downscaled) photo.
+        wx.drawImage(img, rw.x, rw.y, rw.w, rw.h);
+
+        const idata = wx.getImageData(0, 0, W, H);
+        const px = idata.data;
+        const N = W * H;
+        const buf = new Float32Array(N * 3);
+        for (let i = 0; i < N; i++) {
+          buf[i * 3] = px[i * 4]; buf[i * 3 + 1] = px[i * 4 + 1]; buf[i * 3 + 2] = px[i * 4 + 2];
+        }
+        const hole = new Uint8Array(N);
+        for (let y = 0; y < H; y++) {
+          for (let x = 0; x < W; x++) {
+            const inSub = x >= rw.x && x < rw.x + rw.w && y >= rw.y && y < rw.y + rw.h;
+            if (!inSub) hole[y * W + x] = 1;
+          }
+        }
+
+        patchMatchInpaint(buf, hole, W, H);
+
+        for (let i = 0; i < N; i++) {
+          px[i * 4] = clampInt(Math.round(buf[i * 3]), 0, 255);
+          px[i * 4 + 1] = clampInt(Math.round(buf[i * 3 + 1]), 0, 255);
+          px[i * 4 + 2] = clampInt(Math.round(buf[i * 3 + 2]), 0, 255);
+          px[i * 4 + 3] = 255;
+        }
+        wx.putImageData(idata, 0, 0);
+
+        // Compose full-res: upscale the synthesised frame, add grain, then lay
+        // the sharp subject back with a wide feather into the new content.
+        const { canvas, ctx } = makeCanvas(tw, th);
+        // A touch of blur on the upscale hides low-res synthesis pixels without
+        // flattening the structure PatchMatch produced.
+        ctx.filter = `blur(${Math.max(0, Math.round(Math.max(tw, th) / W * 0.6))}px)`;
+        ctx.drawImage(wc, 0, 0, tw, th);
+        ctx.filter = 'none';
+
+        addGrain(ctx, tw, th, 0.05);
+
+        const { canvas: fgCanvas, ctx: fx } = makeCanvas(r.w, r.h);
+        fx.drawImage(img, 0, 0, r.w, r.h);
+        featherSubject(fx, r.w, r.h, gaps, 0.06);
+        ctx.drawImage(fgCanvas, r.x, r.y);
+
+        return canvasToDataUrl(canvas);
+      } catch (err) {
+        return generateLocalOutpaint(img, target);
+      }
+    }
+
     async function generateLocalOutpaint(img, target) {
       const tw = target.width, th = target.height;
       const iw = img.naturalWidth, ih = img.naturalHeight;
@@ -730,9 +986,11 @@
       item.status = 'working';
       renderQueue();
       const img = await loadImageFromUrl(item.sourceUrl);
+      // Let the "working" badge paint before the synthesis blocks the thread.
+      await new Promise(r => setTimeout(r, 0));
       const dataUrl = mode === 'resize'
         ? await resizeOnly(img, target)
-        : await generateLocalOutpaint(img, target);
+        : await contentAwareExpand(img, target);
       item.resultUrl = dataUrl;
       item.status = 'done';
     }
