@@ -21,6 +21,19 @@ const AVATAR_UPLOAD_DIR = path.join(__dirname, 'public', 'uploads', 'avatars');
 const MAX_BACKUPS = Number(process.env.STATE_BACKUP_KEEP || 50);
 const BACKUP_MIN_INTERVAL_MS = Number(process.env.STATE_BACKUP_MIN_INTERVAL_MS || 60_000);
 const RESOLVED_RETENTION_MS = Number(process.env.RESOLVED_RETENTION_MS || 72 * 60 * 60 * 1000);
+// Shift tracking (drives shift-time SLA). Kept in its own file rather than in
+// board-state.json: it is server-authoritative (the client cannot be trusted to
+// report its own shift), and it must not take part in the board's
+// last-writer-wins state merge.
+const SHIFTS_PATH = path.join(__dirname, 'data', 'shifts.json');
+// A tab left open is not a shift. Without a heartbeat for this long the shift
+// is closed retroactively at the last heartbeat, so a forgotten tab or a
+// browser crash cannot accrue SLA time overnight.
+const SHIFT_IDLE_MS = Number(process.env.SHIFT_IDLE_MS || 30 * 60 * 1000);
+const SHIFT_SWEEP_MS = 60_000;
+// SLA only ever looks back over open tickets; 120 days is far more history than
+// that needs and keeps the file small.
+const SHIFT_RETENTION_MS = 120 * 24 * 60 * 60 * 1000;
 
 //const USERNAME = process.env.KANBAN_USER || 'admin';
 const SESSION_SECRET = process.env.SESSION_SECRET || 'change-this-session-secret';
@@ -792,6 +805,111 @@ function writeBackupSnapshot(state) {
     try { fs.unlinkSync(file.fullPath); } catch (_) {}
   });
 }
+// ---------------------------------------------------------------------------
+// Shift tracking
+//
+// A shift is [start, end] while an agent is logged in, minus any break
+// intervals. SLA elapsed time is measured only across these, and only on
+// weekdays, so a ticket does not age overnight, at the weekend, or while its
+// agent is on break.
+//
+// Shape: { agents: { SFA: { lastSeen, sessions: [{ start, end, breaks: [{start,end}] }] } } }
+// An open session has end === null; an open break has end === null.
+// ---------------------------------------------------------------------------
+let shiftStore = { agents: {} };
+
+function loadShiftStore() {
+  try {
+    if (!fs.existsSync(SHIFTS_PATH)) return { agents: {} };
+    const parsed = JSON.parse(fs.readFileSync(SHIFTS_PATH, 'utf8'));
+    return (parsed && typeof parsed.agents === 'object') ? parsed : { agents: {} };
+  } catch (error) {
+    console.warn('Shift store unreadable, starting empty:', error.message || error);
+    return { agents: {} };
+  }
+}
+
+function persistShiftStore() {
+  try {
+    fs.mkdirSync(path.dirname(SHIFTS_PATH), { recursive: true });
+    fs.writeFileSync(SHIFTS_PATH, JSON.stringify(shiftStore), 'utf8');
+  } catch (error) {
+    console.warn('Shift store write failed:', error.message || error);
+  }
+}
+
+function shiftAgentRecord(code) {
+  if (!shiftStore.agents[code]) shiftStore.agents[code] = { lastSeen: 0, sessions: [] };
+  return shiftStore.agents[code];
+}
+
+function openShiftSession(rec, at) {
+  const last = rec.sessions[rec.sessions.length - 1];
+  if (last && last.end === null) return last;
+  const session = { start: at, end: null, breaks: [] };
+  rec.sessions.push(session);
+  return session;
+}
+
+function closeShiftSession(rec, at) {
+  const last = rec.sessions[rec.sessions.length - 1];
+  if (!last || last.end !== null) return null;
+  // A break still open when the shift ends closes with it, otherwise the break
+  // would swallow the rest of history.
+  const openBreak = last.breaks.find(b => b.end === null);
+  if (openBreak) openBreak.end = Math.max(openBreak.start, at);
+  last.end = Math.max(last.start, at);
+  return last;
+}
+
+function pruneShiftStore(now) {
+  const cutoff = now - SHIFT_RETENTION_MS;
+  Object.values(shiftStore.agents).forEach((rec) => {
+    rec.sessions = rec.sessions.filter(s => s.end === null || s.end >= cutoff);
+  });
+}
+
+// Closes shifts whose owner stopped heartbeating, backdating the end to the
+// last heartbeat so idle time is never counted as worked.
+function sweepIdleShifts() {
+  const now = Date.now();
+  let changed = false;
+  Object.entries(shiftStore.agents).forEach(([, rec]) => {
+    const last = rec.sessions[rec.sessions.length - 1];
+    if (!last || last.end !== null) return;
+    if (now - Number(rec.lastSeen || 0) < SHIFT_IDLE_MS) return;
+    closeShiftSession(rec, Number(rec.lastSeen || last.start));
+    changed = true;
+  });
+  if (changed) { pruneShiftStore(now); persistShiftStore(); }
+}
+
+function shiftAgentFromRequest(req, bodyAgent) {
+  const fromSession = String(req.session?.username || '').trim().toUpperCase();
+  if (SUPPORT_AGENT_CODES.has(fromSession) || CS_AGENT_CODES.has(fromSession)) return fromSession;
+  // Admin logins do not match an agent code, so fall back to the code the board
+  // resolved for itself - validated against the roster, never taken on trust.
+  const claimed = String(bodyAgent || '').trim().toUpperCase();
+  if (SUPPORT_AGENT_CODES.has(claimed) || CS_AGENT_CODES.has(claimed)) return claimed;
+  return null;
+}
+
+function shiftSnapshotFor(code) {
+  const rec = shiftStore.agents[code];
+  if (!rec) return { agent: code, onShift: false, onBreak: false, sessions: [] };
+  const last = rec.sessions[rec.sessions.length - 1];
+  return {
+    agent: code,
+    onShift: !!(last && last.end === null),
+    onBreak: !!(last && last.end === null && last.breaks.some(b => b.end === null)),
+    lastSeen: rec.lastSeen || 0,
+    sessions: rec.sessions
+  };
+}
+
+shiftStore = loadShiftStore();
+setInterval(sweepIdleShifts, SHIFT_SWEEP_MS).unref?.();
+
 async function safeWriteState(state) {
   const nextState = (state && typeof state === 'object') ? state : {};
   const currentState = safeReadState();
@@ -2443,7 +2561,60 @@ app.get('/auth/hubspot/status', requireAuth, async (req, res) => {
   res.json({ connected });
 });
 
-app.post('/auth/logout', (req, res) => req.session.destroy(() => res.json({ ok: true })));
+// --- Shift endpoints -------------------------------------------------------
+
+// Heartbeat: opens a shift on first call, keeps it alive after that. The client
+// calls this on load and on a timer; missing beats are what the idle sweep uses
+// to close a forgotten tab's shift.
+app.post('/api/shift/heartbeat', requireAuth, (req, res) => {
+  const code = shiftAgentFromRequest(req, req.body?.agent);
+  if (!code) return res.json({ ok: false, reason: 'no_agent_code', tracked: false });
+  const now = Date.now();
+  const rec = shiftAgentRecord(code);
+  rec.lastSeen = now;
+  openShiftSession(rec, now);
+  pruneShiftStore(now);
+  persistShiftStore();
+  return res.json({ ok: true, tracked: true, ...shiftSnapshotFor(code) });
+});
+
+// Toggle break. Time inside a break is excluded from shift time, so the SLA
+// clock stops. Re-clicking closes the break and the clock resumes.
+app.post('/api/shift/break', requireAuth, (req, res) => {
+  const code = shiftAgentFromRequest(req, req.body?.agent);
+  if (!code) return res.status(400).json({ error: 'no_agent_code' });
+  const now = Date.now();
+  const rec = shiftAgentRecord(code);
+  rec.lastSeen = now;
+  const session = openShiftSession(rec, now);
+  const openBreak = session.breaks.find(b => b.end === null);
+  if (openBreak) openBreak.end = now;
+  else session.breaks.push({ start: now, end: null });
+  persistShiftStore();
+  return res.json({ ok: true, ...shiftSnapshotFor(code) });
+});
+
+// Every agent's shift history, so the board can compute shift-time SLA for a
+// ticket assigned to anyone - not just the current user.
+app.get('/api/shift/state', requireAuth, (req, res) => {
+  sweepIdleShifts();
+  const me = shiftAgentFromRequest(req, req.query?.agent);
+  const agents = {};
+  Object.keys(shiftStore.agents).forEach((code) => { agents[code] = shiftSnapshotFor(code); });
+  return res.json({ me, agents, idleMs: SHIFT_IDLE_MS, serverNow: Date.now() });
+});
+
+app.post('/auth/logout', (req, res) => {
+  // Close the shift before the session is destroyed - afterwards there is no
+  // way to tell who was logging out.
+  const code = shiftAgentFromRequest(req, null);
+  if (code) {
+    const rec = shiftAgentRecord(code);
+    closeShiftSession(rec, Date.now());
+    persistShiftStore();
+  }
+  return req.session.destroy(() => res.json({ ok: true }));
+});
 
 app.get('/healthz', async (req, res) => {
   try {

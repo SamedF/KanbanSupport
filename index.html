@@ -902,6 +902,43 @@ header {
   white-space: nowrap;
 }
 
+/* Shift break toggle. Deliberately loud while on break - it stops the SLA
+   clock on your tickets, so leaving it on by accident is expensive. */
+.break-btn {
+  border-radius: 999px;
+  border: 1px solid rgba(var(--ink-text-rgb), 0.18);
+  background: rgba(var(--ink-text-rgb), 0.10);
+  color: var(--ink-text);
+  font-size: 11px;
+  font-weight: 800;
+  padding: 8px 13px;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: all .16s ease;
+}
+
+.break-btn:hover {
+  background: rgba(var(--ink-text-rgb), 0.18);
+  transform: translateY(-1px);
+}
+
+.break-btn.on-break {
+  background: rgba(var(--amber-500-rgb), 0.22);
+  border-color: rgba(var(--amber-500-rgb), 0.55);
+  color: var(--amber-200);
+  animation: breakPulse 2s ease-in-out infinite;
+}
+
+.break-btn.off-shift {
+  opacity: .5;
+  cursor: default;
+}
+
+@keyframes breakPulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(var(--amber-500-rgb), .35); }
+  50% { box-shadow: 0 0 0 5px rgba(var(--amber-500-rgb), 0); }
+}
+
 .account-btn:hover,
 .mentions-btn:hover,
 .create-ticket-btn:hover,
@@ -3284,6 +3321,7 @@ th {
   </div>
   <div class="header-right">
     <button class="theme-toggle-btn" id="theme-toggle-btn" type="button" title="Toggle dark mode" aria-label="Toggle dark mode"></button>
+    <button class="break-btn" id="break-btn" type="button" title="Pause your shift. SLA timers on your tickets stop until you come back.">Take a break</button>
     <button class="create-ticket-btn" id="create-ticket-btn">&#43; New Ticket</button>
     <button class="mentions-btn" id="mentions-btn" title="Tagged Alerts"><span class="bell-icon">&#128276;</span><span class="mentions-badge" id="mentions-badge" style="display:none">0</span></button>
     <div class="user-avatar-pill" id="headerAvatar" title="Current user profile picture">
@@ -4764,10 +4802,170 @@ function saveHsCache(){saveState();}
 window.addEventListener('pagehide',flushStateWithBeacon);
 document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='hidden')flushStateWithBeacon();});
 
-//  SLA 
+// ---------------------------------------------------------------------------
+// Shift time
+//
+// SLA is measured in SHIFT time, not wall-clock: only while the ticket's
+// assigned agent is logged in, not on break, and not at the weekend. A ticket
+// therefore does not age overnight or while its agent is away.
+//
+// Shift history is server-authoritative (/api/shift/state); the client only
+// reads it and heartbeats. Kept in memory and refreshed periodically - it
+// changes slowly and every open board needs the full picture to compute SLA
+// for tickets assigned to anyone, not just the current user.
+// ---------------------------------------------------------------------------
+let shiftAgents={},shiftMe=null,shiftTracked=false,shiftOnBreak=false,shiftLoaded=false;
+const SHIFT_HEARTBEAT_MS=60000;
+
+function isWeekendDay(d){const day=d.getDay();return day===0||day===6;}
+// Milliseconds of [from,to) that land on a weekday. Walks day by day via
+// setDate so daylight-saving transitions cannot drift the boundaries the way
+// adding a fixed 86400000 would.
+function weekdayMsInRange(from,to){
+  if(!(to>from))return 0;
+  let total=0;
+  const cursor=new Date(from);
+  cursor.setHours(0,0,0,0);
+  while(cursor.getTime()<to){
+    const dayStart=cursor.getTime();
+    const next=new Date(cursor);
+    next.setDate(next.getDate()+1);
+    next.setHours(0,0,0,0);
+    const dayEnd=next.getTime();
+    if(!isWeekendDay(cursor)){
+      const s=Math.max(dayStart,from),e=Math.min(dayEnd,to);
+      if(e>s)total+=e-s;
+    }
+    cursor.setTime(dayEnd);
+  }
+  return total;
+}
+// Worked milliseconds for one agent within [fromMs,toMs): their shift sessions,
+// clipped to weekdays, minus any break that overlaps.
+function shiftElapsedMs(fromMs,toMs,agentCode){
+  const rec=shiftAgents[String(agentCode||'').toUpperCase()];
+  if(!rec||!Array.isArray(rec.sessions))return 0;
+  const now=Date.now();
+  let total=0;
+  rec.sessions.forEach(s=>{
+    const start=Math.max(Number(s.start||0),fromMs);
+    const end=Math.min(s.end===null||s.end===undefined?now:Number(s.end),toMs);
+    if(!(end>start))return;
+    let worked=weekdayMsInRange(start,end);
+    (s.breaks||[]).forEach(b=>{
+      const bs=Math.max(Number(b.start||0),start);
+      const be=Math.min(b.end===null||b.end===undefined?now:Number(b.end),end);
+      if(be>bs)worked-=weekdayMsInRange(bs,be);
+    });
+    total+=Math.max(0,worked);
+  });
+  return total;
+}
+async function refreshShiftState(){
+  try{
+    const res=await fetch('/api/shift/state',{credentials:'include'});
+    if(!res.ok)return;
+    const out=await res.json();
+    shiftAgents=out?.agents||{};
+    shiftMe=out?.me||null;
+    shiftTracked=!!shiftMe;
+    const mine=shiftMe?shiftAgents[shiftMe]:null;
+    shiftOnBreak=!!mine?.onBreak;
+    shiftLoaded=true;
+    updateBreakButton();
+  }catch(_){}
+}
+async function shiftHeartbeat(){
+  try{
+    const res=await fetch('/api/shift/heartbeat',{method:'POST',headers:{'Content-Type':'application/json'},
+      credentials:'include',body:JSON.stringify({agent:currentUser()})});
+    if(!res.ok)return;
+    const out=await res.json();
+    shiftTracked=!!out?.tracked;
+    if(out?.agent){shiftMe=out.agent;shiftAgents[out.agent]={...(shiftAgents[out.agent]||{}),...out};shiftOnBreak=!!out.onBreak;}
+    updateBreakButton();
+  }catch(_){}
+}
+async function toggleShiftBreak(){
+  if(!shiftTracked)return;
+  try{
+    const res=await fetch('/api/shift/break',{method:'POST',headers:{'Content-Type':'application/json'},
+      credentials:'include',body:JSON.stringify({agent:currentUser()})});
+    if(!res.ok)return;
+    const out=await res.json();
+    if(out?.agent)shiftAgents[out.agent]={...(shiftAgents[out.agent]||{}),...out};
+    shiftOnBreak=!!out?.onBreak;
+    updateBreakButton();
+    refreshSLABadges();
+    showToast(shiftOnBreak?'On break - SLA timers paused':'Back on shift - SLA timers running',shiftOnBreak?'warn':'ok');
+  }catch(_){}
+}
+function updateBreakButton(){
+  const btn=document.getElementById('break-btn');
+  if(!btn)return;
+  if(!shiftTracked){
+    // Admin logins with no agent code have no shift to pause.
+    btn.classList.add('off-shift');
+    btn.classList.remove('on-break');
+    btn.textContent='No shift tracked';
+    btn.title='This login is not mapped to a support agent code, so no shift is being recorded.';
+    return;
+  }
+  btn.classList.remove('off-shift');
+  btn.classList.toggle('on-break',shiftOnBreak);
+  btn.textContent=shiftOnBreak?'On break - resume':'Take a break';
+  btn.title=shiftOnBreak
+    ?'You are on break. SLA timers on your tickets are paused. Click to resume.'
+    :'Pause your shift. SLA timers on your tickets stop until you come back.';
+}
+
+//  SLA
 function fmtDuration(ms){const h=Math.floor(ms/3600000);const m=Math.floor((ms%3600000)/60000);if(h>=24){const d=Math.floor(h/24);const rh=h%24;return rh?`${d}d ${rh}h`:`${d}d`;}if(h>0)return m?`${h}h ${m}m`:`${h}h`;return Math.max(0,m)+'m';}
-function getSLAStatus(id){const createdAt=ticketCreatedAt[id];if(!createdAt)return null;const col=ticketState[id]||'new';if(col==='res')return null;const st=SUBTYPE_BY_ID[ticketSubtype[id]||''];if(st?.tier==='Paused')return{text:'Paused (awaiting hotel)',cls:'sla-warn',overdue:false};const pr=ticketPriority[id]||st?.priority||'Medium';const hrs=(SLA_HOURS[pr]||st?.responseHours||24);const slaMs=hrs*3600000;const elapsed=Date.now()-new Date(createdAt).getTime();const remaining=slaMs-elapsed;if(remaining<=0){return{text:fmtDuration(Math.abs(remaining))+' overdue',cls:'sla-breach',overdue:true};}const pct=remaining/slaMs;const cls=pct>0.5?'sla-ok':pct>0.25?'sla-warn':'sla-urgent';return{text:fmtDuration(remaining)+' left',cls,overdue:false};}
-function refreshSLABadges(){document.querySelectorAll('[data-sla-id]').forEach(el=>{const id=el.dataset.slaId;const status=getSLAStatus(id);if(!status){el.style.display='none';return;}el.style.display='';el.textContent=' '+status.text;el.className='sla-badge '+status.cls;});}
+// SLA is counted in the ASSIGNED AGENT's shift time - only while they are
+// logged in, off break, and it is a weekday. The wall-clock figure is kept on
+// every result so nothing is hidden: it is shown as the badge tooltip and on
+// the ticket detail line.
+function getSLAStatus(id){
+  const createdAt=ticketCreatedAt[id];
+  if(!createdAt)return null;
+  const col=normalizeTicketStage(ticketState[id]||'new');
+  if(col==='res')return null;
+  const st=SUBTYPE_BY_ID[ticketSubtype[id]||''];
+  const createdMs=new Date(createdAt).getTime();
+  const wallElapsed=Date.now()-createdMs;
+  const wallText=fmtDuration(wallElapsed)+' since received';
+  if(st?.tier==='Paused')return{text:'Paused (awaiting hotel)',cls:'sla-warn',overdue:false,wallText,shiftMs:0};
+  const pr=ticketPriority[id]||st?.priority||'Medium';
+  const hrs=(SLA_HOURS[pr]||st?.responseHours||24);
+  const slaMs=hrs*3600000;
+  const agent=normalizeSupportAgent(ticketAssignee[id]||'')||'';
+  // No assignee means no shift clock. Saying "4h left" would be a lie, so say
+  // what is actually true rather than inventing a countdown.
+  if(!agent){
+    return{text:'Unassigned - clock not started',cls:'sla-warn',overdue:false,wallText,shiftMs:0,noClock:true};
+  }
+  // Until the shift history has loaded, showing a full SLA would flash a wrong
+  // value on every card. Stay quiet for the moment it takes.
+  if(!shiftLoaded){
+    return{text:'Loading shift data',cls:'sla-warn',overdue:false,wallText,shiftMs:0,noClock:true};
+  }
+  const elapsed=shiftElapsedMs(createdMs,Date.now(),agent);
+  const remaining=slaMs-elapsed;
+  const shiftText=fmtDuration(elapsed)+' worked ('+agent+')';
+  if(remaining<=0){
+    return{text:fmtDuration(Math.abs(remaining))+' overdue',cls:'sla-breach',overdue:true,wallText,shiftText,shiftMs:elapsed};
+  }
+  const pct=remaining/slaMs;
+  const cls=pct>0.5?'sla-ok':pct>0.25?'sla-warn':'sla-urgent';
+  return{text:fmtDuration(remaining)+' left',cls,overdue:false,wallText,shiftText,shiftMs:elapsed};
+}
+function slaTooltip(status){
+  if(!status)return'';
+  return[status.shiftText?'Shift time: '+status.shiftText:'Shift clock not running',
+    'Wall clock: '+(status.wallText||''),
+    'SLA counts only the assigned agent’s logged-in time, excluding breaks and weekends.'].join('\n');
+}
+function refreshSLABadges(){document.querySelectorAll('[data-sla-id]').forEach(el=>{const id=el.dataset.slaId;const status=getSLAStatus(id);if(!status){el.style.display='none';return;}el.style.display='';el.textContent=' '+status.text;el.className='sla-badge '+status.cls;el.title=slaTooltip(status);});}
 async function syncTicketStatusToHubspot(ticketId,newCol){const hsId=ticketHubspotId[ticketId];if(!hsId)return{ok:false,reason:'missing_hubspot_ticket_id'};try{const res=await fetch(`/api/hubspot/tickets/${encodeURIComponent(hsId)}/status`,{method:'PATCH',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({kanbanStatus:HUBSPOT_STATUS_BY_STAGE[newCol]||'new'})});const out=await res.json().catch(()=>({}));if(!res.ok)return{ok:false,reason:'api_error',error:String(out?.error||res.status)};return{ok:true};}catch(e){return{ok:false,reason:'network_error',error:String(e?.message||e)};}}
 
 //  Spam 
@@ -5903,6 +6101,7 @@ document.getElementById('btn-back-board').addEventListener('click',showBoardView
 document.getElementById('spam-view-btn').addEventListener('click',()=>{if(viewMode==='spam')showBoardView();else showSpamView();});
 document.getElementById('btn-back-board-archive').addEventListener('click',showBoardView);
 document.getElementById('archive-view-btn').addEventListener('click',()=>{if(viewMode==='archive')showBoardView();else showArchiveView();});
+document.getElementById('break-btn').addEventListener('click',toggleShiftBreak);
 document.getElementById('assignlog-view-btn').addEventListener('click',()=>{if(viewMode==='assignlog')showBoardView();else showAssignLogView();});
 document.getElementById('assignlog-refresh').addEventListener('click',()=>{assignLogRows=[];renderAssignLogView();});
 document.getElementById('assignlog-reverts-only').addEventListener('click',e=>{
@@ -6559,7 +6758,7 @@ function makeCard(ticket,isNew=false){
 
   // SLA badge
   const slaStatus=getSLAStatus(id);
-  const slaBadgeHtml=slaStatus?`<div class="sla-row"><span class="sla-badge ${slaStatus.cls}" data-sla-id="${id}" data-sla-priority="${esc(priority)}" title="SLA target"> ${slaStatus.text}</span></div>`:'';
+  const slaBadgeHtml=slaStatus?`<div class="sla-row"><span class="sla-badge ${slaStatus.cls}" data-sla-id="${id}" data-sla-priority="${esc(priority)}" title="${esc(slaTooltip(slaStatus))}"> ${slaStatus.text}</span></div>`:'';
 
   // HubSpot row
   let hsHtml='';
@@ -6851,7 +7050,10 @@ async function openEmailModal(ticket){
   }
   metaHtml+=`<span><strong>Support:</strong> ${ticketAssignee[id]||''}${csMeta}</span>`;
   const sla=getSLAStatus(id,ticketPriority[id]||ticket.priority);
-  if(sla)metaHtml+=`<span><strong>SLA:</strong> <span style="font-weight:600;color:${sla.overdue?'var(--red-600)':'var(--amber-600)'}"> ${sla.text}</span></span>`;
+  // Both clocks side by side here - the detail view is where someone goes to
+  // understand why a badge says what it says.
+  if(sla)metaHtml+=`<span><strong>SLA:</strong> <span style="font-weight:600;color:${sla.overdue?'var(--red-600)':'var(--amber-600)'}"> ${esc(sla.text)}</span>`
+    +`<span style="color:var(--muted);font-weight:500;"> &middot; ${esc(sla.shiftText||'shift clock not running')} &middot; ${esc(sla.wallText||'')}</span></span>`;
   const jiraKey=canonicalJiraKey(ticketJira[id]);
   if(jiraKey)metaHtml+=`<span><strong>Jira:</strong> <span style="color:var(--brand-jira);font-weight:700;"> ${esc(jiraKey)}</span></span>`;
   if(ticketHubspotId[id])metaHtml+=`<span><strong>HubSpot Ticket:</strong> <a href="https://app.hubspot.com/contacts/25445053/record/0-5/${esc(ticketHubspotId[id])}" target="_blank" style="color:var(--teal-700);font-weight:700;text-decoration:none;"> ${esc(ticketHubspotId[id])}</a></span>`;
@@ -7090,6 +7292,17 @@ async function poll(){if(!hasCowork){startCountdown();return;}const res=await fe
   // take a while and has its own early-return path) so the board is live in
   // every case, including when Microsoft 365 is not connected.
   startLiveSync();
+  // Opens this agent's shift and pulls everyone's history before the first
+  // render, so SLA badges do not flash a wrong value on load.
+  await shiftHeartbeat();
+  await refreshShiftState();
+  setInterval(shiftHeartbeat,SHIFT_HEARTBEAT_MS);
+  // Other agents' shifts change slowly; a slower refresh is plenty and keeps
+  // SLA correct for tickets assigned to them.
+  setInterval(refreshShiftState,5*60*1000);
+  // Coming back to the tab should not wait up to a minute to re-open a shift
+  // the idle sweep may have closed.
+  document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible')shiftHeartbeat();});
   const dbTickets=await apiGetTickets();
   if(mergeDatabaseTickets(dbTickets)){
     applyCompanyCSAssignments();
