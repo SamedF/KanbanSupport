@@ -3091,6 +3091,119 @@ textarea:focus {
   margin-top: 2px;
 }
 
+/* QT Detect reuses the QT Seize shell/header so the two tools read as one set. */
+#qt-detect-view {
+  display: none;
+  min-height: calc(100dvh - var(--app-chrome-h));
+  padding: var(--content-pad);
+  background: var(--bg);
+}
+
+.qt-detect-body {
+  padding: 16px 18px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.qt-detect-label {
+  display: block;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--slate-500);
+  margin-bottom: 6px;
+}
+
+.qt-detect-textarea {
+  width: 100%;
+  min-height: 130px;
+  resize: vertical;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text);
+  background: var(--white);
+}
+
+.qt-detect-textarea:focus {
+  outline: none;
+  border-color: var(--indigo-400, #818cf8);
+}
+
+.qt-detect-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+}
+
+.qt-detect-status {
+  font-size: 12px;
+  color: var(--slate-500);
+}
+
+.qt-detect-summary {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+
+.qt-detect-stat {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 4px 12px;
+  font-size: 12px;
+  font-weight: 700;
+  background: var(--white);
+  color: var(--slate-600);
+}
+
+.qt-detect-stat.yes { background: rgba(var(--green-500-rgb), .14); border-color: rgba(var(--green-300-rgb), .5); color: var(--emerald-800); }
+.qt-detect-stat.no { background: rgba(var(--slate-200-rgb), .5); }
+.qt-detect-stat.err { background: rgba(var(--amber-500-rgb), .16); border-color: rgba(var(--amber-500-rgb), .45); color: var(--amber-800); }
+
+.qt-detect-table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--white);
+}
+
+.qt-detect-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  min-width: 720px;
+}
+
+.qt-detect-table th,
+.qt-detect-table td {
+  padding: 9px 12px;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+
+.qt-detect-table tr:last-child td { border-bottom: 0; }
+
+.qt-pill {
+  display: inline-block;
+  border-radius: 999px;
+  padding: 2px 9px;
+  font-size: 11px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.qt-pill.yes { background: rgba(var(--green-500-rgb), .18); color: var(--emerald-800); }
+.qt-pill.no { background: rgba(var(--slate-200-rgb), .7); color: var(--slate-600); }
+.qt-pill.err { background: rgba(var(--amber-500-rgb), .2); color: var(--amber-800); }
+
 .qt-seize-frame {
   width: 100%;
   min-height: clamp(520px, calc(100dvh - 280px), 1200px);
@@ -3407,6 +3520,10 @@ th {
       <div class="crm-nav-section" aria-label="QT-Tools">
         <div class="crm-nav-section-title">QT-Tools</div>
         <button class="crm-nav-btn" id="qt-seize-view-btn"> QT Seize</button>
+        <!-- Admin only: hidden by syncRoleRestrictedControls, and the endpoint
+             behind it is requireAdmin, so hiding the button is presentation
+             rather than the actual access control. -->
+        <button class="crm-nav-btn admin-only" id="qt-detect-view-btn" style="display:none;"> QT Detect</button>
       </div>
     </div>
   </aside>
@@ -3664,6 +3781,31 @@ th {
       <button class="btn-back" id="qt-seize-back-board" type="button">Back to Board</button>
     </div>
     <iframe class="qt-seize-frame" id="qt-seize-frame" title="QT Seize" loading="lazy"></iframe>
+  </div>
+</div>
+<div id="qt-detect-view">
+  <div class="qt-seize-shell">
+    <div class="qt-seize-header">
+      <div>
+        <div class="qt-seize-title">QT Detect</div>
+        <div class="qt-seize-subtitle">Check whether hotel sites have Quicktext installed. Reads each page's HTML and counts only active script/iframe embeds.</div>
+      </div>
+      <button class="btn-back" id="qt-detect-back-board" type="button">Back to Board</button>
+    </div>
+    <div class="qt-detect-body">
+      <div class="qt-detect-input">
+        <label class="qt-detect-label" for="qt-detect-urls">Site URLs &mdash; one per line, or paste a CSV column</label>
+        <textarea id="qt-detect-urls" class="qt-detect-textarea" spellcheck="false"
+          placeholder="hotel-example.com&#10;https://another-hotel.fr&#10;www.third-hotel.es"></textarea>
+        <div class="qt-detect-controls">
+          <button class="btn-primary" id="qt-detect-run" type="button">Check sites</button>
+          <button class="btn-out" id="qt-detect-clear" type="button">Clear</button>
+          <button class="btn-out" id="qt-detect-export" type="button" disabled>Export CSV</button>
+          <span class="qt-detect-status" id="qt-detect-status">Paste URLs to begin.</span>
+        </div>
+      </div>
+      <div class="qt-detect-results" id="qt-detect-results"></div>
+    </div>
   </div>
 </div>
   </main>
@@ -4742,6 +4884,33 @@ function startLiveSync(){
   // replays via Last-Event-ID, so this only needs to reflect status.
   es.onerror=()=>{setLiveIndicator('reconnecting','Reconnecting to live updates');};
 }
+// loadState used to apply the server's assignment maps with a blind
+// Object.assign. That is correct on first load (local state is empty) but
+// loadState also runs from reloadBoardFromServer() after a live-sync replay
+// gap - and there local state can be NEWER than the server's. The blind copy
+// silently discarded a just-made assignment, and overwrote its timestamp with
+// the older one so the next save could not win it back either.
+//
+// The whole assignment cluster moves together on one clock, mirroring the
+// server-side merge in safeWriteState.
+function mergeAssignmentFromServerState(s){
+  if(!s||typeof s!=='object')return;
+  const remoteAssignee=(s.ticketAssignee&&typeof s.ticketAssignee==='object')?s.ticketAssignee:{};
+  const remoteTouched=(s.ticketAssigneeTouchedAt&&typeof s.ticketAssigneeTouchedAt==='object')?s.ticketAssigneeTouchedAt:{};
+  const remoteMode=(s.ticketAssignmentMode&&typeof s.ticketAssignmentMode==='object')?s.ticketAssignmentMode:{};
+  const remoteOverride=(s.manualSupportOverride&&typeof s.manualSupportOverride==='object')?s.manualSupportOverride:{};
+  const ids=new Set([...Object.keys(remoteAssignee),...Object.keys(remoteTouched),...Object.keys(remoteMode),...Object.keys(remoteOverride)]);
+  ids.forEach(id=>{
+    const localTs=Number(ticketAssigneeTouchedAt[id]||0);
+    const remoteTs=Number(remoteTouched[id]||0);
+    // Ours is newer - keep it, and keep our timestamp so our next save wins.
+    if(localTs>0&&remoteTs<localTs)return;
+    if(Object.prototype.hasOwnProperty.call(remoteAssignee,id))ticketAssignee[id]=remoteAssignee[id];
+    if(Object.prototype.hasOwnProperty.call(remoteMode,id))ticketAssignmentMode[id]=remoteMode[id];
+    if(Object.prototype.hasOwnProperty.call(remoteOverride,id))manualSupportOverride[id]=remoteOverride[id];
+    if(remoteTs>0)ticketAssigneeTouchedAt[id]=remoteTs;
+  });
+}
 async function loadState(){
   const s=await apiGetState();
   if(!s)return;
@@ -4756,16 +4925,13 @@ async function loadState(){
   }
   if(s.ticketState){Object.entries(s.ticketState).forEach(([k,v])=>{ticketState[k]=normalizeTicketStage(v);});}
   if(s.ticketStageTouchedAt&&typeof s.ticketStageTouchedAt==='object')Object.assign(ticketStageTouchedAt,s.ticketStageTouchedAt);
-  if(s.ticketAssigneeTouchedAt&&typeof s.ticketAssigneeTouchedAt==='object')Object.assign(ticketAssigneeTouchedAt,s.ticketAssigneeTouchedAt);
   if(s.ticketAssigneeBy&&typeof s.ticketAssigneeBy==='object')Object.assign(ticketAssigneeBy,s.ticketAssigneeBy);
   if(s.ticketHasNewReply&&typeof s.ticketHasNewReply==='object')Object.assign(ticketHasNewReply,s.ticketHasNewReply);
   if(s.ticketResolutionMeta&&typeof s.ticketResolutionMeta==='object')Object.assign(ticketResolutionMeta,s.ticketResolutionMeta);
   if(s.ticketArchived&&typeof s.ticketArchived==='object')Object.assign(ticketArchived,s.ticketArchived);
   if(s.ticketPriority)Object.assign(ticketPriority,s.ticketPriority);
   if(s.ticketCategory)Object.assign(ticketCategory,s.ticketCategory);if(s.ticketSubtype)Object.assign(ticketSubtype,s.ticketSubtype);
-  if(s.ticketAssignee)Object.assign(ticketAssignee,s.ticketAssignee);
-  if(s.ticketAssignmentMode)Object.assign(ticketAssignmentMode,s.ticketAssignmentMode);
-  if(s.manualSupportOverride&&typeof s.manualSupportOverride==='object')Object.assign(manualSupportOverride,s.manualSupportOverride);
+  mergeAssignmentFromServerState(s);
   if(s.manualCSOverride&&typeof s.manualCSOverride==='object')Object.assign(manualCSOverride,s.manualCSOverride);
   if(s.ticketCSOwner&&typeof s.ticketCSOwner==='object')Object.assign(ticketCSOwner,s.ticketCSOwner);
   if(s.ticketComments)Object.assign(ticketComments,s.ticketComments);
@@ -4796,7 +4962,44 @@ async function loadState(){
   normalizeStoredJiraLinks();
   normalizeLegacyAssignmentModes();
 }
-function normalizeLegacyAssignmentModes(){let changed=false;allTickets.forEach(t=>{const id=t.id;if(ticketCategory[id]==='Spam')return;const assignee=normalizeAgentCode(ticketAssignee[id]||'');if(CS_AGENTS.includes(assignee)){if(!ticketCSOwner[id])ticketCSOwner[id]=assignee;setTicketAssignee(id,leastLoadedSupportAgent());ticketAssignmentMode[id]='support';manualSupportOverride[id]=false;changed=true;}else if(SUPPORT_AGENTS.includes(assignee)&&ticketAssignmentMode[id]!=='support'){ticketAssignmentMode[id]='support';changed=true;}if(isSupportAssignedTicket(id)&&!ticketCSOwner[id]){const cs=resolveDefaultCSForTicket(id,t.email);if(cs){ticketCSOwner[id]=cs;changed=true;}}});if(changed)saveState('normalize_legacy_assignment_modes');}
+// Migrates pre-split data where a CS agent code sat in the support-assignee
+// slot. Runs at the end of every loadState, which makes it dangerous: it used
+// to pick a replacement with leastLoadedSupportAgent() - a session-local
+// calculation, so two tabs chose different agents and the ticket flapped - and
+// it cleared manualSupportOverride, destroying the protection a deliberate
+// assignment had just been given. Both are now fixed, and the migration is
+// recorded in the assignment log so a mass move can never again be invisible.
+function normalizeLegacyAssignmentModes(){
+  let changed=false;
+  let migrated=0;
+  allTickets.forEach(t=>{
+    const id=t.id;
+    if(ticketCategory[id]==='Spam')return;
+    const assignee=normalizeAgentCode(ticketAssignee[id]||'');
+    if(CS_AGENTS.includes(assignee)){
+      if(!ticketCSOwner[id])ticketCSOwner[id]=assignee;
+      // Never overwrite a deliberate assignment during a data migration.
+      if(!manualSupportOverride[id]){
+        setTicketAssignee(id,leastLoadedSupportAgent(),undefined,'legacyMigration');
+        migrated++;
+      }
+      ticketAssignmentMode[id]='support';
+      if(manualSupportOverride[id]===undefined)manualSupportOverride[id]=false;
+      changed=true;
+    }else if(SUPPORT_AGENTS.includes(assignee)&&ticketAssignmentMode[id]!=='support'){
+      ticketAssignmentMode[id]='support';
+      changed=true;
+    }
+    if(isSupportAssignedTicket(id)&&!ticketCSOwner[id]){
+      const cs=resolveDefaultCSForTicket(id,t.email);
+      if(cs){ticketCSOwner[id]=cs;changed=true;}
+    }
+  });
+  // A migration touching many tickets at once is exactly the pattern that
+  // produced the historical mass-reassignments; make it visible.
+  if(migrated>5)console.warn(`[assignment] legacy migration reassigned ${migrated} tickets - inspect window.assignLog()`);
+  if(changed)saveState('normalize_legacy_assignment_modes');
+}
 function saveReads(){saveState();}
 function saveHsCache(){saveState();}
 window.addEventListener('pagehide',flushStateWithBeacon);
@@ -4983,6 +5186,7 @@ function setSideNavActive(mode){
   document.getElementById('ticket-kpi-view-btn')?.classList.toggle('active',mode==='kpi');
   document.getElementById('qt-seize-view-btn')?.classList.toggle('active',mode==='qtSeize');
   document.getElementById('assignlog-view-btn')?.classList.toggle('active',mode==='assignlog');
+  document.getElementById('qt-detect-view-btn')?.classList.toggle('active',mode==='qtDetect');
 }
 function setBoardChromeVisible(visible){
   const display=visible?'':'none';
@@ -5042,6 +5246,9 @@ function restoreLastWorkspaceSession(){
   if(mode==='kpi')return showKpiView();
   if(mode==='qtSeize')return showQtSeizeView();
   if(mode==='assignlog')return showAssignLogView();
+  // showQtDetectView falls back to the board itself if the user is not an
+  // admin, so a stale saved session cannot strand them on a hidden view.
+  if(mode==='qtDetect')return showQtDetectView();
   // 'archive' intentionally falls through to the board, as before.
   return showBoardView();
 }
@@ -5108,10 +5315,6 @@ function normalizeStoredJiraLinks(){
   });
   return changed;
 }
-function jiraCommentPreview(issue){
-  const comments=Array.isArray(issue?.comments)?issue.comments:[];
-  return comments.slice(-2).reverse().map(c=>`${c.author}: ${c.body}`).join('\n');
-}
 function renderJiraConnectionStatus(){
   const el=document.getElementById('jira-connection-status');
   if(!el)return;
@@ -5138,6 +5341,11 @@ function syncRoleRestrictedControls(){
     const agentEl=document.getElementById('agent-filter');
     if(agentEl)agentEl.value=activeA;
   }
+  // Admin-only tools. Hiding the entry point is presentation only - the
+  // endpoints behind them are requireAdmin server-side.
+  const isAdmin=currentUserIsAdmin();
+  document.querySelectorAll('.admin-only').forEach(el=>{el.style.display=isAdmin?'':'none';});
+  if(!isAdmin&&viewMode==='qtDetect')showBoardView();
 }
 async function loadBuildVersion(){
   try{
@@ -5535,7 +5743,7 @@ document.getElementById('emt-submit').addEventListener('click',async()=>{
 });
 
 //  View switching
-function hidePrimaryViews(){document.getElementById('main-board').style.display='none';document.getElementById('spam-view').classList.remove('active');document.getElementById('archive-view').classList.remove('active');document.getElementById('companies-view').style.display='none';document.getElementById('kpi-view').style.display='none';document.getElementById('qt-seize-view').style.display='none';document.getElementById('assignlog-view').style.display='none';}
+function hidePrimaryViews(){document.getElementById('main-board').style.display='none';document.getElementById('spam-view').classList.remove('active');document.getElementById('archive-view').classList.remove('active');document.getElementById('companies-view').style.display='none';document.getElementById('kpi-view').style.display='none';document.getElementById('qt-seize-view').style.display='none';document.getElementById('assignlog-view').style.display='none';document.getElementById('qt-detect-view').style.display='none';}
 function showBoardView(){viewMode='board';setBoardChromeVisible(true);hidePrimaryViews();document.getElementById('main-board').style.display='flex';setSideNavActive('board');saveLastWorkspaceSession('board');renderBoard();}
 function showSpamView(){viewMode='spam';setBoardChromeVisible(true);hidePrimaryViews();document.getElementById('spam-view').classList.add('active');setSideNavActive('spam');saveLastWorkspaceSession('spam');renderSpamView();}
 function showArchiveView(){viewMode='archive';setBoardChromeVisible(true);hidePrimaryViews();document.getElementById('archive-view').classList.add('active');setSideNavActive('archive');saveLastWorkspaceSession('archive');renderArchiveView();}
@@ -5543,6 +5751,103 @@ function showDashboardView(){companiesViewType='report';viewMode='companies';set
 function showKpiView(){viewMode='kpi';setBoardChromeVisible(true);hidePrimaryViews();document.getElementById('kpi-view').style.display='block';setSideNavActive('kpi');saveLastWorkspaceSession('kpi');renderKpiView();}
 function showQtSeizeView(){viewMode='qtSeize';setBoardChromeVisible(false);hidePrimaryViews();const frame=document.getElementById('qt-seize-frame');if(frame&&!frame.src)frame.src='/qt-seize/';document.getElementById('qt-seize-view').style.display='block';setSideNavActive('qtSeize');saveLastWorkspaceSession('qtSeize');}
 function showAssignLogView(){viewMode='assignlog';setBoardChromeVisible(false);hidePrimaryViews();document.getElementById('assignlog-view').style.display='block';setSideNavActive('assignlog');saveLastWorkspaceSession('assignlog');renderAssignLogView();}
+function showQtDetectView(){
+  // Belt and braces: the nav button is hidden for non-admins, but a restored
+  // session or a stale localStorage entry could still land here.
+  if(!currentUserIsAdmin()){showBoardView();return;}
+  viewMode='qtDetect';setBoardChromeVisible(false);hidePrimaryViews();
+  document.getElementById('qt-detect-view').style.display='block';
+  setSideNavActive('qtDetect');saveLastWorkspaceSession('qtDetect');
+}
+
+// ---------------------------------------------------------------------------
+// QT Detect
+// Ported from the Selenium/pandas script in the Script-off repo. The browser
+// automation cannot run in the container, so the server reimplements the same
+// strict rules over plain HTTP; this is just the console for it.
+// ---------------------------------------------------------------------------
+let qtDetectRows=[],qtDetectBusy=false;
+// Accepts a pasted CSV column as readily as a plain list: take the first
+// field of each line, drop a header row, ignore blanks.
+function qtDetectParseUrls(raw){
+  return String(raw||'')
+    .split(/[\r\n]+/)
+    .map(line=>String(line).split(/[,;\t]/)[0].trim().replace(/^["']|["']$/g,''))
+    .filter(Boolean)
+    .filter(v=>!/^(url|website|site|domain|link)$/i.test(v));
+}
+function qtDetectSetStatus(text){const el=document.getElementById('qt-detect-status');if(el)el.textContent=text;}
+function qtDetectRender(){
+  const box=document.getElementById('qt-detect-results');
+  if(!box)return;
+  if(!qtDetectRows.length){box.innerHTML='';document.getElementById('qt-detect-export').disabled=true;return;}
+  document.getElementById('qt-detect-export').disabled=false;
+  const yes=qtDetectRows.filter(r=>r.detected).length;
+  const err=qtDetectRows.filter(r=>r.status!=='ok').length;
+  const no=qtDetectRows.length-yes-err;
+  const rows=qtDetectRows.map(r=>{
+    const cls=r.status!=='ok'?'err':(r.detected?'yes':'no');
+    const label=r.status!=='ok'?'Error':(r.detected?'Installed':'Not found');
+    const detail=r.status!=='ok'
+      ? esc(r.error||r.status||'')
+      : (r.detected?`${esc(r.marker||'')} in ${esc(r.via||'')}`:'no active embed');
+    return `<tr>
+      <td><span class="qt-pill ${cls}">${label}</span></td>
+      <td style="max-width:320px;word-break:break-all;">${esc(r.input||'')}${r.finalUrl&&r.finalUrl!==r.url?`<div style="color:var(--muted);">&rarr; ${esc(r.finalUrl)}</div>`:''}</td>
+      <td style="max-width:280px;word-break:break-all;color:var(--muted);">${detail}${r.src?`<div style="color:var(--muted);">${esc(String(r.src).slice(0,90))}</div>`:''}</td>
+      <td style="white-space:nowrap;color:var(--muted);">${r.httpStatus||'-'}</td>
+      <td style="white-space:nowrap;color:var(--muted);">${r.ms!=null?r.ms+'ms':'-'}</td>
+    </tr>`;
+  }).join('');
+  box.innerHTML=`<div class="qt-detect-summary">
+      <span class="qt-detect-stat yes">${yes} installed</span>
+      <span class="qt-detect-stat no">${no} not found</span>
+      <span class="qt-detect-stat err">${err} failed</span>
+      <span class="qt-detect-stat">${qtDetectRows.length} checked</span>
+    </div>
+    <div class="qt-detect-table-wrap"><table class="qt-detect-table">
+      <thead><tr><th>Result</th><th>Site</th><th>Evidence</th><th>HTTP</th><th>Time</th></tr></thead>
+      <tbody>${rows}</tbody></table></div>`;
+}
+async function qtDetectRun(){
+  if(qtDetectBusy)return;
+  const urls=qtDetectParseUrls(document.getElementById('qt-detect-urls').value);
+  if(!urls.length){qtDetectSetStatus('Add at least one URL.');return;}
+  qtDetectBusy=true;
+  const btn=document.getElementById('qt-detect-run');
+  btn.disabled=true;
+  qtDetectSetStatus(`Checking ${urls.length} site${urls.length>1?'s':''}...`);
+  try{
+    const res=await fetch('/api/qt-detect',{method:'POST',headers:{'Content-Type':'application/json'},
+      credentials:'include',body:JSON.stringify({urls})});
+    if(res.status===403){qtDetectSetStatus('Admin access required.');return;}
+    if(!res.ok){qtDetectSetStatus('Check failed ('+res.status+').');return;}
+    const out=await res.json();
+    qtDetectRows=Array.isArray(out?.results)?out.results:[];
+    qtDetectRender();
+    const s=out?.summary||{};
+    qtDetectSetStatus(`Done - ${s.detected||0} installed, ${s.notDetected||0} not found, ${s.failed||0} failed`
+      +(out?.truncated?` (${out.truncated} beyond the limit were skipped)`:''));
+  }catch(e){
+    qtDetectSetStatus('Check failed: '+String(e?.message||e));
+  }finally{
+    qtDetectBusy=false;btn.disabled=false;
+  }
+}
+function qtDetectExportCsv(){
+  if(!qtDetectRows.length)return;
+  const esc2=v=>`"${String(v==null?'':v).replace(/"/g,'""')}"`;
+  const lines=[['url','final_url','quicktext_installed','confidence','marker','via','script_src','http_status','status','error','ms']
+    .map(esc2).join(',')];
+  qtDetectRows.forEach(r=>lines.push([r.input,r.finalUrl||r.url||'',r.detected?'yes':'no',r.confidence||'',
+    r.marker||'',r.via||'',r.src||'',r.httpStatus||'',r.status||'',r.error||'',r.ms==null?'':r.ms].map(esc2).join(',')));
+  const blob=new Blob(['﻿'+lines.join('\r\n')],{type:'text/csv;charset=utf-8;'});
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(blob);
+  a.download=`quicktext-detection-${new Date().toISOString().slice(0,10)}.csv`;
+  document.body.appendChild(a);a.click();
+  setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove();},0);
+}
 function renderActiveView(){if(viewMode==='board')renderBoard();else if(viewMode==='spam')renderSpamView();else if(viewMode==='archive')renderArchiveView();else if(viewMode==='kpi')renderKpiView();else if(viewMode==='assignlog')renderAssignLogView();else if(viewMode==='qtSeize')return;else renderCompaniesView();}
 
 // ---------------------------------------------------------------------------
@@ -5653,7 +5958,6 @@ function ticketFilterAgentValues(ticket){
 }
 function normalizeSupportAgent(value){const code=normalizeAgentCode(value);return SUPPORT_AGENTS.includes(code)?code:'';}
 function normalizeCSAgent(value){const code=normalizeAgentCode(value);return CS_AGENTS.includes(code)?code:'';}
-function currentUserSupportAgent(){return normalizeSupportAgent(currentUser());}
 function currentUserCSAgent(){return normalizeCSAgent(currentUser());}
 function ticketMatchesAgentFilter(ticket,agentCode){
   if(agentCode==='all')return true;
@@ -6116,6 +6420,14 @@ document.getElementById('dashboard-view-btn').addEventListener('click',()=>{if(v
 document.getElementById('ticket-kpi-view-btn').addEventListener('click',()=>{if(viewMode==='kpi')showBoardView();else showKpiView();});
 document.getElementById('qt-seize-view-btn').addEventListener('click',()=>{if(viewMode==='qtSeize')showBoardView();else showQtSeizeView();});
 document.getElementById('qt-seize-back-board').addEventListener('click',showBoardView);
+document.getElementById('qt-detect-view-btn').addEventListener('click',()=>{if(viewMode==='qtDetect')showBoardView();else showQtDetectView();});
+document.getElementById('qt-detect-back-board').addEventListener('click',showBoardView);
+document.getElementById('qt-detect-run').addEventListener('click',qtDetectRun);
+document.getElementById('qt-detect-export').addEventListener('click',qtDetectExportCsv);
+document.getElementById('qt-detect-clear').addEventListener('click',()=>{
+  document.getElementById('qt-detect-urls').value='';
+  qtDetectRows=[];qtDetectRender();qtDetectSetStatus('Paste URLs to begin.');
+});
 document.getElementById('kpi-time-filter').addEventListener('change',e=>{kpiTimeFilter=e.target.value||'today';saveLastWorkspaceSession();if(viewMode==='kpi')renderKpiView();});
 document.getElementById('kpi-team-filter').addEventListener('change',e=>{kpiTeamFilter=e.target.value||'all';kpiAgentFilter='all';saveLastWorkspaceSession();if(viewMode==='kpi')renderKpiView();});
 document.getElementById('kpi-agent-filter').addEventListener('change',e=>{kpiAgentFilter=e.target.value||'all';saveLastWorkspaceSession();if(viewMode==='kpi')renderKpiView();});
@@ -6124,7 +6436,6 @@ document.getElementById('jira-filter-btn').addEventListener('click',()=>{activeJ
 function esc(s){return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
 function normalizeCoOwnerValue(v){return String(v||'').trim().toLowerCase().replace(/\s+/g,' ');}
 function normalizeOwnerKey(v){return normalizeCoOwnerValue(v).normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9 ]+/g,' ').replace(/\s+/g,' ').trim();}
-function isoMinsAgo(m){return new Date(Date.now()-m*60000).toISOString();}
 function isoDaysAgo(d){return new Date(Date.now()-d*86400000).toISOString();}
 function fmtDate(iso){if(!iso)return'';const d=new Date(iso),now=new Date(),diff=now-d,mins=Math.floor(diff/60000);if(mins<1)return'Just now';if(mins<60)return mins+'m ago';const hrs=Math.floor(diff/3600000);if(hrs<24)return'Today '+d.toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'});const days=Math.floor(diff/86400000);if(days===1)return'Yesterday '+d.toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'});if(days<7)return d.toLocaleDateString('en-GB',{weekday:'short',day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'});return d.toLocaleDateString('en-GB',{day:'2-digit',month:'short',year:'numeric'});}
 function fmtTime(ts){return new Date(ts).toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit',day:'2-digit',month:'short'});}
@@ -6231,7 +6542,6 @@ function pickPrimaryCompany(companies,email){
   return best||companies[0];
 }
 function leastLoadedSupportAgent(){const load=openWorkloadByAgent();return SUPPORT_AGENTS.reduce((m,a)=>load[a]<load[m]?a:m,SUPPORT_AGENTS[0]);}
-function leastLoadedCSAgent(){const load=Object.fromEntries(CS_AGENTS.map(a=>[a,0]));allTickets.filter(t=>ticketCategory[t.id]!=='Spam'&&!isArchivedTicket(t.id)).forEach(t=>{const a=ticketAssignee[t.id];if(a in load)load[a]++;});return CS_AGENTS.reduce((m,a)=>load[a]<load[m]?a:m,CS_AGENTS[0]);}
 function isSupportAssignedTicket(id){const assignee=String(ticketAssignee[id]||'').trim();return ticketAssignmentMode[id]==='support'||SUPPORT_AGENTS.includes(assignee);}
 function extractBestCompanyCoOwner(companies,primary,email){
   const list=Array.isArray(companies)?companies.filter(Boolean):[];
@@ -6360,7 +6670,14 @@ function ensureTicketCSOwnerResolved(id,emailObj){
 }
 function ensureSupportAssignmentForTicket(id,emailObj,opts={}){if(!id||ticketCategory[id]==='Spam'||isArchivedTicket(id))return false;const currentAssignee=ticketAssignee[id]||'';const keepExistingSupport=!!opts.keepExistingSupport&&SUPPORT_AGENTS.includes(currentAssignee);const supportAgent=keepExistingSupport?currentAssignee:leastLoadedSupportAgent();const csOwner=resolveDefaultCSForTicket(id,emailObj);let changed=false;if(csOwner&&ticketCSOwner[id]!==csOwner&&!manualCSOverride[id]){ticketCSOwner[id]=csOwner;changed=true;}if(ticketAssignee[id]!==supportAgent||ticketAssignmentMode[id]!=='support'){setTicketAssignee(id,supportAgent);ticketAssignmentMode[id]='support';changed=true;}if(manualSupportOverride[id]===undefined){manualSupportOverride[id]=false;changed=true;}return changed;}
 function shouldRefreshHubspotCacheEntry(email){const ce=String(email||'').toLowerCase();if(!ce)return false;if(!(ce in hsCache))return true;const cached=hsCache[ce];const related=allTickets.filter(t=>ticketCategory[t.id]!=='Spam'&&!isArchivedTicket(t.id)&&(ticketClientEmail[t.id]||getClientEmail(t.email))===ce);if(!related.length)return false;if(cached===null)return related.some(t=>isSupportAssignedTicket(t.id)&&!ticketCSOwner[t.id]);if(!cached||!cached.companyName||!cached.companyId||!cached.coOwner)return true;return related.some(t=>isSupportAssignedTicket(t.id)&&!ticketCSOwner[t.id]);}
-function applyCompanyCSAssignments(){let changed=0;allTickets.forEach(t=>{if(ticketCategory[t.id]==='Spam'||isArchivedTicket(t.id))return;const id=t.id;const ce=ticketClientEmail[id]||getClientEmail(t.email);if(!ce)return;const cs=resolveDefaultCSForTicket(id,t.email);if(cs&&ticketCSOwner[id]!==cs&&!manualCSOverride[id]){ticketCSOwner[id]=cs;changed++;}if(manualSupportOverride[id])return;if(!SUPPORT_AGENTS.includes(ticketAssignee[id])||ticketAssignmentMode[id]!=='support'){if(ensureSupportAssignmentForTicket(id,t.email,{keepExistingSupport:true}))changed++;}});if(changed){saveState('auto_assign_cs_owner');}}
+function applyCompanyCSAssignments(){let changed=0;let reassigned=0;allTickets.forEach(t=>{if(ticketCategory[t.id]==='Spam'||isArchivedTicket(t.id))return;const id=t.id;const ce=ticketClientEmail[id]||getClientEmail(t.email);if(!ce)return;const cs=resolveDefaultCSForTicket(id,t.email);if(cs&&ticketCSOwner[id]!==cs&&!manualCSOverride[id]){ticketCSOwner[id]=cs;changed++;}if(manualSupportOverride[id])return;if(!SUPPORT_AGENTS.includes(ticketAssignee[id])||ticketAssignmentMode[id]!=='support'){if(ensureSupportAssignmentForTicket(id,t.email,{keepExistingSupport:true})){changed++;reassigned++;}}});
+  // Retiring an agent from SUPPORT_AGENTS makes every ticket they hold fail the
+  // roster test above, so all of them are reassigned - by every open session,
+  // on every load. That is how an entire queue can silently land on one agent
+  // (the audit shows ten tickets moving to JBA within one second). It still
+  // happens (someone has to own the work) but it is no longer invisible.
+  if(reassigned>5)console.warn(`[assignment] workload rebalance moved ${reassigned} tickets in one pass - inspect window.assignLog()`);
+  if(changed){saveState('auto_assign_cs_owner');}}
 
 async function findCompanyByDomain(email,excludeContactId){const domain=(email.split('@')[1]||'').toLowerCase();if(!domain||domain.includes('quinta')||['gmail.com','yahoo.com','hotmail.com','outlook.com','live.com'].includes(domain))return{companies:[],via:null};if(domain in domainCompanyCache)return domainCompanyCache[domain];const domRes=await window.cowork.callMcpTool(HS_SEARCH,{objectType:'companies',filterGroups:[{filters:[{propertyName:'domain',operator:'EQ',value:domain}]}],properties:['name','domain','createdate','co_owner','co-owner','coowner','co_owner_name','cs_owner','customer_success_owner','am_owner','account_manager','am'],sorts:[{propertyName:'createdate',direction:'ASCENDING'}],limit:5,chatInsights:HS_INSIGHTS});const domCos=hsResults(domRes);if(domCos.length){const v={companies:domCos,via:'domain'};domainCompanyCache[domain]=v;saveHsCache();return v;}const peerRes=await window.cowork.callMcpTool(HS_SEARCH,{objectType:'contacts',filterGroups:[{filters:[{propertyName:'email',operator:'CONTAINS_TOKEN',value:'@'+domain}]}],properties:['email'],limit:8,chatInsights:HS_INSIGHTS});const peers=hsResults(peerRes).filter(c=>c.properties?.email&&(!excludeContactId||c.id.toString()!==excludeContactId.toString()));for(const peer of peers.slice(0,4)){const pCoRes=await window.cowork.callMcpTool(HS_SEARCH,{objectType:'companies',filterGroups:[{associatedWith:[{objectType:'contacts',operator:'EQUAL',objectIds:[String(peer.id)]}]}],properties:['name','domain','createdate','co_owner','co-owner','coowner','co_owner_name','cs_owner','customer_success_owner','am_owner','account_manager','am'],sorts:[{propertyName:'createdate',direction:'ASCENDING'}],limit:5,chatInsights:HS_INSIGHTS});const pCos=hsResults(pCoRes);if(pCos.length){const v={companies:pCos,via:'domain-contact'};domainCompanyCache[domain]=v;saveHsCache();return v;}}const v={companies:[],via:null};domainCompanyCache[domain]=v;return v;}
 
