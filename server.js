@@ -10,7 +10,6 @@ const bcrypt = require('bcryptjs');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const { spawn } = require('child_process');
 
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
@@ -21,6 +20,19 @@ const AVATAR_UPLOAD_DIR = path.join(__dirname, 'public', 'uploads', 'avatars');
 const MAX_BACKUPS = Number(process.env.STATE_BACKUP_KEEP || 50);
 const BACKUP_MIN_INTERVAL_MS = Number(process.env.STATE_BACKUP_MIN_INTERVAL_MS || 60_000);
 const RESOLVED_RETENTION_MS = Number(process.env.RESOLVED_RETENTION_MS || 72 * 60 * 60 * 1000);
+// Shift tracking (drives shift-time SLA). Kept in its own file rather than in
+// board-state.json: it is server-authoritative (the client cannot be trusted to
+// report its own shift), and it must not take part in the board's
+// last-writer-wins state merge.
+const SHIFTS_PATH = path.join(__dirname, 'data', 'shifts.json');
+// A tab left open is not a shift. Without a heartbeat for this long the shift
+// is closed retroactively at the last heartbeat, so a forgotten tab or a
+// browser crash cannot accrue SLA time overnight.
+const SHIFT_IDLE_MS = Number(process.env.SHIFT_IDLE_MS || 30 * 60 * 1000);
+const SHIFT_SWEEP_MS = 60_000;
+// SLA only ever looks back over open tickets; 120 days is far more history than
+// that needs and keeps the file small.
+const SHIFT_RETENTION_MS = 120 * 24 * 60 * 60 * 1000;
 
 //const USERNAME = process.env.KANBAN_USER || 'admin';
 const SESSION_SECRET = process.env.SESSION_SECRET || 'change-this-session-secret';
@@ -332,10 +344,6 @@ function normalizeRole(role) {
   if (value === 'agent' || value === 'viewer') return 'support';
   return ['owner', 'admin', 'cs', 'support'].includes(value) ? value : null;
 }
-async function ownerAccountExists() {
-  const count = await prisma.user.count({ where: { role: 'owner' } });
-  return count > 0;
-}
 function normalizeBoardStatusForDb(stage) {
   const value = String(stage || 'new').trim().toLowerCase();
   if (value === 'new') return 'New';
@@ -476,14 +484,6 @@ function normalizeJiraKey(value) {
   const match = raw.match(/([A-Z][A-Z0-9]+-\d+)/);
   return match ? match[1] : raw;
 }
-function sanitizeJiraLabel(value) {
-  return String(value || '')
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 255);
-}
 function jiraMaskedEmail(value) {
   const email = String(value || '').trim();
   if (!email.includes('@')) return '';
@@ -491,28 +491,6 @@ function jiraMaskedEmail(value) {
   if (!name) return `***@${domain}`;
   if (name.length <= 2) return `${name[0]}***@${domain}`;
   return `${name.slice(0, 2)}***@${domain}`;
-}
-function buildJiraDescriptionDoc(text) {
-  const lines = String(text || '')
-    .replace(/\r/g, '')
-    .split('\n')
-    .map(line => line.trimEnd());
-  const content = [];
-  for (const line of lines) {
-    if (!line.trim()) {
-      content.push({ type: 'paragraph', content: [] });
-      continue;
-    }
-    content.push({
-      type: 'paragraph',
-      content: [{ type: 'text', text: line.slice(0, 4000) }]
-    });
-  }
-  return {
-    version: 1,
-    type: 'doc',
-    content: content.length ? content : [{ type: 'paragraph', content: [] }]
-  };
 }
 function getPersistedM365Tokens() {
   const store = safeReadTokenStore();
@@ -754,14 +732,6 @@ function isReadOnlyHubspotScope(scope) {
   if (scope === 'oauth') return true;
   return scope.endsWith('.read');
 }
-function hasOnlyReadHubspotScopes(scopeStr) {
-  const scopes = String(scopeStr || '')
-    .split(/\s+/)
-    .map(s => s.trim())
-    .filter(Boolean);
-  if (!scopes.length) return true;
-  return scopes.every(isReadOnlyHubspotScope);
-}
 function isAllowedHubspotScope(scope) {
   if (!scope || typeof scope !== 'string') return false;
   if (scope === 'oauth') return true;
@@ -792,6 +762,111 @@ function writeBackupSnapshot(state) {
     try { fs.unlinkSync(file.fullPath); } catch (_) {}
   });
 }
+// ---------------------------------------------------------------------------
+// Shift tracking
+//
+// A shift is [start, end] while an agent is logged in, minus any break
+// intervals. SLA elapsed time is measured only across these, and only on
+// weekdays, so a ticket does not age overnight, at the weekend, or while its
+// agent is on break.
+//
+// Shape: { agents: { SFA: { lastSeen, sessions: [{ start, end, breaks: [{start,end}] }] } } }
+// An open session has end === null; an open break has end === null.
+// ---------------------------------------------------------------------------
+let shiftStore = { agents: {} };
+
+function loadShiftStore() {
+  try {
+    if (!fs.existsSync(SHIFTS_PATH)) return { agents: {} };
+    const parsed = JSON.parse(fs.readFileSync(SHIFTS_PATH, 'utf8'));
+    return (parsed && typeof parsed.agents === 'object') ? parsed : { agents: {} };
+  } catch (error) {
+    console.warn('Shift store unreadable, starting empty:', error.message || error);
+    return { agents: {} };
+  }
+}
+
+function persistShiftStore() {
+  try {
+    fs.mkdirSync(path.dirname(SHIFTS_PATH), { recursive: true });
+    fs.writeFileSync(SHIFTS_PATH, JSON.stringify(shiftStore), 'utf8');
+  } catch (error) {
+    console.warn('Shift store write failed:', error.message || error);
+  }
+}
+
+function shiftAgentRecord(code) {
+  if (!shiftStore.agents[code]) shiftStore.agents[code] = { lastSeen: 0, sessions: [] };
+  return shiftStore.agents[code];
+}
+
+function openShiftSession(rec, at) {
+  const last = rec.sessions[rec.sessions.length - 1];
+  if (last && last.end === null) return last;
+  const session = { start: at, end: null, breaks: [] };
+  rec.sessions.push(session);
+  return session;
+}
+
+function closeShiftSession(rec, at) {
+  const last = rec.sessions[rec.sessions.length - 1];
+  if (!last || last.end !== null) return null;
+  // A break still open when the shift ends closes with it, otherwise the break
+  // would swallow the rest of history.
+  const openBreak = last.breaks.find(b => b.end === null);
+  if (openBreak) openBreak.end = Math.max(openBreak.start, at);
+  last.end = Math.max(last.start, at);
+  return last;
+}
+
+function pruneShiftStore(now) {
+  const cutoff = now - SHIFT_RETENTION_MS;
+  Object.values(shiftStore.agents).forEach((rec) => {
+    rec.sessions = rec.sessions.filter(s => s.end === null || s.end >= cutoff);
+  });
+}
+
+// Closes shifts whose owner stopped heartbeating, backdating the end to the
+// last heartbeat so idle time is never counted as worked.
+function sweepIdleShifts() {
+  const now = Date.now();
+  let changed = false;
+  Object.entries(shiftStore.agents).forEach(([, rec]) => {
+    const last = rec.sessions[rec.sessions.length - 1];
+    if (!last || last.end !== null) return;
+    if (now - Number(rec.lastSeen || 0) < SHIFT_IDLE_MS) return;
+    closeShiftSession(rec, Number(rec.lastSeen || last.start));
+    changed = true;
+  });
+  if (changed) { pruneShiftStore(now); persistShiftStore(); }
+}
+
+function shiftAgentFromRequest(req, bodyAgent) {
+  const fromSession = String(req.session?.username || '').trim().toUpperCase();
+  if (SUPPORT_AGENT_CODES.has(fromSession) || CS_AGENT_CODES.has(fromSession)) return fromSession;
+  // Admin logins do not match an agent code, so fall back to the code the board
+  // resolved for itself - validated against the roster, never taken on trust.
+  const claimed = String(bodyAgent || '').trim().toUpperCase();
+  if (SUPPORT_AGENT_CODES.has(claimed) || CS_AGENT_CODES.has(claimed)) return claimed;
+  return null;
+}
+
+function shiftSnapshotFor(code) {
+  const rec = shiftStore.agents[code];
+  if (!rec) return { agent: code, onShift: false, onBreak: false, sessions: [] };
+  const last = rec.sessions[rec.sessions.length - 1];
+  return {
+    agent: code,
+    onShift: !!(last && last.end === null),
+    onBreak: !!(last && last.end === null && last.breaks.some(b => b.end === null)),
+    lastSeen: rec.lastSeen || 0,
+    sessions: rec.sessions
+  };
+}
+
+shiftStore = loadShiftStore();
+setInterval(sweepIdleShifts, SHIFT_SWEEP_MS).unref?.();
+
 async function safeWriteState(state) {
   const nextState = (state && typeof state === 'object') ? state : {};
   const currentState = safeReadState();
@@ -1235,23 +1310,6 @@ async function graphSendTeamsDirectMessage(token, recipientEmail, htmlMessage) {
   return { chatId: chat.id, recipientId: recipient.id };
 }
 
-function buildResolvedTeamsMessage(item) {
-  const ticketNo = escapeHtml(item.ticketNumber ? `#${item.ticketNumber}` : item.ticketId);
-  const title = escapeHtml(item.subject || '(no subject)');
-  const company = escapeHtml(item.companyName || 'Unknown company');
-  const jira = item.jiraKey ? `<div><strong>Jira:</strong> ${escapeHtml(item.jiraKey)}</div>` : '';
-  const assignee = item.assignee ? `<div><strong>Support agent:</strong> ${escapeHtml(item.assignee)}</div>` : '';
-  return [
-    '<div>',
-    '<div><strong>Support Kanban update</strong></div>',
-    `<div style="margin-top:6px;">Ticket <strong>${ticketNo}</strong> moved to <strong>Resolved</strong>.</div>`,
-    `<div style="margin-top:6px;"><strong>Subject:</strong> ${title}</div>`,
-    `<div><strong>Company:</strong> ${company}</div>`,
-    assignee,
-    jira,
-    '</div>'
-  ].filter(Boolean).join('');
-}
 
 function buildResolvedPowerAutomatePayload(item) {
   const ticketNumber = String(item.ticketNumber || item.ticketId || '').trim();
@@ -2443,7 +2501,60 @@ app.get('/auth/hubspot/status', requireAuth, async (req, res) => {
   res.json({ connected });
 });
 
-app.post('/auth/logout', (req, res) => req.session.destroy(() => res.json({ ok: true })));
+// --- Shift endpoints -------------------------------------------------------
+
+// Heartbeat: opens a shift on first call, keeps it alive after that. The client
+// calls this on load and on a timer; missing beats are what the idle sweep uses
+// to close a forgotten tab's shift.
+app.post('/api/shift/heartbeat', requireAuth, (req, res) => {
+  const code = shiftAgentFromRequest(req, req.body?.agent);
+  if (!code) return res.json({ ok: false, reason: 'no_agent_code', tracked: false });
+  const now = Date.now();
+  const rec = shiftAgentRecord(code);
+  rec.lastSeen = now;
+  openShiftSession(rec, now);
+  pruneShiftStore(now);
+  persistShiftStore();
+  return res.json({ ok: true, tracked: true, ...shiftSnapshotFor(code) });
+});
+
+// Toggle break. Time inside a break is excluded from shift time, so the SLA
+// clock stops. Re-clicking closes the break and the clock resumes.
+app.post('/api/shift/break', requireAuth, (req, res) => {
+  const code = shiftAgentFromRequest(req, req.body?.agent);
+  if (!code) return res.status(400).json({ error: 'no_agent_code' });
+  const now = Date.now();
+  const rec = shiftAgentRecord(code);
+  rec.lastSeen = now;
+  const session = openShiftSession(rec, now);
+  const openBreak = session.breaks.find(b => b.end === null);
+  if (openBreak) openBreak.end = now;
+  else session.breaks.push({ start: now, end: null });
+  persistShiftStore();
+  return res.json({ ok: true, ...shiftSnapshotFor(code) });
+});
+
+// Every agent's shift history, so the board can compute shift-time SLA for a
+// ticket assigned to anyone - not just the current user.
+app.get('/api/shift/state', requireAuth, (req, res) => {
+  sweepIdleShifts();
+  const me = shiftAgentFromRequest(req, req.query?.agent);
+  const agents = {};
+  Object.keys(shiftStore.agents).forEach((code) => { agents[code] = shiftSnapshotFor(code); });
+  return res.json({ me, agents, idleMs: SHIFT_IDLE_MS, serverNow: Date.now() });
+});
+
+app.post('/auth/logout', (req, res) => {
+  // Close the shift before the session is destroyed - afterwards there is no
+  // way to tell who was logging out.
+  const code = shiftAgentFromRequest(req, null);
+  if (code) {
+    const rec = shiftAgentRecord(code);
+    closeShiftSession(rec, Date.now());
+    persistShiftStore();
+  }
+  return req.session.destroy(() => res.json({ ok: true }));
+});
 
 app.get('/healthz', async (req, res) => {
   try {
@@ -5196,57 +5307,192 @@ app.post('/api/mcp-proxy', requireAuth, async (req, res) => {
   }
 });
 
-app.post('/api/qt-seize/outpaint', requireAuth, async (req, res) => {
-  const imageDataUrl = String(req.body?.imageDataUrl || '');
-  const maskDataUrl = String(req.body?.maskDataUrl || '');
-  const prompt = String(req.body?.prompt || '').trim();
-
-  if (!imageDataUrl || !maskDataUrl) {
-    return res.status(400).json({ error: 'missing_image_or_mask' });
-  }
-
-  if (!process.env.OPENAI_API_KEY) {
-    return res.status(503).json({ error: 'missing_openai_api_key' });
-  }
-
-  const workerPath = path.join(__dirname, 'scripts', 'qt_seize_outpaint.py');
-  const pythonCmd = process.env.PYTHON || process.env.PYTHON_BIN || 'python';
-  const child = spawn(pythonCmd, [workerPath], {
-    cwd: __dirname,
-    env: process.env,
-    stdio: ['pipe', 'pipe', 'pipe']
-  });
-  const timeout = setTimeout(() => child.kill('SIGTERM'), 120000);
-  let stdout = '';
-  let stderr = '';
-
-  child.stdout.on('data', chunk => { stdout += chunk.toString('utf8'); });
-  child.stderr.on('data', chunk => { stderr += chunk.toString('utf8'); });
-  child.stdin.end(JSON.stringify({ imageDataUrl, maskDataUrl, prompt }));
-
-  child.on('error', error => {
-    clearTimeout(timeout);
-    return res.status(500).json({ error: 'python_worker_failed', detail: String(error.message || error) });
-  });
-
-  child.on('close', code => {
-    clearTimeout(timeout);
-    if (code !== 0) {
-      return res.status(500).json({ error: 'outpaint_failed', detail: stderr.slice(0, 1200) || stdout.slice(0, 1200) });
-    }
-    try {
-      const payload = JSON.parse(stdout);
-      if (!payload?.imageDataUrl) return res.status(500).json({ error: 'missing_ai_image' });
-      return res.json(payload);
-    } catch (error) {
-      return res.status(500).json({ error: 'invalid_worker_response', detail: String(error.message || error) });
-    }
-  });
-});
 
 app.get(['/qt-seize', '/qt-seize/'], requireAuth, (req, res) => {
   res.type('html').sendFile(path.join(__dirname, 'public', 'qt-seize', 'index.html'));
 });
+// ---------------------------------------------------------------------------
+// QT Detect - does a site have Quicktext installed?
+//
+// Ported from the Selenium script in the Script-off repo. That version drove a
+// real Chrome via selenium + webdriver-manager and read spreadsheets with
+// pandas, none of which can run in this container, so the detection rules were
+// reimplemented over plain HTTP instead. The rules themselves are kept exactly:
+//
+//   * Only ACTIVE embeds count - a <script> or <iframe> that actually loads
+//     Quicktext.
+//   * <link rel="dns-prefetch"> / preconnect are explicitly IGNORED. They
+//     linger long after an uninstall and were the main source of false
+//     positives in the original.
+//   * Domain markers are conclusive on their own. The looser brand words only
+//     count inside a script/iframe, never in page copy - a hotel that merely
+//     mentions "Velma" in its text is not an install.
+//
+// Trade-off worth knowing: this reads the HTML the server returns, so a widget
+// injected purely at runtime by other JavaScript leaves no trace and will read
+// as "not detected". The standard install is a pasted <script> tag, which this
+// does see. Sites needing the browser path are reported as 'inconclusive'
+// rather than a confident "no".
+// ---------------------------------------------------------------------------
+const QT_DOMAIN_MARKERS = ['snippets.quicktext.im', 'cdn.quicktext.im', 'quicktext.im'];
+const QT_BRAND_MARKERS = ['quicktext', 'qtxt', 'velma', 'quinta'];
+const QT_FETCH_TIMEOUT_MS = Number(process.env.QT_DETECT_TIMEOUT_MS || 15000);
+const QT_MAX_URLS = Number(process.env.QT_DETECT_MAX_URLS || 300);
+const QT_CONCURRENCY = Number(process.env.QT_DETECT_CONCURRENCY || 6);
+
+// Hosts the server must never be told to fetch. This endpoint turns an admin's
+// input into an outbound request from inside the cluster, so without this it
+// doubles as a scanner for internal services and the cloud metadata endpoint.
+function qtIsBlockedHost(hostname) {
+  const h = String(hostname || '').toLowerCase().replace(/^\[|\]$/g, '');
+  if (!h) return true;
+  if (h === 'localhost' || h === '::1' || h.endsWith('.localhost')) return true;
+  if (h.endsWith('.local') || h.endsWith('.internal') || h.endsWith('.cluster.local')) return true;
+  // IPv4 private / loopback / link-local (169.254.169.254 is cloud metadata).
+  const v4 = h.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (v4) {
+    const [a, b] = [Number(v4[1]), Number(v4[2])];
+    if (a === 0 || a === 127 || a === 10) return true;
+    if (a === 169 && b === 254) return true;
+    if (a === 172 && b >= 16 && b <= 31) return true;
+    if (a === 192 && b === 168) return true;
+    if (a >= 224) return true;
+  }
+  if (/^f[cd][0-9a-f]{2}:/.test(h) || h.startsWith('fe80:')) return true; // IPv6 ULA / link-local
+  return false;
+}
+
+function qtNormalizeUrl(raw) {
+  let value = String(raw || '').trim();
+  if (!value) return null;
+  // An explicit scheme must be http(s). Previously anything without "http://"
+  // had "https://" glued on, so "file:///etc/passwd" silently became the
+  // nonsense URL "https://file///etc/passwd" instead of being refused.
+  const scheme = value.match(/^([a-z][a-z0-9+.-]*):/i);
+  if (scheme) {
+    if (!/^https?$/i.test(scheme[1])) return null;
+  } else {
+    value = 'https://' + value;
+  }
+  try {
+    const u = new URL(value);
+    if (!/^https?:$/.test(u.protocol)) return null;
+    if (qtIsBlockedHost(u.hostname)) return null;
+    return u.toString();
+  } catch (_) { return null; }
+}
+
+// Pulls out the tags that can actually load something, with their contents.
+function qtActiveEmbeds(html) {
+  const out = [];
+  const scriptRe = /<script\b([^>]*)>([\s\S]*?)<\/script>/gi;
+  const selfClosingRe = /<(script|iframe)\b([^>]*?)\/?>/gi;
+  let m;
+  while ((m = scriptRe.exec(html))) out.push({ tag: 'script', attrs: m[1] || '', body: m[2] || '' });
+  while ((m = selfClosingRe.exec(html))) out.push({ tag: m[1].toLowerCase(), attrs: m[2] || '', body: '' });
+  return out;
+}
+
+function qtDetectInHtml(html) {
+  const source = String(html || '');
+  // Strip link/meta outright so a leftover dns-prefetch can never match.
+  const scrubbed = source.replace(/<link\b[^>]*>/gi, ' ').replace(/<meta\b[^>]*>/gi, ' ');
+
+  for (const embed of qtActiveEmbeds(scrubbed)) {
+    const attrs = embed.attrs.toLowerCase();
+    const body = embed.body.toLowerCase();
+    const haystack = attrs + ' ' + body;
+
+    for (const marker of QT_DOMAIN_MARKERS) {
+      if (haystack.includes(marker)) {
+        const src = (embed.attrs.match(/\bsrc\s*=\s*["']([^"']+)["']/i) || [])[1] || null;
+        return { detected: true, confidence: 'high', marker, via: `<${embed.tag}>`, src };
+      }
+    }
+    // Brand words only count on a loading attribute, not in inline copy.
+    const srcish = (attrs.match(/\b(?:src|data-src|href)\s*=\s*["']([^"']+)["']/i) || [])[1] || '';
+    for (const marker of QT_BRAND_MARKERS) {
+      if (srcish.includes(marker)) {
+        return { detected: true, confidence: 'medium', marker, via: `<${embed.tag}>`, src: srcish };
+      }
+    }
+  }
+  return { detected: false, confidence: 'high', marker: null, via: null, src: null };
+}
+
+async function qtCheckUrl(rawUrl) {
+  const url = qtNormalizeUrl(rawUrl);
+  const started = Date.now();
+  if (!url) return { input: rawUrl, url: null, status: 'invalid_url', detected: false, ms: 0 };
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), QT_FETCH_TIMEOUT_MS);
+  try {
+    const res = await fetch(url, {
+      redirect: 'follow',
+      signal: controller.signal,
+      headers: {
+        // Some sites serve a stripped page to non-browser agents.
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml'
+      }
+    });
+    const html = await res.text();
+    const hit = qtDetectInHtml(html);
+    return {
+      input: rawUrl,
+      url,
+      finalUrl: res.url || url,
+      httpStatus: res.status,
+      status: res.ok ? 'ok' : 'http_error',
+      detected: hit.detected,
+      confidence: hit.detected ? hit.confidence : (res.ok ? 'high' : 'low'),
+      marker: hit.marker,
+      via: hit.via,
+      src: hit.src,
+      bytes: html.length,
+      ms: Date.now() - started
+    };
+  } catch (error) {
+    const aborted = error?.name === 'AbortError';
+    return {
+      input: rawUrl, url, status: aborted ? 'timeout' : 'fetch_error',
+      detected: false, confidence: 'low',
+      error: aborted ? `no response in ${QT_FETCH_TIMEOUT_MS}ms` : String(error?.message || error),
+      ms: Date.now() - started
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Admin-only: this reaches out to third-party sites from the server.
+app.post('/api/qt-detect', requireAdmin, async (req, res) => {
+  const raw = Array.isArray(req.body?.urls) ? req.body.urls : [];
+  const urls = [...new Set(raw.map(u => String(u || '').trim()).filter(Boolean))].slice(0, QT_MAX_URLS);
+  if (!urls.length) return res.status(400).json({ error: 'no_urls' });
+
+  const results = new Array(urls.length);
+  let cursor = 0;
+  // Bounded concurrency - a few hundred simultaneous fetches would be unkind to
+  // this process and to the sites being checked.
+  const worker = async () => {
+    while (cursor < urls.length) {
+      const i = cursor++;
+      results[i] = await qtCheckUrl(urls[i]);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(QT_CONCURRENCY, urls.length) }, worker));
+
+  const detected = results.filter(r => r.detected).length;
+  const failed = results.filter(r => r.status !== 'ok').length;
+  return res.json({
+    results,
+    summary: { total: results.length, detected, notDetected: results.length - detected - failed, failed },
+    truncated: raw.length > urls.length ? raw.length - urls.length : 0
+  });
+});
+
 app.use('/qt-seize', requireAuth, express.static(path.join(__dirname, 'public', 'qt-seize')));
 app.use('/assets', requireAuth, express.static(path.join(__dirname, 'public')));
 // index.html carries the entire app - all CSS and all JS are inline - so a
