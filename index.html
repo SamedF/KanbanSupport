@@ -2332,11 +2332,33 @@ header {
 
 .modal-body-scroll {
   padding: 17px 19px;
-  overflow-y: auto;
+  overflow: auto;
   flex: 1;
+  min-height: 0;
   font-size: 13px;
   line-height: 1.7;
   color: var(--gray-700);
+}
+
+#email-modal .modal {
+  width: min(980px, 96vw);
+}
+
+#em-body {
+  overflow-x: scroll;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+#em-body > div {
+  width: max-content;
+  min-width: 100%;
+  max-width: none;
+}
+
+#em-body table {
+  width: max-content;
+  max-width: none;
 }
 
 /* Raw email HTML injected into #em-body carries its own inline color/background
@@ -2352,6 +2374,48 @@ header {
 }
 [data-theme="dark"] #em-body a {
   color: var(--sky-400) !important;
+}
+
+#em-body img {
+  max-width: none;
+  height: auto;
+  border-radius: 8px;
+}
+
+.email-image-attachments {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(220px, 100%), 1fr));
+  gap: 10px;
+}
+
+.email-image-attachment {
+  display: block;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--white);
+  text-decoration: none;
+  color: var(--text);
+}
+
+.email-image-attachment img {
+  width: 100%;
+  aspect-ratio: 16 / 10;
+  object-fit: contain;
+  background: var(--slate-50);
+}
+
+.email-image-attachment span {
+  display: block;
+  padding: 6px 8px;
+  font-size: 11px;
+  color: var(--slate-500);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .modal-actions {

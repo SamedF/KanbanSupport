@@ -5421,8 +5421,31 @@ app.post('/api/mcp-proxy', requireAuth, async (req, res) => {
       const ownerMatch = rawUri.match(/[?&]owner=([^&]+)/);
       const mailbox = ownerMatch?.[1] ? decodeURIComponent(ownerMatch[1]) : SUPPORT_MAILBOX;
       if (!msgId) return res.status(400).json({ isError: true, error: 'missing_message_id' });
-      const msg = await graphGet(`/users/${encodeURIComponent(mailbox)}/messages/${encodeURIComponent(msgId)}?$select=body,bodyPreview`, token);
-      return res.json({ isError: false, structuredContent: { body: { content: msg?.body?.content || '', contentType: msg?.body?.contentType || 'text' }, bodyPreview: msg?.bodyPreview || '' } });
+      const msg = await graphGet(`/users/${encodeURIComponent(mailbox)}/messages/${encodeURIComponent(msgId)}?$select=body,bodyPreview,hasAttachments`, token);
+      let imageAttachments = [];
+      if (msg?.hasAttachments) {
+        const at = await graphGet(`/users/${encodeURIComponent(mailbox)}/messages/${encodeURIComponent(msgId)}/attachments?$top=25&$select=id,name,contentType,size,isInline,contentId,contentBytes`, token);
+        imageAttachments = (Array.isArray(at?.value) ? at.value : [])
+          .filter(a => String(a?.contentType || '').toLowerCase().startsWith('image/') && a?.contentBytes)
+          .slice(0, 20)
+          .map(a => ({
+            id: a.id || '',
+            name: a.name || 'image',
+            contentType: a.contentType || 'image/*',
+            size: a.size || 0,
+            isInline: !!a.isInline,
+            contentId: String(a.contentId || '').replace(/^<|>$/g, ''),
+            dataUrl: `data:${a.contentType || 'image/*'};base64,${a.contentBytes}`
+          }));
+      }
+      return res.json({
+        isError: false,
+        structuredContent: {
+          body: { content: msg?.body?.content || '', contentType: msg?.body?.contentType || 'text' },
+          bodyPreview: msg?.bodyPreview || '',
+          imageAttachments
+        }
+      });
     }
 
     if (tool.includes('search_crm_objects')) {
