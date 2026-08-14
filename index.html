@@ -3141,6 +3141,21 @@ textarea:focus {
   margin-top: 10px;
 }
 
+.qt-detect-file {
+  display: none;
+}
+
+.qt-detect-select {
+  height: 34px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0 28px 0 10px;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--slate-700);
+  background: var(--white);
+}
+
 .qt-detect-status {
   font-size: 12px;
   color: var(--slate-500);
@@ -5813,12 +5828,12 @@ document.getElementById('emt-submit').addEventListener('click',async()=>{
 });
 
 //  View switching
-function hidePrimaryViews(){document.getElementById('main-board').style.display='none';document.getElementById('spam-view').classList.remove('active');document.getElementById('archive-view').classList.remove('active');document.getElementById('companies-view').style.display='none';document.getElementById('kpi-view').style.display='none';document.getElementById('qt-seize-view').style.display='none';document.getElementById('assignlog-view').style.display='none';document.getElementById('qt-detect-view').style.display='none';}
+function hidePrimaryViews(){stopKpiAutoRefresh();document.getElementById('main-board').style.display='none';document.getElementById('spam-view').classList.remove('active');document.getElementById('archive-view').classList.remove('active');document.getElementById('companies-view').style.display='none';document.getElementById('kpi-view').style.display='none';document.getElementById('qt-seize-view').style.display='none';document.getElementById('assignlog-view').style.display='none';document.getElementById('qt-detect-view').style.display='none';}
 function showBoardView(){viewMode='board';setBoardChromeVisible(true);hidePrimaryViews();document.getElementById('main-board').style.display='flex';setSideNavActive('board');saveLastWorkspaceSession('board');renderBoard();}
 function showSpamView(){viewMode='spam';setBoardChromeVisible(true);hidePrimaryViews();document.getElementById('spam-view').classList.add('active');setSideNavActive('spam');saveLastWorkspaceSession('spam');renderSpamView();}
 function showArchiveView(){viewMode='archive';setBoardChromeVisible(true);hidePrimaryViews();document.getElementById('archive-view').classList.add('active');setSideNavActive('archive');saveLastWorkspaceSession('archive');renderArchiveView();}
 function showDashboardView(){companiesViewType='report';viewMode='companies';setBoardChromeVisible(true);hidePrimaryViews();document.getElementById('companies-view').style.display='block';setSideNavActive('dashboard');saveLastWorkspaceSession('dashboard');renderCompaniesView();}
-function showKpiView(){viewMode='kpi';setBoardChromeVisible(true);hidePrimaryViews();document.getElementById('kpi-view').style.display='block';setSideNavActive('kpi');saveLastWorkspaceSession('kpi');renderKpiView();}
+function showKpiView(){viewMode='kpi';setBoardChromeVisible(true);hidePrimaryViews();document.getElementById('kpi-view').style.display='block';setSideNavActive('kpi');saveLastWorkspaceSession('kpi');startKpiAutoRefresh();renderKpiView();}
 function showQtSeizeView(){viewMode='qtSeize';setBoardChromeVisible(false);hidePrimaryViews();const frame=document.getElementById('qt-seize-frame');if(frame&&!frame.src)frame.src='/qt-seize/';document.getElementById('qt-seize-view').style.display='block';setSideNavActive('qtSeize');saveLastWorkspaceSession('qtSeize');}
 function showAssignLogView(){viewMode='assignlog';setBoardChromeVisible(false);hidePrimaryViews();document.getElementById('assignlog-view').style.display='block';setSideNavActive('assignlog');saveLastWorkspaceSession('assignlog');renderAssignLogView();}
 function showQtDetectView(){
@@ -5845,6 +5860,56 @@ function qtDetectParseUrls(raw){
     .map(line=>String(line).split(/[,;\t]/)[0].trim().replace(/^["']|["']$/g,''))
     .filter(Boolean)
     .filter(v=>!/^(url|website|site|domain|link)$/i.test(v));
+}
+function qtDetectLooksLikeUrl(value){
+  const v=String(value||'').trim();
+  return /^(https?:\/\/)?(www\.)?[-a-z0-9@:%._+~#=]{2,256}\.[a-z]{2,24}\b[-a-z0-9()@:%_+.~#?&/=]*$/i.test(v);
+}
+function qtDetectParseDelimited(raw,delimiter){
+  const rows=[],text=String(raw||'').replace(/^\uFEFF/,'');
+  let row=[],cell='',quoted=false;
+  for(let i=0;i<text.length;i++){
+    const ch=text[i],next=text[i+1];
+    if(quoted){
+      if(ch==='"'&&next==='"'){cell+='"';i++;}
+      else if(ch==='"')quoted=false;
+      else cell+=ch;
+    }else if(ch==='"')quoted=true;
+    else if(ch===delimiter){row.push(cell);cell='';}
+    else if(ch==='\n'||ch==='\r'){
+      if(ch==='\r'&&next==='\n')i++;
+      row.push(cell);rows.push(row);row=[];cell='';
+    }else cell+=ch;
+  }
+  row.push(cell);rows.push(row);
+  return rows.filter(r=>r.some(v=>String(v||'').trim()));
+}
+function qtDetectUrlsFromTable(rows){
+  if(!Array.isArray(rows)||!rows.length)return[];
+  const headers=rows[0].map(v=>String(v||'').trim().toLowerCase());
+  const namedIndex=headers.findIndex(v=>/^(url|website|site|domain|link|hotel website|web site)$/i.test(v));
+  const start=namedIndex>=0?1:(headers.some(v=>qtDetectLooksLikeUrl(v))?0:1);
+  const index=namedIndex>=0?namedIndex:0;
+  const urls=[];
+  rows.slice(start).forEach(row=>{
+    const preferred=String(row[index]||'').trim();
+    const fallback=row.map(v=>String(v||'').trim()).find(qtDetectLooksLikeUrl);
+    const url=preferred||fallback;
+    if(url)urls.push(url);
+  });
+  return qtDetectParseUrls(urls.join('\n'));
+}
+function qtDetectXmlDecode(value){
+  const box=document.createElement('textarea');
+  box.innerHTML=String(value||'');
+  return box.value;
+}
+function qtDetectExtractUrlsFromSpreadsheetText(text){
+  const values=[];
+  String(text||'').replace(/<t[^>]*>([\s\S]*?)<\/t>/gi,(_,v)=>{values.push(qtDetectXmlDecode(v));return _;});
+  String(text||'').replace(/<v[^>]*>([\s\S]*?)<\/v>/gi,(_,v)=>{values.push(qtDetectXmlDecode(v));return _;});
+  const candidates=values.length?values:String(text||'').split(/[\r\n\t,; ]+/);
+  return qtDetectParseUrls(candidates.filter(qtDetectLooksLikeUrl).join('\n'));
 }
 function qtDetectSetStatus(text){const el=document.getElementById('qt-detect-status');if(el)el.textContent=text;}
 function qtDetectRender(){
@@ -6571,10 +6636,26 @@ document.getElementById('qt-seize-back-board').addEventListener('click',showBoar
 document.getElementById('qt-detect-view-btn').addEventListener('click',()=>{if(viewMode==='qtDetect')showBoardView();else showQtDetectView();});
 document.getElementById('qt-detect-back-board').addEventListener('click',showBoardView);
 document.getElementById('qt-detect-run').addEventListener('click',qtDetectRun);
-document.getElementById('qt-detect-export').addEventListener('click',qtDetectExportCsv);
+document.getElementById('qt-detect-import').addEventListener('click',()=>document.getElementById('qt-detect-file').click());
+document.getElementById('qt-detect-file').addEventListener('change',e=>{
+  const file=e.target.files&&e.target.files[0];
+  qtDetectImportFile(file).finally(()=>{e.target.value='';});
+});
+document.getElementById('qt-detect-export').addEventListener('click',qtDetectExport);
 document.getElementById('qt-detect-clear').addEventListener('click',()=>{
   document.getElementById('qt-detect-urls').value='';
   qtDetectRows=[];qtDetectRender();qtDetectSetStatus('Paste URLs to begin.');
+});
+document.getElementById('kpi-refresh-now').addEventListener('click',()=>{if(viewMode==='kpi')void renderKpiView();});
+document.getElementById('kpi-autorefresh').addEventListener('change',e=>{
+  kpiAutoRefresh=!!e.target.checked;
+  startKpiAutoRefresh();
+  if(kpiAutoRefresh&&viewMode==='kpi')void renderKpiView();
+});
+// Coming back to a dashboard left open on another monitor should not show
+// figures from whenever it was last looked at.
+document.addEventListener('visibilitychange',()=>{
+  if(document.visibilityState==='visible'&&viewMode==='kpi'&&kpiAutoRefresh)void renderKpiView();
 });
 document.getElementById('kpi-time-filter').addEventListener('change',e=>{kpiTimeFilter=e.target.value||'today';saveLastWorkspaceSession();if(viewMode==='kpi')renderKpiView();});
 document.getElementById('kpi-team-filter').addEventListener('change',e=>{kpiTeamFilter=e.target.value||'all';kpiAgentFilter='all';saveLastWorkspaceSession();if(viewMode==='kpi')renderKpiView();});
