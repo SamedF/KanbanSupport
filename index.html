@@ -3569,6 +3569,228 @@ th {
     gap: 5px;
   }
 }
+
+/* ---------------------------------------------------------------- Translation
+   A ticket's language switch. One shared popover (#tr-pop) serves every
+   trigger on the page rather than one menu per card: the per-card agent
+   dropdown had to be moved to <body> to escape column clipping, which made it
+   possible for a board re-render to orphan an open menu on screen forever.
+   A single element cannot be orphaned. */
+.tr-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10px;
+  padding: 2px 7px;
+  border: 1px solid var(--slate-300);
+  border-radius: 999px;
+  background: var(--white);
+  color: var(--slate-600);
+  cursor: pointer;
+  font-weight: 600;
+  line-height: 1.4;
+  white-space: nowrap;
+  transition: background .12s, border-color .12s, color .12s;
+}
+.tr-trigger:hover:not(:disabled) {
+  background: var(--indigo-50);
+  border-color: var(--indigo-200);
+  color: var(--indigo-700);
+}
+.tr-trigger:disabled { opacity: .55; cursor: not-allowed; }
+/* Showing a translation is a state an agent must not lose track of - they are
+   reading machine output, not the client's words. */
+.tr-trigger.active {
+  background: var(--indigo-600);
+  border-color: var(--indigo-600);
+  color: var(--white);
+}
+.tr-trigger.busy { opacity: .7; cursor: progress; }
+.tr-glyph { font-size: 11px; line-height: 1; }
+
+/* Spins while a translation is in flight. */
+.tr-trigger.busy .tr-glyph {
+  display: inline-block;
+  animation: tr-spin 1.1s linear infinite;
+}
+@keyframes tr-spin { to { transform: rotate(360deg); } }
+
+.tr-banner {
+  margin-top: 6px;
+  padding: 5px 8px;
+  border: 1px solid var(--indigo-200);
+  border-radius: 8px;
+  background: var(--indigo-50);
+  color: var(--indigo-800);
+  font-size: 10px;
+  line-height: 1.35;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.tr-banner strong { font-weight: 700; }
+.tr-banner-note { color: var(--indigo-700); opacity: .85; }
+.tr-banner button {
+  font-size: 10px;
+  padding: 2px 7px;
+  border: 1px solid var(--indigo-200);
+  border-radius: 999px;
+  background: var(--white);
+  color: var(--indigo-700);
+  cursor: pointer;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.tr-banner button:hover { background: var(--indigo-50); }
+
+/* Detected-language hint on an untranslated card. Shown only when the ticket
+   is not already in the agent's working language, so it reads as "this one
+   needs attention" rather than as decoration on every card. */
+.tr-detected {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 9px;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--amber-50);
+  border: 1px solid var(--amber-300);
+  color: var(--amber-800);
+  text-transform: uppercase;
+  letter-spacing: .02em;
+}
+
+#tr-pop {
+  position: fixed;
+  z-index: 12000;
+  display: none;
+  width: 246px;
+  max-height: 340px;
+  flex-direction: column;
+  background: var(--white);
+  border: 1px solid var(--slate-200);
+  border-radius: 12px;
+  box-shadow: 0 18px 44px rgba(15, 23, 42, .22);
+  overflow: hidden;
+}
+#tr-pop.open { display: flex; }
+.tr-pop-head {
+  padding: 9px 11px 7px;
+  border-bottom: 1px solid var(--slate-100);
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--slate-500);
+  text-transform: uppercase;
+  letter-spacing: .04em;
+}
+.tr-pop-sub {
+  display: block;
+  margin-top: 3px;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--slate-400);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tr-pop-search {
+  margin: 8px 9px 4px;
+  padding: 5px 8px;
+  border: 1px solid var(--slate-200);
+  border-radius: 8px;
+  font-size: 11px;
+  font-family: inherit;
+  outline: none;
+  background: var(--white);
+  color: var(--slate-700);
+}
+.tr-pop-search:focus { border-color: var(--indigo-200); }
+.tr-pop-list { overflow-y: auto; padding: 4px 6px 8px; }
+.tr-pop-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 8px;
+  background: none;
+  font-family: inherit;
+  font-size: 11.5px;
+  color: var(--slate-700);
+  text-align: left;
+  cursor: pointer;
+}
+.tr-pop-item:hover { background: var(--indigo-50); color: var(--indigo-800); }
+.tr-pop-item.current { background: var(--indigo-200); color: var(--indigo-800); font-weight: 700; }
+.tr-pop-code {
+  font-size: 9px;
+  font-weight: 700;
+  color: var(--slate-400);
+  text-transform: uppercase;
+  letter-spacing: .03em;
+  flex-shrink: 0;
+}
+/* Marks a language this ticket is already cached in - picking it costs nothing
+   and returns instantly. */
+.tr-pop-item .tr-pop-cached {
+  font-size: 9px;
+  font-weight: 700;
+  color: var(--emerald-600);
+  flex-shrink: 0;
+}
+.tr-pop-empty { padding: 12px 10px; font-size: 11px; color: var(--slate-400); text-align: center; }
+.tr-pop-foot {
+  padding: 7px 10px;
+  border-top: 1px solid var(--slate-100);
+  background: var(--slate-50);
+  font-size: 9.5px;
+  line-height: 1.4;
+  color: var(--slate-400);
+}
+.tr-pop-foot button {
+  margin-top: 5px;
+  font-size: 10px;
+  padding: 3px 8px;
+  border: 1px solid var(--slate-300);
+  border-radius: 999px;
+  background: var(--white);
+  color: var(--slate-600);
+  cursor: pointer;
+  font-weight: 600;
+}
+.tr-pop-foot button:hover { background: var(--slate-100); }
+
+/* Translation controls inside the email/notes modals. Horizontal padding
+   matches .modal-meta-bar so the bar lines up with the header above it. */
+.tr-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 8px 18px;
+  font-size: 11px;
+  color: var(--slate-500);
+  border-bottom: 1px solid var(--border);
+}
+/* No ticket open, or nothing to offer: collapse completely rather than leave a
+   padded, bordered empty strip in the modal header. */
+.tr-bar:empty { display: none; padding: 0; border-bottom: 0; }
+.tr-bar .tr-trigger { font-size: 11px; padding: 3px 10px; }
+
+/* Marks the individual runs of text that were replaced, so an agent scanning a
+   long thread can see which parts are the machine's words and which are the
+   client's (a mixed-language thread only gets partly rewritten). */
+.tr-seg {
+  background: linear-gradient(transparent 82%, var(--indigo-50) 82%);
+  border-radius: 2px;
+}
 </style>
 </head>
 <body>
@@ -4035,9 +4257,17 @@ th {
 <div id="toast"></div>
 
 <!-- Email modal -->
-<div class="modal-bg" id="email-modal"><div class="modal"><div class="modal-head"><h2 id="em-title"></h2><button class="modal-close-x" data-close="email-modal"></button></div><div class="modal-meta-bar" id="em-meta"></div><div class="modal-body-scroll" id="em-body"></div><div class="modal-actions"><button class="btn-out" data-close="email-modal">Close</button><button class="btn-out" id="em-outlook">Open in Outlook </button></div></div></div>
+<div class="modal-bg" id="email-modal"><div class="modal"><div class="modal-head"><h2 id="em-title"></h2><button class="modal-close-x" data-close="email-modal"></button></div><div class="modal-meta-bar" id="em-meta"></div><div class="tr-bar" id="em-tr-bar"></div><div class="modal-body-scroll" id="em-body"></div><div class="modal-actions"><button class="btn-out" data-close="email-modal">Close</button><button class="btn-out" id="em-outlook">Open in Outlook </button></div></div></div>
+<!-- One shared language picker for every translate trigger on the page. See the
+     .tr-trigger CSS for why this is a single element rather than one per card. -->
+<div id="tr-pop" role="dialog" aria-label="Translate ticket">
+  <div class="tr-pop-head">Translate ticket<span class="tr-pop-sub" id="tr-pop-sub"></span></div>
+  <input type="text" class="tr-pop-search" id="tr-pop-search" placeholder="Search language..." autocomplete="off" spellcheck="false">
+  <div class="tr-pop-list" id="tr-pop-list"></div>
+  <div class="tr-pop-foot" id="tr-pop-foot"></div>
+</div>
 <!-- Intern com modal -->
-<div class="modal-bg" id="com-modal"><div class="modal" style="max-width:560px;"><div class="modal-head"><div style="flex:1;min-width:0;"><h2 id="com-title"></h2><div style="font-size:11px;color:var(--slate-400);margin-top:3px;" id="com-subtitle"></div></div><button class="modal-close-x" data-close="com-modal"></button></div><div class="com-thread" id="com-thread"></div><div class="compose-area"><div class="compose-label">Add internal comment</div><textarea class="compose-textarea" id="com-input" placeholder="e.g. Client needs to provide API credentials before we can proceed."></textarea><div class="compose-footer"><div class="tag-section"><label>Tag people:</label><div class="tag-grid" id="tag-grid"></div></div><div style="display:flex;gap:8px;align-self:flex-end;"><button class="btn-out" id="com-debug-expert">Debug Expert</button><button class="btn-primary" id="com-post">Post</button></div></div></div></div></div>
+<div class="modal-bg" id="com-modal"><div class="modal" style="max-width:560px;"><div class="modal-head"><div style="flex:1;min-width:0;"><h2 id="com-title"></h2><div style="font-size:11px;color:var(--slate-400);margin-top:3px;" id="com-subtitle"></div></div><button class="modal-close-x" data-close="com-modal"></button></div><div class="tr-bar" id="com-tr-bar"></div><div class="com-thread" id="com-thread"></div><div class="compose-area"><div class="compose-label">Add internal comment</div><textarea class="compose-textarea" id="com-input" placeholder="e.g. Client needs to provide API credentials before we can proceed."></textarea><div class="compose-footer"><div class="tag-section"><label>Tag people:</label><div class="tag-grid" id="tag-grid"></div></div><div style="display:flex;gap:8px;align-self:flex-end;"><button class="btn-out" id="com-debug-expert">Debug Expert</button><button class="btn-primary" id="com-post">Post</button></div></div></div></div></div>
 <!-- Mentions modal -->
 <div class="modal-bg" id="mentions-modal"><div class="modal" style="max-width:600px;"><div class="modal-head"><h2 id="mentions-title"> My Alerts</h2><div style="display:flex;align-items:center;gap:8px;"><button class="btn-out" id="mark-all-read" style="font-size:11px;padding:4px 10px;">Mark all read</button><button class="modal-close-x" data-close="mentions-modal"></button></div></div><div style="font-size:12px;color:var(--slate-500);padding:8px 18px 0;" id="mentions-info"></div><div style="display:flex;flex-direction:column;padding:14px 18px;overflow-y:auto;flex:1;" id="mentions-list"></div></div></div>
 <!-- Company custom property modal -->
@@ -5146,6 +5376,19 @@ function startLiveSync(){
     liveRev=Number(e.lastEventId)||liveRev;
     let reason='';try{reason=JSON.parse(e.data)?.reason||'';}catch(_){}
     reloadBoardFromServer(reason);
+  });
+  // A colleague translated a ticket. Metadata only - just enough to mark that
+  // language as free in this tab's picker, so nobody pays for the same
+  // translation twice. The text itself is fetched on demand.
+  es.addEventListener('translation_ready',e=>{
+    liveRev=Number(e.lastEventId)||liveRev;
+    try{
+      const d=JSON.parse(e.data);
+      if(!d?.ticketId||!d?.targetLang)return;
+      const langs=trCachedLangs.get(d.ticketId)||new Set();
+      langs.add(d.targetLang);
+      trCachedLangs.set(d.ticketId,langs);
+    }catch(err){console.warn('translation_ready parse failed',err);}
   });
   // EventSource reconnects on its own (honouring the server's retry:) and
   // replays via Last-Event-ID, so this only needs to reflect status.
@@ -7706,6 +7949,561 @@ async function sendResolvedTicketBack(id){
   if(!rs?.ok&&rs?.reason!=='missing_hubspot_ticket_id')showToast(`HubSpot status sync failed: ${rs?.error||rs?.reason}`);
   showToast(saved?'Ticket sent back to In Progress':'Ticket sent back locally; save pending',saved?'ok':'warn');
 }
+/* ========================== Ticket translation ============================
+   Per-ticket language switch. The unit of work is a *segment*: one short run
+   of text with an id. Nothing here ever sends HTML to the server - for a body
+   we walk the rendered DOM's text nodes, send their contents, and write the
+   translations back into the same positions. Markup, inline images, links and
+   quoted-reply structure therefore cannot be mangled, because the translator
+   never sees them, and one code path covers subjects, previews, bodies and
+   internal notes alike.
+
+   Which language an agent reads a ticket in is a personal, per-session choice,
+   so none of this state goes into the shared board state: two agents can read
+   the same ticket in different languages at the same time. Only the *cache*
+   is shared, server-side, so the second agent to open a French ticket pays
+   nothing for it. */
+
+let TR_LANGS=[];
+let trConfigured=false;
+let trModel='';
+// Which engine the server is using, and what to say if none is set up. The
+// picker names it rather than hiding it: "machine translation" covers engines
+// that differ a lot in quality and in where the text goes, and an agent about
+// to quote a client back to them should be able to see which one they got.
+let trProvider=null;
+let trSetupHint='';
+let trLimits={maxSegments:600,maxChars:200000};
+// ticketId -> {targetLang, sourceLang, sourceLangName, segments} for the card's
+// subject/summary. Session-local; the server holds the durable copy.
+const trCardCache=new Map();
+// ticketId -> Set of language codes the server already has cached, so the
+// picker can mark a language as free and instant.
+const trCachedLangs=new Map();
+const trShown=new Set();
+const trBusy=new Set();
+
+const TR_PREF_KEY='kanbanTranslateTargetLang';
+function trPreferredLang(){
+  try{const v=localStorage.getItem(TR_PREF_KEY);if(v)return v;}catch(_){}
+  // Fall back to the browser's language when it is one we offer, so the first
+  // click already targets the language the agent actually works in.
+  const nav=String(navigator.language||'en');
+  if(TR_LANGS.some(l=>l.code.toLowerCase()===nav.toLowerCase()))return nav;
+  const base=nav.split('-')[0].toLowerCase();
+  const hit=TR_LANGS.find(l=>l.code.toLowerCase()===base);
+  return hit?hit.code:'en';
+}
+function trSetPreferredLang(code){try{localStorage.setItem(TR_PREF_KEY,code);}catch(_){}}
+function trLangName(code){
+  const hit=TR_LANGS.find(l=>l.code.toLowerCase()===String(code||'').toLowerCase());
+  return hit?hit.name:String(code||'').toUpperCase();
+}
+function trShortCode(code){return String(code||'').split('-')[0].toUpperCase();}
+
+async function trLoadLanguages(){
+  try{
+    const r=await fetch('/api/translate/languages',{credentials:'include'});
+    if(!r.ok)return;
+    const d=await r.json();
+    TR_LANGS=Array.isArray(d.languages)?d.languages:[];
+    trConfigured=!!d.configured;
+    trModel=String(d.model||'');
+    trProvider=d.provider||null;
+    trSetupHint=String(d.setupHint||'');
+    if(d.limits)trLimits=d.limits;
+  }catch(_){/* the picker degrades to "unavailable"; nothing else breaks */}
+}
+
+// Pull whatever the team has already translated for this ticket. Cheap (no
+// model call) and it means a colleague's translation shows up as available.
+async function trLoadCachedFor(ticketId){
+  try{
+    const r=await fetch(`/api/translate/${encodeURIComponent(ticketId)}`,{credentials:'include'});
+    if(!r.ok)return null;
+    const d=await r.json();
+    const langs=new Set((d.translations||[]).map(t=>t.targetLang));
+    trCachedLangs.set(ticketId,langs);
+    return d.translations||[];
+  }catch(_){return null;}
+}
+
+async function trRequest(ticketId,targetLang,segments,{force=false}={}){
+  const r=await fetch('/api/translate',{
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    credentials:'include',
+    body:JSON.stringify({ticketId,targetLang,segments,force})
+  });
+  const data=await r.json().catch(()=>({}));
+  if(!r.ok){
+    const err=new Error(data?.message||data?.error||`Translation failed (${r.status})`);
+    err.code=data?.error;
+    err.retryable=!!data?.retryable;
+    throw err;
+  }
+  const langs=trCachedLangs.get(ticketId)||new Set();
+  langs.add(data.targetLang);
+  trCachedLangs.set(ticketId,langs);
+  return data;
+}
+
+// Turn an API failure into one sentence an agent can act on.
+function trReportError(err){
+  const code=err?.code;
+  // The server writes these for a specific engine and a specific fix, so pass
+  // its sentence through rather than replacing it with a generic one.
+  if(code==='translation_not_configured'
+    ||code==='translation_quota_exhausted'
+    ||code==='translation_target_unsupported'
+    ||code==='translation_source_undetected'
+    ||code==='translation_auth_failed'){showToast(err?.message||'Translation is unavailable','warn');return;}
+  if(code==='translation_rate_limited'){showToast('Translation is rate limited right now - try again in a moment','warn');return;}
+  if(code==='translation_unreachable'){showToast(err?.message||'Could not reach the translation service','warn');return;}
+  if(code==='too_many_segments'||code==='content_too_large'){showToast('This ticket is too long to translate in one go','warn');return;}
+  if(code==='no_translatable_segments'){showToast('Nothing to translate on this ticket','warn');return;}
+  showToast(`Translation failed: ${err?.message||'unknown error'}`);
+}
+
+/* ------------------------------------------------------ card-level switching */
+
+// The card shows two pieces of client text. Kept separate from the body so a
+// board scan costs one short request per ticket instead of a full thread.
+function trCardSegments(ticket){
+  const segs=[];
+  const subject=String(ticket?.email?.subject||'').trim();
+  const summary=String(ticket?.email?.summary||'').trim();
+  if(subject)segs.push({id:'subject',text:subject});
+  if(summary)segs.push({id:'summary',text:summary});
+  return segs;
+}
+
+async function trTranslateCard(id,targetLang){
+  if(trBusy.has(id))return;
+  const ticket=allTickets.find(t=>t.id===id);
+  if(!ticket)return;
+  const segments=trCardSegments(ticket);
+  if(!segments.length){showToast('Nothing to translate on this ticket','warn');return;}
+  trBusy.add(id);
+  renderBoard();
+  try{
+    const data=await trRequest(id,targetLang,segments);
+    trCardCache.set(id,{
+      targetLang:data.targetLang,
+      sourceLang:data.sourceLang,
+      sourceLangName:data.sourceLangName,
+      segments:data.segments||{}
+    });
+    trShown.add(id);
+    trSetPreferredLang(data.targetLang);
+    const from=data.sourceLangName||data.sourceLang||'the original';
+    showToast(data.cached
+      ?`Showing cached ${trLangName(data.targetLang)} translation`
+      :`Translated from ${from} to ${trLangName(data.targetLang)}`,'ok');
+  }catch(err){
+    trReportError(err);
+  }finally{
+    trBusy.delete(id);
+    renderBoard();
+  }
+}
+
+function trToggleCard(id){
+  if(trShown.has(id))trShown.delete(id);
+  else if(trCardCache.has(id))trShown.add(id);
+  renderBoard();
+}
+
+// What the card should actually print. Falls back to the original for any
+// segment the translation is missing, so a partial result degrades to "this
+// line is untranslated" rather than to a blank card.
+function trCardView(ticket){
+  const id=ticket.id;
+  const entry=trCardCache.get(id);
+  if(!entry||!trShown.has(id))return null;
+  return {
+    subject:entry.segments.subject||ticket.email.subject||'',
+    summary:entry.segments.summary||ticket.email.summary||'',
+    targetLang:entry.targetLang,
+    sourceLang:entry.sourceLang,
+    sourceLangName:entry.sourceLangName
+  };
+}
+
+function trCardControlsHtml(id){
+  const entry=trCardCache.get(id);
+  // "Shown" without an entry should be impossible (trShown is only added to
+  // after the cache is written), but the button must render regardless.
+  const shown=trShown.has(id)&&!!entry;
+  const busy=trBusy.has(id);
+  const label=trShortCode(entry?entry.targetLang:trPreferredLang());
+  const title=busy
+    ?'Translating...'
+    :(shown
+      ?`Showing ${trLangName(entry.targetLang)} - click to pick another language`
+      :'Translate this ticket');
+  return `<button class="tr-trigger${shown?' active':''}${busy?' busy':''}" data-tr-trigger="${id}" title="${esc(title)}"${busy?' disabled':''}><span class="tr-glyph">&#127760;</span><span>${esc(busy?'...':label)}</span></button>`;
+}
+
+function trCardBannerHtml(id){
+  const entry=trCardCache.get(id);
+  if(!entry||!trShown.has(id))return '';
+  const from=entry.sourceLangName||(entry.sourceLang?trLangName(entry.sourceLang):'unknown');
+  return `<div class="tr-banner">
+      <span><strong>Machine translation</strong> <span class="tr-banner-note">${esc(from)} &rarr; ${esc(trLangName(entry.targetLang))}</span></span>
+      <button data-tr-original="${id}">Show original</button>
+    </div>`;
+}
+
+/* --------------------------------------------------------- language popover */
+
+let trPopTicketId=null;
+// 'card' translates subject + preview; 'email' the open message body;
+// 'notes' the internal comment thread.
+let trPopContext='card';
+// The element the popover is currently positioned against, so scroll and
+// resize can keep it there.
+let trPopAnchor=null;
+
+function trPopEl(){return document.getElementById('tr-pop');}
+
+function trRenderPopList(filter=''){
+  const list=document.getElementById('tr-pop-list');
+  if(!list)return;
+  const q=String(filter||'').trim().toLowerCase();
+  const cached=trCachedLangs.get(trPopTicketId)||new Set();
+  const current=trPopContext==='card'
+    ?(trShown.has(trPopTicketId)?trCardCache.get(trPopTicketId)?.targetLang:null)
+    :(trPopContext==='email'?emTrState.lang:comTrState.lang);
+  const matches=TR_LANGS.filter(l=>!q||l.name.toLowerCase().includes(q)||l.code.toLowerCase().includes(q));
+  if(!matches.length){list.innerHTML='<div class="tr-pop-empty">No language matches that.</div>';return;}
+  list.innerHTML=matches.map(l=>{
+    const isCurrent=current&&current.toLowerCase()===l.code.toLowerCase();
+    return `<button class="tr-pop-item${isCurrent?' current':''}" data-tr-pick="${esc(l.code)}">
+        <span>${esc(l.name)}</span>
+        <span style="display:flex;align-items:center;gap:6px;">${cached.has(l.code)?'<span class="tr-pop-cached">cached</span>':''}<span class="tr-pop-code">${esc(trShortCode(l.code))}</span></span>
+      </button>`;
+  }).join('');
+}
+
+function trPositionPop(anchor){
+  const pop=trPopEl();
+  if(!pop||!anchor)return;
+  const r=anchor.getBoundingClientRect();
+  const pw=pop.offsetWidth||246;
+  const ph=pop.offsetHeight||300;
+  // Flip above the trigger when there is no room below, and clamp horizontally
+  // so a card at the right-hand edge of the board doesn't push it off-screen.
+  let top=r.bottom+6;
+  if(top+ph>window.innerHeight-8)top=Math.max(8,r.top-ph-6);
+  let left=r.left;
+  if(left+pw>window.innerWidth-8)left=Math.max(8,window.innerWidth-pw-8);
+  pop.style.top=`${Math.round(top)}px`;
+  pop.style.left=`${Math.round(left)}px`;
+}
+
+function trOpenPop(anchor,ticketId,context='card'){
+  const pop=trPopEl();
+  if(!pop)return;
+  trPopTicketId=ticketId;
+  trPopContext=context;
+
+  const ticket=allTickets.find(t=>t.id===ticketId);
+  const subject=String(ticket?.email?.subject||'').slice(0,70);
+  const scope=context==='email'?'message body':(context==='notes'?'internal notes':'subject and preview');
+  document.getElementById('tr-pop-sub').textContent=`${ticketDisplayNumber(ticketId)} - ${scope}${subject?` - ${subject}`:''}`;
+
+  const foot=document.getElementById('tr-pop-foot');
+  foot.innerHTML=trConfigured
+    ? `Machine translation via <strong>${esc(trProvider?.label||trModel||'the configured engine')}</strong>${trProvider&&trProvider.free?' (free)':''}. Always check the original before quoting a client.`
+      // Naming the destination is the point of doing this in-app at all: the
+      // feature exists because agents were pasting bodies into public
+      // translators, and a public engine here has the same reach.
+      +(trProvider&&trProvider.thirdParty?`<br><span class="tr-banner-note">Ticket text is sent to ${esc(trProvider.label)}.</span>`:'')
+      +(context==='card'&&trCardCache.has(ticketId)?'<br><button data-tr-refresh="1">Re-translate (ignore cache)</button>':'')
+    : `Translation is not configured on this server. ${esc(trSetupHint||'Set TRANSLATE_PROVIDER and restart.')}`;
+
+  const search=document.getElementById('tr-pop-search');
+  search.value='';
+  trRenderPopList('');
+  pop.classList.add('open');
+  // Measure after it is displayed, otherwise offsetHeight is 0 and the
+  // flip-above check never fires.
+  trPositionPop(anchor);
+  requestAnimationFrame(()=>{trPositionPop(anchor);search.focus();});
+  trPopAnchor=anchor;
+}
+
+function trClosePop(){
+  const pop=trPopEl();
+  if(!pop)return;
+  pop.classList.remove('open');
+  trPopTicketId=null;
+  trPopAnchor=null;
+}
+
+function trPickLanguage(code){
+  const id=trPopTicketId;
+  const context=trPopContext;
+  trClosePop();
+  if(!id)return;
+  trSetPreferredLang(code);
+  if(context==='email')trTranslateEmailBody(id,code);
+  else if(context==='notes')trTranslateNotes(id,code);
+  else trTranslateCard(id,code);
+}
+
+/* ---------------------------------------------- DOM text-node segmentation */
+
+// Every translatable text node under `root`, in document order. Whitespace-only
+// nodes are skipped (nothing to translate, and they would cost tokens), and so
+// is anything already inside a .tr-seg wrapper, so translating twice cannot
+// nest wrappers or re-translate machine output.
+function trCollectTextNodes(root){
+  if(!root)return [];
+  const out=[];
+  const walker=document.createTreeWalker(root,NodeFilter.SHOW_TEXT,{
+    acceptNode(node){
+      if(!node.nodeValue||!node.nodeValue.trim())return NodeFilter.FILTER_REJECT;
+      const parent=node.parentElement;
+      if(!parent)return NodeFilter.FILTER_REJECT;
+      const tag=parent.tagName;
+      if(tag==='SCRIPT'||tag==='STYLE'||tag==='NOSCRIPT'||tag==='TEXTAREA')return NodeFilter.FILTER_REJECT;
+      if(parent.closest('.tr-seg'))return NodeFilter.FILTER_REJECT;
+      return NodeFilter.FILTER_ACCEPT;
+    }
+  });
+  while(walker.nextNode())out.push(walker.currentNode);
+  return out;
+}
+
+// Replace each node with a marked span holding the translation. Returns the
+// undo log - reverting is exact, because the original text travels with it.
+function trApplyTextNodes(nodes,prefix,segments){
+  const undo=[];
+  nodes.forEach((node,i)=>{
+    const translated=segments[prefix+i];
+    if(typeof translated!=='string')return;
+    if(translated===node.nodeValue)return;
+    const original=node.nodeValue;
+    const span=document.createElement('span');
+    span.className='tr-seg';
+    span.textContent=translated;
+    if(!node.parentNode)return;
+    node.parentNode.replaceChild(span,node);
+    undo.push({span,original});
+  });
+  return undo;
+}
+function trRevertTextNodes(undo){
+  (undo||[]).forEach(({span,original})=>{
+    if(span&&span.parentNode)span.parentNode.replaceChild(document.createTextNode(original),span);
+  });
+}
+
+/* ------------------------------------------------- email modal (full body) */
+
+// Reset per opened ticket, so a translation can never be attributed to, or
+// reverted against, a different message.
+let emTrState={ticketId:null,lang:null,undo:null,subjectOriginal:null,sourceLangName:null,busy:false};
+
+function trResetEmailState(ticketId){
+  emTrState={ticketId,lang:null,undo:null,subjectOriginal:null,sourceLangName:null,busy:false};
+}
+
+function trRenderEmailBar(){
+  const bar=document.getElementById('em-tr-bar');
+  if(!bar)return;
+  const id=emTrState.ticketId;
+  if(!id){bar.innerHTML='';return;}
+  const on=!!emTrState.lang;
+  const busy=emTrState.busy;
+  const label=busy?'...':(on?trShortCode(emTrState.lang):trShortCode(trPreferredLang()));
+  let html=`<button class="tr-trigger${on?' active':''}${busy?' busy':''}" data-tr-em-trigger="1" title="Translate this message"${busy?' disabled':''}><span class="tr-glyph">&#127760;</span><span>${esc(busy?'Translating':`Translate (${label})`)}</span></button>`;
+  if(on){
+    const from=emTrState.sourceLangName||'the original';
+    html+=`<span class="tr-banner-note">Machine translation - ${esc(from)} &rarr; ${esc(trLangName(emTrState.lang))}</span>`
+      +`<button class="tr-trigger" data-tr-em-original="1">Show original</button>`;
+  }
+  bar.innerHTML=html;
+}
+
+async function trTranslateEmailBody(id,targetLang){
+  const body=document.getElementById('em-body');
+  const titleEl=document.getElementById('em-title');
+  if(!body||emTrState.ticketId!==id||emTrState.busy)return;
+
+  // Translating again into a different language: put the original back first,
+  // so the second pass reads the client's words rather than the first
+  // translation's.
+  if(emTrState.undo){
+    trRevertTextNodes(emTrState.undo);
+    emTrState.undo=null;
+    if(emTrState.subjectOriginal!==null)titleEl.textContent=emTrState.subjectOriginal;
+    emTrState.lang=null;
+  }
+
+  const nodes=trCollectTextNodes(body);
+  const segments=nodes.map((n,i)=>({id:`b${i}`,text:n.nodeValue}));
+  const subject=String(titleEl.textContent||'').trim();
+  if(subject)segments.unshift({id:'subject',text:subject});
+  if(!segments.length){showToast('Nothing to translate in this message','warn');return;}
+  if(segments.length>trLimits.maxSegments){
+    showToast(`This message has ${segments.length} text runs, over the ${trLimits.maxSegments} limit`,'warn');
+    return;
+  }
+
+  emTrState.busy=true;
+  trRenderEmailBar();
+  try{
+    const data=await trRequest(id,targetLang,segments);
+    const map=data.segments||{};
+    // The modal can be closed, or moved to another ticket, while this is in
+    // flight - writing into it then would corrupt whatever is on screen now.
+    if(emTrState.ticketId!==id)return;
+    if(typeof map.subject==='string'){
+      emTrState.subjectOriginal=subject;
+      titleEl.textContent=map.subject;
+    }
+    emTrState.undo=trApplyTextNodes(nodes,'b',map);
+    emTrState.lang=data.targetLang;
+    emTrState.sourceLangName=data.sourceLangName||data.sourceLang||null;
+    showToast(data.cached
+      ?`Showing cached ${trLangName(data.targetLang)} translation`
+      :`Message translated to ${trLangName(data.targetLang)}`,'ok');
+  }catch(err){
+    trReportError(err);
+  }finally{
+    emTrState.busy=false;
+    trRenderEmailBar();
+  }
+}
+
+function trRevertEmailBody(){
+  const titleEl=document.getElementById('em-title');
+  trRevertTextNodes(emTrState.undo);
+  emTrState.undo=null;
+  if(emTrState.subjectOriginal!==null&&titleEl)titleEl.textContent=emTrState.subjectOriginal;
+  emTrState.subjectOriginal=null;
+  emTrState.lang=null;
+  trRenderEmailBar();
+}
+
+/* -------------------------------------------------- notes modal (comments) */
+
+let comTrState={ticketId:null,lang:null,undo:null,sourceLangName:null,busy:false};
+function trResetNotesState(ticketId){comTrState={ticketId,lang:null,undo:null,sourceLangName:null,busy:false};}
+
+function trRenderNotesBar(){
+  const bar=document.getElementById('com-tr-bar');
+  if(!bar)return;
+  const id=comTrState.ticketId;
+  if(!id){bar.innerHTML='';return;}
+  const on=!!comTrState.lang;
+  const busy=comTrState.busy;
+  const label=on?trShortCode(comTrState.lang):trShortCode(trPreferredLang());
+  let html=`<button class="tr-trigger${on?' active':''}${busy?' busy':''}" data-tr-com-trigger="1" title="Translate the notes in this thread"${busy?' disabled':''}><span class="tr-glyph">&#127760;</span><span>${esc(busy?'Translating':`Translate notes (${label})`)}</span></button>`;
+  if(on){
+    const from=comTrState.sourceLangName||'the original';
+    html+=`<span class="tr-banner-note">${esc(from)} &rarr; ${esc(trLangName(comTrState.lang))}</span>`
+      +`<button class="tr-trigger" data-tr-com-original="1">Show original</button>`;
+  }
+  bar.innerHTML=html;
+}
+
+async function trTranslateNotes(id,targetLang){
+  const thread=document.getElementById('com-thread');
+  if(!thread||comTrState.ticketId!==id||comTrState.busy)return;
+  if(comTrState.undo){trRevertTextNodes(comTrState.undo);comTrState.undo=null;comTrState.lang=null;}
+
+  // Only the comment bodies - author names, timestamps and @tags are
+  // identifiers an agent scans for and must not be rewritten.
+  const nodes=[...thread.querySelectorAll('.comment-text')].flatMap(el=>trCollectTextNodes(el));
+  const segments=nodes.map((n,i)=>({id:`c${i}`,text:n.nodeValue}));
+  if(!segments.length){showToast('No notes to translate on this ticket','warn');return;}
+
+  comTrState.busy=true;
+  trRenderNotesBar();
+  try{
+    const data=await trRequest(id,targetLang,segments);
+    if(comTrState.ticketId!==id)return;
+    comTrState.undo=trApplyTextNodes(nodes,'c',data.segments||{});
+    comTrState.lang=data.targetLang;
+    comTrState.sourceLangName=data.sourceLangName||data.sourceLang||null;
+    showToast(`Notes translated to ${trLangName(data.targetLang)}`,'ok');
+  }catch(err){
+    trReportError(err);
+  }finally{
+    comTrState.busy=false;
+    trRenderNotesBar();
+  }
+}
+
+function trRevertNotes(){
+  trRevertTextNodes(comTrState.undo);
+  comTrState.undo=null;
+  comTrState.lang=null;
+  trRenderNotesBar();
+}
+
+/* ------------------------------------------------------- global wiring */
+
+document.addEventListener('click',ev=>{
+  const pop=trPopEl();
+  const pick=ev.target.closest?.('[data-tr-pick]');
+  if(pick){ev.preventDefault();ev.stopPropagation();trPickLanguage(pick.dataset.trPick);return;}
+  const refresh=ev.target.closest?.('[data-tr-refresh]');
+  if(refresh){
+    ev.preventDefault();ev.stopPropagation();
+    const id=trPopTicketId;const lang=trCardCache.get(id)?.targetLang||trPreferredLang();
+    trClosePop();
+    if(id)trForceRetranslateCard(id,lang);
+    return;
+  }
+  // A click anywhere outside the popover (and not on a trigger, which opens it)
+  // closes it. Triggers stopPropagation, so they never reach here.
+  if(pop&&pop.classList.contains('open')&&!pop.contains(ev.target))trClosePop();
+});
+document.addEventListener('keydown',ev=>{
+  if(ev.key==='Escape'&&trPopEl()?.classList.contains('open')){trClosePop();return;}
+});
+document.getElementById('tr-pop-search')?.addEventListener('input',ev=>trRenderPopList(ev.target.value));
+document.getElementById('tr-pop-search')?.addEventListener('keydown',ev=>{
+  // Enter picks the first visible language, so a keyboard user types "fre" and
+  // hits Enter without reaching for the mouse.
+  if(ev.key!=='Enter')return;
+  const first=document.querySelector('#tr-pop-list .tr-pop-item');
+  if(first){ev.preventDefault();trPickLanguage(first.dataset.trPick);}
+});
+// The popover is position:fixed against a trigger that scrolls with the board,
+// so it has to follow or be dismissed rather than float away from its card.
+window.addEventListener('resize',()=>{if(trPopAnchor)trPositionPop(trPopAnchor);});
+window.addEventListener('scroll',()=>{if(trPopAnchor)trPositionPop(trPopAnchor);},true);
+
+document.getElementById('em-tr-bar')?.addEventListener('click',ev=>{
+  const trigger=ev.target.closest('[data-tr-em-trigger]');
+  if(trigger){ev.stopPropagation();if(emTrState.ticketId)trOpenPop(trigger,emTrState.ticketId,'email');return;}
+  if(ev.target.closest('[data-tr-em-original]')){ev.stopPropagation();trRevertEmailBody();}
+});
+document.getElementById('com-tr-bar')?.addEventListener('click',ev=>{
+  const trigger=ev.target.closest('[data-tr-com-trigger]');
+  if(trigger){ev.stopPropagation();if(comTrState.ticketId)trOpenPop(trigger,comTrState.ticketId,'notes');return;}
+  if(ev.target.closest('[data-tr-com-original]')){ev.stopPropagation();trRevertNotes();}
+});
+
+async function trForceRetranslateCard(id,lang){
+  const ticket=allTickets.find(t=>t.id===id);
+  if(!ticket)return;
+  trBusy.add(id);renderBoard();
+  try{
+    const data=await trRequest(id,lang,trCardSegments(ticket),{force:true});
+    trCardCache.set(id,{targetLang:data.targetLang,sourceLang:data.sourceLang,sourceLangName:data.sourceLangName,segments:data.segments||{}});
+    trShown.add(id);
+    showToast(`Re-translated to ${trLangName(data.targetLang)}`,'ok');
+  }catch(err){trReportError(err);}
+  finally{trBusy.delete(id);renderBoard();}
+}
+
 function makeCard(ticket,isNew=false){
   const{email,id}=ticket;
   ensureTicketNumber(id);
@@ -7736,6 +8534,24 @@ function makeCard(ticket,isNew=false){
   if(jiraKey&&ticketJira[id]!==jiraKey)ticketJira[id]=jiraKey;
   const jiraInfo=jiraInfoForKey(jiraKey);
   const jiraError=String(jiraInfo?.error||'').trim();
+
+  // Translation. trView is non-null only while this agent has chosen to read
+  // this ticket translated - it swaps the printed subject and preview, and the
+  // banner above says so, because an agent must never mistake machine output
+  // for the client's own words.
+  const trView=trCardView(ticket);
+  const trControlsHtml=trCardControlsHtml(id);
+  const trBannerHtml=trCardBannerHtml(id);
+
+  // Duplicate marking. Deliberately loud: an agent looking at the card needs
+  // to know it is already accounted for elsewhere before they work it again.
+  const dupMasterId=duplicateMasterId(id);
+  const dupBadgeHtml=dupMasterId
+    ?`<div style="margin-top:6px;padding:6px 8px;border:1px solid var(--amber-300);border-radius:8px;background:var(--amber-50);color:var(--amber-800);font-size:10px;line-height:1.35;display:flex;justify-content:space-between;gap:8px;align-items:center;">
+        <span><strong>Duplicate</strong> of ${esc(ticketDisplayNumber(dupMasterId))} - not counted in KPIs</span>
+        <button class="btn-out" data-dup-open="${id}" style="font-size:10px;padding:2px 7px;">Change</button>
+      </div>`
+    :'';
 
   // SLA badge
   const slaStatus=getSLAStatus(id);
@@ -7883,8 +8699,17 @@ function makeCard(ticket,isNew=false){
   div.querySelector('[data-jira-open]').addEventListener('click',ev=>{ev.preventDefault();ev.stopPropagation();if(jiraKey&&JIRA_URL){window.open(`${JIRA_URL}${encodeURIComponent(jiraKey)}`,'_blank');return;}openJiraModal(id);});
   div.querySelector('[data-hs-open]')?.addEventListener('click',ev=>{ev.preventDefault();ev.stopPropagation();const hsId=ticketHubspotId[id];if(!hsId){showToast('Ticket not synced to HubSpot yet');return;}window.open(`https://app.hubspot.com/contacts/25445053/record/0-5/${encodeURIComponent(hsId)}`,'_blank');});
   div.querySelector('[data-hs-retry]')?.addEventListener('click',async ev=>{ev.preventDefault();ev.stopPropagation();const rs=await syncTicketToHubspot(ticket);if(rs?.ok&&ticketHubspotId[id]){window.open(`https://app.hubspot.com/contacts/25445053/record/0-5/${encodeURIComponent(ticketHubspotId[id])}`,'_blank');showToast('Ticket synced to HubSpot','ok');}else{const reason=rs?.reason||'unknown';if(reason==='missing_company_mapping')showToast('Cannot sync yet: this ticket has no mapped HubSpot company.');else if(reason==='missing_client_email')showToast('Cannot sync yet: no client email found for this ticket.');else if(reason==='api_error')showToast(`HubSpot sync failed: ${rs?.error||'api error'}`);else if(reason==='network_error')showToast(`HubSpot sync network error: ${rs?.error||'unknown'}`);else showToast('Unable to sync this ticket yet.');}renderBoard();});
+  // Clicking the globe always opens the picker rather than re-applying the last
+  // language: switching language is the point of the control, and the banner's
+  // "Show original" already covers turning it off.
+  div.querySelector('[data-tr-trigger]')?.addEventListener('click',ev=>{
+    ev.preventDefault();ev.stopPropagation();
+    trOpenPop(ev.currentTarget,id,'card');
+  });
+  div.querySelector('[data-tr-original]')?.addEventListener('click',ev=>{ev.preventDefault();ev.stopPropagation();trToggleCard(id);});
   div.querySelector('[data-oe]').addEventListener('click',ev=>{ev.stopPropagation();clearNewReplyGlow(id);openEmailModal(ticket);});
   div.querySelector('[data-edit-manual]')?.addEventListener('click',ev=>{ev.stopPropagation();openEditManualModal(ticket);});
+  div.querySelectorAll('[data-dup-open]').forEach(btn=>btn.addEventListener('click',ev=>{ev.preventDefault();ev.stopPropagation();openDuplicateModal(id);}));
   div.querySelector('[data-archive]')?.addEventListener('click',ev=>{ev.stopPropagation();if(!confirm('Archive this ticket?'))return;ticketArchived[id]={archivedAt:Date.now(),archivedBy:currentUser(),reason:'manual'};saveState('ticket_archived_manual');renderBoard();updateArchiveBadge();showToast('Ticket archived','ok');});
   div.querySelector('[data-inline-toggle]')?.addEventListener('click',ev=>{ev.stopPropagation();inlineCommentOpen[id]=!inlineOpen;if(inlineCommentOpen[id]){markAlertFeedReadForTicket(id,currentUser());clearNewReplyGlow(id);}renderBoard();});
   div.querySelector('[data-inline-bell]')?.addEventListener('click',ev=>{ev.stopPropagation();inlineCommentOpen[id]=true;markAlertFeedReadForTicket(id,currentUser());clearNewReplyGlow(id);renderBoard();});
@@ -7934,6 +8759,9 @@ function closeAllAgentMenus(){
 }
 function renderBoard(){
   closeAllAgentMenus();
+  // The language popover is anchored to a trigger inside a card. A re-render
+  // destroys that card, so an open popover would be left pointing at nothing.
+  trClosePop();
   allTickets.sort((a,b)=>{const ta=new Date(a.email.receivedDateTime||0).getTime(),tb=new Date(b.email.receivedDateTime||0).getTime();return sortDesc?tb-ta:ta-tb;});
   rebuildTagged();
   syncRoleRestrictedControls();
@@ -8012,8 +8840,44 @@ function handleTicketDeepLink(){
   url.searchParams.delete('ticket');
   history.replaceState({},'',url.toString());
 }
+function renderEmailBodyWithImages(body,images){
+  const list=Array.isArray(images)?images:[];
+  const inlineByCid=new Map(list.filter(x=>x.isInline&&x.contentId&&x.dataUrl).map(x=>[String(x.contentId).replace(/^<|>$/g,'').toLowerCase(),x]));
+  const used=new Set();
+  const wrap=document.createElement('div');
+  wrap.innerHTML=`<div style="overflow-wrap:break-word">${body}</div>`;
+  wrap.querySelectorAll('script,style,iframe,object,embed,form').forEach(el=>el.remove());
+  wrap.querySelectorAll('a').forEach(a=>{a.target='_blank';a.rel='noopener noreferrer';});
+  wrap.querySelectorAll('img').forEach(img=>{
+    const src=String(img.getAttribute('src')||'');
+    const cid=src.match(/^cid:(.+)$/i)?.[1]?.replace(/^<|>$/g,'').toLowerCase();
+    if(cid&&inlineByCid.has(cid)){
+      const found=inlineByCid.get(cid);
+      img.src=found.dataUrl;
+      img.alt=img.alt||found.name||'Email image';
+      used.add(found.id||found.contentId||found.dataUrl);
+    }
+    img.loading='lazy';
+    img.decoding='async';
+  });
+  const visible=list.filter(x=>x.dataUrl&&!used.has(x.id||x.contentId||x.dataUrl)&&!x.isInline);
+  if(visible.length){
+    const gallery=document.createElement('div');
+    gallery.className='email-image-attachments';
+    gallery.innerHTML=visible.map(x=>`<a class="email-image-attachment" href="${esc(x.dataUrl)}" target="_blank" rel="noopener noreferrer"><img src="${esc(x.dataUrl)}" alt="${esc(x.name||'Email image')}" loading="lazy" decoding="async"><span>${esc(x.name||'Email image')}</span></a>`).join('');
+    wrap.firstElementChild.appendChild(gallery);
+  }
+  return wrap.innerHTML;
+}
+
 async function openEmailModal(ticket){
-  const{email,id}=ticket;const clientEmail=ticketClientEmail[id];const hs=clientEmail?hsCache[clientEmail]:null;const isReply=isQuintaSender(email.sender)&&!!clientEmail;
+  const{email,id}=ticket;const clientEmail=ticketClientEmail[id];
+  // Any translation belongs to the message that was open before. Clear it
+  // first, so nothing from the previous ticket can be reverted into this one.
+  trResetEmailState(id);
+  trRenderEmailBar();
+  // Warm the picker's "cached" markers from whatever the team already has.
+  trLoadCachedFor(id).then(()=>{if(emTrState.ticketId===id)trRenderEmailBar();});const hs=clientEmail?hsCache[clientEmail]:null;const isReply=isQuintaSender(email.sender)&&!!clientEmail;
   document.getElementById('em-title').textContent=email.subject||'(no subject)';
   const csOwner=ticketCSOwner[id]||null;
   const csMeta=csOwner?`  CS: ${esc(csOwner)}`:'';
@@ -8055,14 +8919,20 @@ async function openEmailModal(ticket){
   if(!hasCowork){document.getElementById('em-body').innerHTML=`<p style="color:var(--slate-500);font-style:italic">Outlook content preview is only available in MCP mode.</p>`;return;}
   const res=await window.cowork.callMcpTool(READ_TOOL,{uri});
   if(res.isError){document.getElementById('em-body').innerHTML=`<p style="color:var(--slate-500);font-style:italic">${esc(email.summary||'No preview.')}</p>`;return;}
-  const sc=res.structuredContent;let body='';
+  const sc=res.structuredContent;let body='',images=[];
   if(sc){body=sc.body?.content||sc.bodyPreview||sc.preview||'';if((sc.body?.contentType||'').toLowerCase()==='html'){body=body.replace(/<script[\s\S]*?<\/script>/gi,'').replace(/<style[\s\S]*?<\/style>/gi,'').replace(/<a /gi,'<a target="_blank" ');}else body=body.replace(/\n/g,'<br>');}
+  if(sc&&Array.isArray(sc.imageAttachments))images=sc.imageAttachments;
   if(!body){const raw=(res.content||[]).map(c=>c.text||'').join('');body=raw?raw.replace(/\n/g,'<br>'):'<em style="color:var(--slate-400)">No content.</em>';}
-  document.getElementById('em-body').innerHTML=`<div style="overflow-wrap:break-word">${body}</div>`;
+  document.getElementById('em-body').innerHTML=renderEmailBodyWithImages(body,images);
 }
 
-function renderThread(id){const cs=ticketComments[id]||[];const el=document.getElementById('com-thread');if(!cs.length){el.innerHTML='<div class="no-comments"> No comments yet.</div>';return;}el.innerHTML=cs.map(c=>{const tagHtml=(c.tags||[]).map(t=>{const bg=t===CLIENT_TAG?'var(--slate-600)':agentColor(t);return`<span class="ctag" style="background:${bg}">@${t}</span>`;}).join('');const bg=ALL_AGENTS.includes(c.author)?agentColor(c.author):'var(--slate-600)';return`<div class="comment-item"><div class="comment-avatar" style="background:${bg}">${esc(c.author)}</div><div class="comment-bubble"><div class="comment-header"><span class="comment-author">${esc(c.author)}</span><span class="comment-time">${fmtTime(c.ts)}</span>${tagHtml?`<div class="comment-tags">${tagHtml}</div>`:''}</div><div class="comment-text">${esc(c.text)}</div></div></div>`;}).join('');el.scrollTop=el.scrollHeight;}
-function openComModal(ticket){const{email,id}=ticket;comTicketId=id;const clientEmail=ticketClientEmail[id];const hs=clientEmail?hsCache[clientEmail]:null;const coStr=hs?.companyName?(hs.inferredVia?'   '+hs.companyName+' ~':'   '+hs.companyName):'';const who=isQuintaSender(email.sender)&&clientEmail?`Client: ${clientEmail}`:email.sender||'';const csOwner=ticketCSOwner[id]||null;const assignee=ticketAssignee[id]||'';const agInfo=csOwner?`${assignee}  CS:${csOwner}`:assignee;document.getElementById('com-title').textContent=email.subject||'(no subject)';document.getElementById('com-subtitle').textContent=`${who}${coStr}  ${agInfo}  ${fmtDate(email.receivedDateTime)}`;document.getElementById('com-input').value='';selectedTags.clear();document.querySelectorAll('.tag-chip').forEach(c=>c.classList.remove('selected'));renderThread(id);document.getElementById('com-modal').classList.add('open');}
+function renderThread(id){
+// This rewrites the thread's innerHTML, which destroys any translated spans
+// inside it. Drop the undo log rather than leave the bar claiming a translation
+// that is no longer on screen (and a freshly posted note has none yet).
+if(comTrState.undo||comTrState.lang){comTrState.undo=null;comTrState.lang=null;trRenderNotesBar();}
+const cs=ticketComments[id]||[];const el=document.getElementById('com-thread');if(!cs.length){el.innerHTML='<div class="no-comments"> No comments yet.</div>';return;}el.innerHTML=cs.map(c=>{const tagHtml=(c.tags||[]).map(t=>{const bg=t===CLIENT_TAG?'var(--slate-600)':agentColor(t);return`<span class="ctag" style="background:${bg}">@${t}</span>`;}).join('');const bg=ALL_AGENTS.includes(c.author)?agentColor(c.author):'var(--slate-600)';return`<div class="comment-item"><div class="comment-avatar" style="background:${bg}">${esc(c.author)}</div><div class="comment-bubble"><div class="comment-header"><span class="comment-author">${esc(c.author)}</span><span class="comment-time">${fmtTime(c.ts)}</span>${tagHtml?`<div class="comment-tags">${tagHtml}</div>`:''}</div><div class="comment-text">${esc(c.text)}</div></div></div>`;}).join('');el.scrollTop=el.scrollHeight;}
+function openComModal(ticket){const{email,id}=ticket;comTicketId=id;trResetNotesState(id);trRenderNotesBar();trLoadCachedFor(id);const clientEmail=ticketClientEmail[id];const hs=clientEmail?hsCache[clientEmail]:null;const coStr=hs?.companyName?(hs.inferredVia?'   '+hs.companyName+' ~':'   '+hs.companyName):'';const who=isQuintaSender(email.sender)&&clientEmail?`Client: ${clientEmail}`:email.sender||'';const csOwner=ticketCSOwner[id]||null;const assignee=ticketAssignee[id]||'';const agInfo=csOwner?`${assignee}  CS:${csOwner}`:assignee;document.getElementById('com-title').textContent=email.subject||'(no subject)';document.getElementById('com-subtitle').textContent=`${who}${coStr}  ${agInfo}  ${fmtDate(email.receivedDateTime)}`;document.getElementById('com-input').value='';selectedTags.clear();document.querySelectorAll('.tag-chip').forEach(c=>c.classList.remove('selected'));renderThread(id);document.getElementById('com-modal').classList.add('open');}
 function postTicketComment(ticketId,text,tags){if(!text||!ticketId)return false;if(!ticketComments[ticketId])ticketComments[ticketId]=[];const author=currentUser();const normalizedTags=[...new Set((Array.isArray(tags)?tags:[]).map(t=>t===CLIENT_TAG?CLIENT_TAG:normalizeAgentCode(t)).filter(Boolean))];ticketComments[ticketId].push({author,text,tags:normalizedTags,ts:Date.now()});saveState('ticket_comment_added');renderBoard();if(comTicketId===ticketId)renderThread(ticketId);const at=normalizedTags.filter(t=>t!==CLIENT_TAG);if(at.length)showToast(`Bell alert sent to: ${at.join(', ')}`,'ok');else showToast('Comment posted','ok');return true;}
 function addInternalComment(ticketId,text,tags){if(!postTicketComment(ticketId,text,tags))return;if(comTicketId===ticketId)renderThread(ticketId);}
 document.getElementById('com-post').addEventListener('click',()=>{const text=document.getElementById('com-input').value.trim();if(!text||!comTicketId)return;const tags=[...selectedTags];if(!postTicketComment(comTicketId,text,tags))return;document.getElementById('com-input').value='';selectedTags.clear();document.querySelectorAll('.tag-chip').forEach(c=>c.classList.remove('selected'));if(comTicketId)renderThread(comTicketId);});
@@ -8270,6 +9140,10 @@ async function poll(){if(!hasCowork){startCountdown();return;}const res=await fe
 (async()=>{
   await buildAgentUI();
   await refreshJiraStatus();
+  // Fire-and-forget: the language list only gates the picker's contents, and
+  // the board must not wait on it. Until it lands, a translate button falls
+  // back to an empty list and the picker says translation is unavailable.
+  void trLoadLanguages();
   await loadState();
   // Started right after the first load (before the mailbox sync, which can
   // take a while and has its own early-return path) so the board is live in
@@ -8347,16 +9221,3 @@ async function poll(){if(!hasCowork){startCountdown();return;}const res=await fe
 </script>
 </body>
 </html>
-
-
-
-
-
-
-
-
-
-
-
-
-
