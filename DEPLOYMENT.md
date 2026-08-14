@@ -32,9 +32,28 @@ Open:
 
 ## Ticket translation
 
-**It works with no configuration at all.** With no key, no container and nothing
-in `.env`, the button translates: two free public engines are in the chain by
-default. Everything below is about making it faster, private, or better.
+**It works with no configuration at all**, and it translates the *whole* ticket
+— subject, card preview, internal notes, and the message body when the modal
+opens. One action; the choice is remembered per ticket, so the body is
+translated when it arrives from Outlook rather than by a second click.
+
+By default this runs on **local models**, in-process: no key, no account, no
+quota, and the text never leaves the server. That is what makes whole-ticket
+translation affordable — a full thread is thousands of characters, which would
+spend a hosted free tier on one ticket.
+
+The models come from the optional `@huggingface/transformers` package that
+`npm install` fetches (~380MB, and the install still succeeds without it — the
+engine simply reports itself unavailable and the chain moves on). Individual
+language packages are ~40–80MB each, downloaded the first time someone asks for
+that language and then cached in `data/mt-models/`, which is gitignored. Delete
+that directory to reclaim the space; the next translation re-fetches only what
+it needs.
+
+Expect roughly half a second per text run once a language is loaded, so a long
+thread takes some tens of seconds the first time and is instant afterwards for
+everyone — translations are cached server-side and shared. Inference runs in a
+worker thread, so the board stays responsive while it works.
 
 The engine runs behind a provider layer. Set `TRANSLATE_PROVIDER` to pin one, or
 leave it at `auto` — which tries each configured engine in order and falls
@@ -44,18 +63,26 @@ and an agent looking at a French ticket does not care which one answers.
 
 | Provider | Cost | Where ticket text goes | Configure with |
 | --- | --- | --- | --- |
+| `local` | free | nowhere — stays in this process | nothing; `TRANSLATE_LOCAL=off` disables it, `TRANSLATE_LOCAL_MAX_MODELS` caps resident models (default 2, ~1.5GB) |
 | `libretranslate` | free | your own server | `LIBRETRANSLATE_URL`, optional `LIBRETRANSLATE_API_KEY` |
 | `anthropic` | per call | Anthropic | `ANTHROPIC_API_KEY`, optional `TRANSLATE_MODEL` |
 | `mymemory` | free | MyMemory, a public service | nothing; `MYMEMORY_EMAIL` raises the daily allowance, `MYMEMORY_URL=off` disables it |
 | `libretranslate-public` | free | a volunteer-run public instance | nothing; `TRANSLATE_PUBLIC_FALLBACK=off` disables it, or set it to your preferred instance |
 
-That is also the auto order. The two public engines sit last so they are only
-reached when nothing better is set up, and they complement each other: MyMemory
-cannot be asked to detect a language, so a bare subject like "Annulation" goes
-to the public LibreTranslate, which can.
+That is also the auto order: local first, then anything self-hosted or already
+paid for, and the two public engines last, reached only when nothing better is
+set up. They complement each other — MyMemory cannot be asked to detect a
+language, so a bare subject like "Annulation" goes to the public LibreTranslate,
+which can.
 
-To keep ticket text off public services entirely, set both `MYMEMORY_URL=off`
-and `TRANSLATE_PUBLIC_FALLBACK=off`, then configure one of the top two.
+The local models are pairwise, so they need to know the source language and
+cannot serve every pair: where there is no direct model it pivots through
+English, and where even that is unavailable (Greek and Hebrew, currently) the
+request falls through to the next engine rather than failing.
+
+To keep ticket text off public services entirely, set `MYMEMORY_URL=off` and
+`TRANSLATE_PUBLIC_FALLBACK=off`. The local engine alone then handles everything
+it has a model for, with nothing leaving the server at all.
 
 Translations are cached per ticket, target language and exact source text, and
 the cache is shared across agents, so the second person to open the same French

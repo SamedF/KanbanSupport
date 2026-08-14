@@ -8065,41 +8065,82 @@ function trReportError(err){
   showToast(`Translation failed: ${err?.message||'unknown error'}`);
 }
 
-/* ------------------------------------------------------ card-level switching */
+/* ----------------------------------------------------- whole-ticket switching
 
-// The card shows two pieces of client text. Kept separate from the body so a
-// board scan costs one short request per ticket instead of a full thread.
-function trCardSegments(ticket){
+   Translating a ticket means the whole ticket, not the part that happens to be
+   on screen. One action covers the subject, the card preview and every internal
+   note in a single request, and the choice is remembered for the ticket: the
+   message body is fetched from Outlook only when the modal opens, so it is
+   translated then, automatically, rather than by a second click.
+
+   The remembered language is per agent and per session - two agents can read
+   the same ticket in different languages. Only the server-side cache is
+   shared. */
+
+// ticketId -> target language an agent has asked to read this ticket in.
+const trTicketLang=new Map();
+// ticketId -> { [comment index]: translated text }, so renderThread can print
+// the notes translated and survive a re-render without patching the DOM.
+const trNotesCache=new Map();
+
+function trTicketIsOn(id){return trTicketLang.has(id)&&trShown.has(id);}
+
+// Everything about the ticket that is already on the client. The body is not -
+// it comes from Outlook when the modal opens - so it is translated separately
+// against the same cache.
+function trTicketSegments(ticket){
   const segs=[];
   const subject=String(ticket?.email?.subject||'').trim();
   const summary=String(ticket?.email?.summary||'').trim();
   if(subject)segs.push({id:'subject',text:subject});
   if(summary)segs.push({id:'summary',text:summary});
+  (ticketComments[ticket.id]||[]).forEach((c,i)=>{
+    const text=String(c?.text||'').trim();
+    if(text)segs.push({id:`n${i}`,text});
+  });
   return segs;
 }
 
-async function trTranslateCard(id,targetLang){
+async function trTranslateTicket(id,targetLang){
   if(trBusy.has(id))return;
   const ticket=allTickets.find(t=>t.id===id);
   if(!ticket)return;
-  const segments=trCardSegments(ticket);
+  const segments=trTicketSegments(ticket);
   if(!segments.length){showToast('Nothing to translate on this ticket','warn');return;}
+  if(segments.length>trLimits.maxSegments){
+    showToast(`This ticket has ${segments.length} text runs, over the ${trLimits.maxSegments} limit`,'warn');
+    return;
+  }
   trBusy.add(id);
   renderBoard();
+  const noteCount=segments.filter(s=>s.id.startsWith('n')).length;
   try{
     const data=await trRequest(id,targetLang,segments);
+    const map=data.segments||{};
     trCardCache.set(id,{
       targetLang:data.targetLang,
       sourceLang:data.sourceLang,
       sourceLangName:data.sourceLangName,
-      segments:data.segments||{}
+      segments:map
     });
+    // Pull the note translations out into their own store, keyed by the same
+    // comment index renderThread iterates.
+    const notes={};
+    Object.keys(map).forEach(key=>{
+      const m=/^n(\d+)$/.exec(key);
+      if(m)notes[Number(m[1])]=map[key];
+    });
+    trNotesCache.set(id,notes);
+    trTicketLang.set(id,data.targetLang);
     trShown.add(id);
     trSetPreferredLang(data.targetLang);
+    // The notes modal may be open on this very ticket.
+    if(comTicketId===id)renderThread(id);
     const from=data.sourceLangName||data.sourceLang||'the original';
+    const extra=noteCount?` and ${noteCount} note${noteCount===1?'':'s'}`:'';
     showToast(data.cached
       ?`Showing cached ${trLangName(data.targetLang)} translation`
-      :`Translated from ${from} to ${trLangName(data.targetLang)}`,'ok');
+      :`Ticket${extra} translated from ${from} to ${trLangName(data.targetLang)}`,'ok');
   }catch(err){
     trReportError(err);
   }finally{
@@ -8108,9 +8149,21 @@ async function trTranslateCard(id,targetLang){
   }
 }
 
+// Called when the email modal finishes rendering a body. A ticket the agent has
+// already chosen to read in another language should not need a second click.
+function trAutoTranslateBody(id){
+  const lang=trTicketLang.get(id);
+  if(!lang||!trShown.has(id))return;
+  if(emTrState.ticketId!==id||emTrState.busy||emTrState.lang)return;
+  trTranslateEmailBody(id,lang);
+}
+
+// "Show original" and back, for the whole ticket at once - the card, and the
+// notes if their modal happens to be open.
 function trToggleCard(id){
   if(trShown.has(id))trShown.delete(id);
   else if(trCardCache.has(id))trShown.add(id);
+  if(comTicketId===id)renderThread(id);
   renderBoard();
 }
 
@@ -8141,7 +8194,7 @@ function trCardControlsHtml(id){
     ?'Translating...'
     :(shown
       ?`Showing ${trLangName(entry.targetLang)} - click to pick another language`
-      :'Translate this ticket');
+      :'Translate the whole ticket - subject, preview, notes, and the message body when you open it');
   return `<button class="tr-trigger${shown?' active':''}${busy?' busy':''}" data-tr-trigger="${id}" title="${esc(title)}"${busy?' disabled':''}><span class="tr-glyph">&#127760;</span><span>${esc(busy?'...':label)}</span></button>`;
 }
 
@@ -8210,7 +8263,7 @@ function trOpenPop(anchor,ticketId,context='card'){
 
   const ticket=allTickets.find(t=>t.id===ticketId);
   const subject=String(ticket?.email?.subject||'').slice(0,70);
-  const scope=context==='email'?'message body':(context==='notes'?'internal notes':'subject and preview');
+  const scope=context==='email'?'message body':(context==='notes'?'internal notes':'whole ticket');
   document.getElementById('tr-pop-sub').textContent=`${ticketDisplayNumber(ticketId)} - ${scope}${subject?` - ${subject}`:''}`;
 
   const foot=document.getElementById('tr-pop-foot');
@@ -8250,7 +8303,7 @@ function trPickLanguage(code){
   trSetPreferredLang(code);
   if(context==='email')trTranslateEmailBody(id,code);
   else if(context==='notes')trTranslateNotes(id,code);
-  else trTranslateCard(id,code);
+  else trTranslateTicket(id,code);
 }
 
 /* ---------------------------------------------- DOM text-node segmentation */
@@ -8910,7 +8963,9 @@ async function openEmailModal(ticket){
   if(email.isManual){
     document.getElementById('em-body').innerHTML=email.summary?`<div style="overflow-wrap:break-word;white-space:pre-wrap;">${esc(email.summary)}</div>`:'<em style="color:var(--slate-400)">No description provided.</em>';
     const ol=document.getElementById('em-outlook');ol.style.display='none';
-    document.getElementById('email-modal').classList.add('open');return;
+    document.getElementById('email-modal').classList.add('open');
+    trAutoTranslateBody(id);
+    return;
   }
   document.getElementById('em-body').innerHTML='<div class="loading"><div class="spinner"></div></div>';
   const ol=document.getElementById('em-outlook');ol.onclick=email.webLink?()=>window.open(email.webLink,'_blank'):null;ol.style.display=email.webLink?'':'none';
@@ -8924,6 +8979,10 @@ async function openEmailModal(ticket){
   if(sc&&Array.isArray(sc.imageAttachments))images=sc.imageAttachments;
   if(!body){const raw=(res.content||[]).map(c=>c.text||'').join('');body=raw?raw.replace(/\n/g,'<br>'):'<em style="color:var(--slate-400)">No content.</em>';}
   document.getElementById('em-body').innerHTML=renderEmailBodyWithImages(body,images);
+  // The body only exists now, so this is the first moment it can be translated.
+  // If the agent already chose to read this ticket in another language, follow
+  // through without making them ask again.
+  trAutoTranslateBody(id);
 }
 
 function renderThread(id){
@@ -8931,7 +8990,11 @@ function renderThread(id){
 // inside it. Drop the undo log rather than leave the bar claiming a translation
 // that is no longer on screen (and a freshly posted note has none yet).
 if(comTrState.undo||comTrState.lang){comTrState.undo=null;comTrState.lang=null;trRenderNotesBar();}
-const cs=ticketComments[id]||[];const el=document.getElementById('com-thread');if(!cs.length){el.innerHTML='<div class="no-comments"> No comments yet.</div>';return;}el.innerHTML=cs.map(c=>{const tagHtml=(c.tags||[]).map(t=>{const bg=t===CLIENT_TAG?'var(--slate-600)':agentColor(t);return`<span class="ctag" style="background:${bg}">@${t}</span>`;}).join('');const bg=ALL_AGENTS.includes(c.author)?agentColor(c.author):'var(--slate-600)';return`<div class="comment-item"><div class="comment-avatar" style="background:${bg}">${esc(c.author)}</div><div class="comment-bubble"><div class="comment-header"><span class="comment-author">${esc(c.author)}</span><span class="comment-time">${fmtTime(c.ts)}</span>${tagHtml?`<div class="comment-tags">${tagHtml}</div>`:''}</div><div class="comment-text">${esc(c.text)}</div></div></div>`;}).join('');el.scrollTop=el.scrollHeight;}
+// Notes translated as part of the whole ticket are printed from the store
+// rather than patched into the DOM, so they survive this rewrite. A note posted
+// since the translation has no entry and shows as written.
+const trNotes=trTicketIsOn(id)?(trNotesCache.get(id)||{}):null;
+const cs=ticketComments[id]||[];const el=document.getElementById('com-thread');if(!cs.length){el.innerHTML='<div class="no-comments"> No comments yet.</div>';return;}el.innerHTML=cs.map((c,ci)=>{const tagHtml=(c.tags||[]).map(t=>{const bg=t===CLIENT_TAG?'var(--slate-600)':agentColor(t);return`<span class="ctag" style="background:${bg}">@${t}</span>`;}).join('');const bg=ALL_AGENTS.includes(c.author)?agentColor(c.author):'var(--slate-600)';const shown=trNotes&&typeof trNotes[ci]==='string'?trNotes[ci]:c.text;const trMark=trNotes&&typeof trNotes[ci]==='string'&&trNotes[ci]!==c.text?' tr-seg':'';return`<div class="comment-item"><div class="comment-avatar" style="background:${bg}">${esc(c.author)}</div><div class="comment-bubble"><div class="comment-header"><span class="comment-author">${esc(c.author)}</span><span class="comment-time">${fmtTime(c.ts)}</span>${tagHtml?`<div class="comment-tags">${tagHtml}</div>`:''}</div><div class="comment-text${trMark}">${esc(shown)}</div></div></div>`;}).join('');el.scrollTop=el.scrollHeight;}
 function openComModal(ticket){const{email,id}=ticket;comTicketId=id;trResetNotesState(id);trRenderNotesBar();trLoadCachedFor(id);const clientEmail=ticketClientEmail[id];const hs=clientEmail?hsCache[clientEmail]:null;const coStr=hs?.companyName?(hs.inferredVia?'   '+hs.companyName+' ~':'   '+hs.companyName):'';const who=isQuintaSender(email.sender)&&clientEmail?`Client: ${clientEmail}`:email.sender||'';const csOwner=ticketCSOwner[id]||null;const assignee=ticketAssignee[id]||'';const agInfo=csOwner?`${assignee}  CS:${csOwner}`:assignee;document.getElementById('com-title').textContent=email.subject||'(no subject)';document.getElementById('com-subtitle').textContent=`${who}${coStr}  ${agInfo}  ${fmtDate(email.receivedDateTime)}`;document.getElementById('com-input').value='';selectedTags.clear();document.querySelectorAll('.tag-chip').forEach(c=>c.classList.remove('selected'));renderThread(id);document.getElementById('com-modal').classList.add('open');}
 function postTicketComment(ticketId,text,tags){if(!text||!ticketId)return false;if(!ticketComments[ticketId])ticketComments[ticketId]=[];const author=currentUser();const normalizedTags=[...new Set((Array.isArray(tags)?tags:[]).map(t=>t===CLIENT_TAG?CLIENT_TAG:normalizeAgentCode(t)).filter(Boolean))];ticketComments[ticketId].push({author,text,tags:normalizedTags,ts:Date.now()});saveState('ticket_comment_added');renderBoard();if(comTicketId===ticketId)renderThread(ticketId);const at=normalizedTags.filter(t=>t!==CLIENT_TAG);if(at.length)showToast(`Bell alert sent to: ${at.join(', ')}`,'ok');else showToast('Comment posted','ok');return true;}
 function addInternalComment(ticketId,text,tags){if(!postTicketComment(ticketId,text,tags))return;if(comTicketId===ticketId)renderThread(ticketId);}

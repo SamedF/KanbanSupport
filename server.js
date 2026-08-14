@@ -5971,11 +5971,13 @@ const Anthropic = require('@anthropic-ai/sdk');
 // Which engine backs the button. Name one to pin it; 'auto' takes the first
 // configured provider in TRANSLATE_AUTO_ORDER.
 const TRANSLATE_PROVIDER = String(process.env.TRANSLATE_PROVIDER || 'auto').trim().toLowerCase();
-// Self-hosted free first, then the metered one that is already paid for, then
-// the public free service. MyMemory is last on purpose: it is the only entry
-// that needs no configuration at all, so anywhere earlier it would quietly
-// become the default on every install.
-const TRANSLATE_AUTO_ORDER = ['libretranslate', 'anthropic', 'mymemory', 'libretranslate-public'];
+// Local first: no key, no quota and no third party, which is the only
+// combination that can translate a whole ticket rather than a subject line.
+// Then a self-hosted service, then the metered one that is already paid for,
+// and the public free services last - they are the only entries needing no
+// configuration at all, so anywhere earlier they would quietly become the
+// default on every install.
+const TRANSLATE_AUTO_ORDER = ['local', 'libretranslate', 'anthropic', 'mymemory', 'libretranslate-public'];
 // Every outbound call from the HTTP providers is bounded. A translation runs
 // while an agent watches a spinner, so a hung upstream has to fail, not hang.
 const TRANSLATE_HTTP_TIMEOUT_MS = Number(process.env.TRANSLATE_HTTP_TIMEOUT_MS || 20_000);
@@ -6585,6 +6587,92 @@ const myMemoryProvider = {
   }
 };
 
+// ---------------------------------------------------------------- local engine
+//
+// Models run in this process, so there is no key, no account, no quota and no
+// third party. That is what makes whole-ticket translation possible: a full
+// thread is thousands of characters, which would spend a hosted free tier on a
+// single ticket.
+//
+// The cost is time - roughly half a second per segment once a language is
+// loaded - so it runs in a worker thread (see translate-local.js) and the
+// server stays responsive while it works. Each translation is cached, so a
+// ticket is slow once for the whole team.
+const localEngine = require('./translate-local');
+
+const TRANSLATE_LOCAL_ENABLED = !/^(off|none|false|0|disabled)$/i.test(String(process.env.TRANSLATE_LOCAL || '').trim());
+const TRANSLATE_LOCAL_DIR = String(process.env.TRANSLATE_LOCAL_MODELS || path.join(__dirname, 'data', 'mt-models'));
+// Two resident models is about 1.5GB of RSS. Raise it on a bigger box.
+const TRANSLATE_LOCAL_MAX_MODELS = Number(process.env.TRANSLATE_LOCAL_MAX_MODELS || 2);
+// Generous, because the first request for a language downloads it and a long
+// thread is genuinely a minute of CPU. Still bounded - a wedged worker must not
+// hold an agent's request open forever.
+const TRANSLATE_LOCAL_TIMEOUT_MS = Number(process.env.TRANSLATE_LOCAL_TIMEOUT_MS || 300_000);
+
+function localEngineOptions() {
+  return { cacheDir: TRANSLATE_LOCAL_DIR, maxModels: TRANSLATE_LOCAL_MAX_MODELS };
+}
+
+const localProvider = {
+  id: 'local',
+  label: 'Local model (offline)',
+  free: true,
+  selfHosted: true,
+  thirdParty: false,
+  configured: () => TRANSLATE_LOCAL_ENABLED && localEngine.localEngineInstalled(),
+  describe: () => 'opus-mt, on this server',
+  setupHint: 'Run "npm install" to fetch the optional @huggingface/transformers package, which runs translation locally with no key.',
+  async translate({ targetLang, segments }) {
+    // Models are pairwise, so the source language has to be known before one can
+    // be chosen. Failing here is fine - the chain falls through to an engine
+    // that autodetects.
+    const sourceLang = detectLanguageCode(segments.map(s => s.text).join('\n'));
+    if (!sourceLang) {
+      throw translationError('source_undetected', 'Could not work out what language this ticket is in, which the local models need in order to pick one.');
+    }
+    if (sourceLang === String(targetLang).split('-')[0].toLowerCase()) {
+      return {
+        segments: Object.fromEntries(segments.map(s => [s.id, s.text])),
+        sourceLang,
+        usage: { engine: 'local', skipped: 'same_language' }
+      };
+    }
+
+    let routed;
+    try {
+      routed = await localEngine.routeFor(sourceLang, targetLang, localEngineOptions());
+    } catch (error) {
+      throw translationError('provider_error', `Local translation engine failed to start: ${error?.message || error}`);
+    }
+    if (!routed?.route) {
+      throw translationError('target_unsupported', `No local model is published for ${sourceLang} to ${targetLang}.`);
+    }
+
+    // Whitespace is reattached here as with the HTTP engines - the model is
+    // given the trimmed core.
+    const cores = segments.map(s => splitEdges(s.text).core);
+    let result;
+    try {
+      result = await localEngine.translateTexts(cores, sourceLang, targetLang, localEngineOptions(), TRANSLATE_LOCAL_TIMEOUT_MS);
+    } catch (error) {
+      // A timeout or a dead worker is worth trying another engine for.
+      throw translationError('provider_error', `Local translation failed: ${error?.message || error}`);
+    }
+
+    const out = {};
+    segments.forEach((seg, i) => {
+      const { lead, trail } = splitEdges(seg.text);
+      const text = result.texts[i];
+      out[seg.id] = typeof text === 'string' ? `${lead}${text}${trail}` : seg.text;
+    });
+    return {
+      segments: out,
+      sourceLang,
+      usage: { engine: 'local', segments: segments.length, hops: routed.route.join('+') }
+    };
+  }
+};
+
 // ------------------------------------------------------------ Anthropic provider
 
 let translateClient = null;
@@ -6796,6 +6884,7 @@ const anthropicProvider = {
 // ------------------------------------------------------------------- dispatch
 
 const TRANSLATE_PROVIDERS = {
+  local: localProvider,
   libretranslate: libreTranslateProvider,
   'libretranslate-public': librePublicProvider,
   mymemory: myMemoryProvider,
