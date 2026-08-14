@@ -3218,6 +3218,72 @@ textarea:focus {
   margin-bottom: 12px;
 }
 
+/* The KPI dashboard is genuinely wider than most screens - the agent
+   breakdown alone carries twelve columns, and the status row eight cards with
+   a 1364px floor. Squeezing that into the viewport crushed the columns into
+   unreadable slivers, and letting it overflow the page gave no way to reach
+   the right-hand side at all. Each wide block scrolls sideways inside itself
+   instead, the same way .board already does, so the page itself never scrolls
+   horizontally. */
+.kpi-scroll-x {
+  overflow-x: auto;
+  overflow-y: hidden;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(var(--slate-400-rgb), .75) transparent;
+  /* Room for the scrollbar so it can't sit on top of the last row. */
+  padding-bottom: 2px;
+}
+
+/* WebKit hides overlay scrollbars until they are used, which on a table that
+   is only slightly too wide reads as "there is nothing more to see". Keeping
+   the track permanently visible is what makes the affordance discoverable. */
+.kpi-scroll-x::-webkit-scrollbar {
+  height: 10px;
+}
+
+.kpi-scroll-x::-webkit-scrollbar-track {
+  background: rgba(var(--slate-200-rgb), .55);
+  border-radius: 999px;
+}
+
+.kpi-scroll-x::-webkit-scrollbar-thumb {
+  background: rgba(var(--slate-400-rgb), .8);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+.kpi-scroll-x::-webkit-scrollbar-thumb:hover {
+  background: rgba(var(--slate-500-rgb), .95);
+  background-clip: padding-box;
+}
+
+/* A table set to width:100% shrinks to its container instead of overflowing
+   it, so the wrapper above would never have anything to scroll. The min-width
+   is what gives the columns a floor and hands the overflow to the wrapper. */
+.kpi-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.kpi-table th,
+.kpi-table td {
+  white-space: nowrap;
+}
+
+/* Subject lines are the one column that should wrap rather than push the
+   table arbitrarily wide. */
+.kpi-table td.kpi-cell-wide {
+  white-space: normal;
+  min-width: 220px;
+}
+
+.kpi-table-narrow { min-width: 420px; }
+.kpi-table-medium { min-width: 720px; }
+.kpi-table-wide { min-width: 1080px; }
+
 #kpi-status-cards {
   grid-template-columns: repeat(auto-fit, minmax(min(160px, 100%), 1fr)) !important;
 }
@@ -3721,8 +3787,8 @@ th {
   <div class="responsive-grid-2">
     <div style="background:var(--white);border:1px solid var(--legacy-d7d7d7);border-radius:14px;padding:12px;box-shadow:0 6px 16px rgba(var(--shadow-rgb), .06);">
       <div style="font-family:Caladea,serif;font-size:24px;margin-bottom:8px;">Tickets by Company</div>
-      <div style="overflow:auto;">
-        <table style="width:100%;border-collapse:collapse;font-size:12px;">
+      <div class="kpi-scroll-x">
+        <table class="kpi-table kpi-table-narrow">
           <thead>
             <tr style="text-align:left;border-bottom:1px solid var(--legacy-ddd);">
               <th style="padding:8px 10px;">Company</th>
@@ -3735,8 +3801,8 @@ th {
     </div>
     <div style="background:var(--white);border:1px solid var(--legacy-d7d7d7);border-radius:14px;padding:12px;box-shadow:0 6px 16px rgba(var(--shadow-rgb), .06);">
       <div style="font-family:Caladea,serif;font-size:24px;margin-bottom:8px;">Tickets Linked to Jira</div>
-      <div style="overflow:auto;">
-        <table style="width:100%;border-collapse:collapse;font-size:12px;">
+      <div class="kpi-scroll-x">
+        <table class="kpi-table kpi-table-narrow">
           <thead>
             <tr style="text-align:left;border-bottom:1px solid var(--legacy-ddd);">
               <th style="padding:8px 10px;">Ticket</th>
@@ -3752,8 +3818,8 @@ th {
   </div>
   <div style="background:var(--white);border:1px solid var(--legacy-d7d7d7);border-radius:14px;padding:12px;box-shadow:0 6px 16px rgba(var(--shadow-rgb), .06);">
     <div style="font-family:Caladea,serif;font-size:24px;margin-bottom:8px;">Tickets by CS / Support (Status Breakdown)</div>
-    <div style="overflow:auto;">
-      <table style="width:100%;border-collapse:collapse;font-size:12px;">
+    <div class="kpi-scroll-x">
+      <table class="kpi-table kpi-table-wide">
         <thead>
           <tr style="text-align:left;border-bottom:1px solid var(--legacy-ddd);">
             <th style="padding:8px 10px;">CS / Support</th>
@@ -3764,6 +3830,10 @@ th {
             <th style="padding:8px 10px;">Due for test</th>
             <th style="padding:8px 10px;">Waiting On Contact</th>
             <th style="padding:8px 10px;">Resolved</th>
+            <th style="padding:8px 10px;" title="Open tickets past target, as of now">Overdue</th>
+            <th style="padding:8px 10px;" title="Open tickets with under a quarter of their target left">At risk</th>
+            <th style="padding:8px 10px;" title="Share of tickets resolved in this range that landed inside their SLA target">SLA</th>
+            <th style="padding:8px 10px;" title="Average shift time from arrival to resolution, in this range">Avg resolve</th>
           </tr>
         </thead>
         <tbody id="kpi-agent-rows"></tbody>
@@ -5971,6 +6041,68 @@ function renderSimpleKpiRows(rows,labelKey,valueKey){
   const max=Math.max(1,...(rows||[]).map(r=>Number(r[valueKey]||0)));
   return rows?.length?`<div style="display:flex;flex-direction:column;gap:8px;">${rows.map(r=>{const label=r[labelKey]||'Unknown';const value=Number(r[valueKey]||0);return `<div><div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px;"><span style="font-weight:700;">${esc(label)}</span><span>${value}</span></div><div style="height:12px;background:var(--slate-100);border-radius:999px;overflow:hidden;"><div style="height:12px;width:${Math.round((value/max)*100)}%;background:var(--teal-700);"></div></div></div>`;}).join('')}</div>`:'<div style="font-size:12px;color:var(--legacy-666);">No data in this range.</div>';
 }
+// ---------------------------------------------------------------------------
+// KPI freshness
+//
+// The dashboard used to render once and then sit there: figures drifted out of
+// date while it was open, and nothing on screen said how old they were. It now
+// re-pulls on a timer, whenever a live board patch lands (debounced, because a
+// busy board patches often), and when the tab is brought back to the front -
+// but only while the KPI view is actually showing, so a board-only session
+// isn't polling the database for a screen no one is looking at.
+// ---------------------------------------------------------------------------
+let kpiAutoRefresh=true;
+let kpiLastLoadedAt=0;
+let kpiRefreshTimer=null,kpiFreshnessTimer=null;
+const KPI_REFRESH_MS=45000;
+function kpiFreshnessText(){
+  if(!kpiLastLoadedAt)return'Not loaded yet';
+  const secs=Math.max(0,Math.round((Date.now()-kpiLastLoadedAt)/1000));
+  if(secs<10)return'Updated just now';
+  if(secs<90)return`Updated ${secs}s ago`;
+  return`Updated ${Math.round(secs/60)}m ago`;
+}
+function updateKpiFreshnessLabel(){
+  const el=document.getElementById('kpi-freshness');
+  if(el)el.textContent=kpiFreshnessText();
+}
+function startKpiAutoRefresh(){
+  stopKpiAutoRefresh();
+  kpiFreshnessTimer=setInterval(updateKpiFreshnessLabel,5000);
+  if(!kpiAutoRefresh)return;
+  kpiRefreshTimer=setInterval(()=>{
+    // A hidden tab refreshing on a timer is pure load for nobody's benefit;
+    // the visibility handler pulls a fresh set the moment it comes back.
+    if(viewMode!=='kpi'||document.visibilityState!=='visible')return;
+    void renderKpiView();
+  },KPI_REFRESH_MS);
+}
+function stopKpiAutoRefresh(){
+  clearInterval(kpiRefreshTimer);kpiRefreshTimer=null;
+  clearInterval(kpiFreshnessTimer);kpiFreshnessTimer=null;
+}
+// A live patch from another agent already re-renders the active view, which
+// for this one means a fresh pull. On a busy board those patches arrive in
+// bursts, so overlapping pulls are collapsed rather than queued: the guard in
+// renderKpiView drops a request while one is already in flight.
+let kpiFetchInFlight=false;
+function fmtHours(h){
+  const n=Number(h||0);
+  if(!Number.isFinite(n)||n<=0)return'0h';
+  if(n<1)return`${Math.round(n*60)}m`;
+  if(n<48)return`${Math.round(n*10)/10}h`;
+  return`${Math.round(n/24*10)/10}d`;
+}
+function kpiCard(label,value,{tone='',hint=''}={}){
+  const toneStyle=tone==='bad'?'border-color:var(--red-300);background:var(--red-50);'
+    :tone==='warn'?'border-color:var(--amber-300);background:var(--amber-50);'
+    :tone==='good'?'border-color:var(--green-200);background:var(--green-50);':'';
+  return`<div style="background:var(--white);border:1px solid var(--legacy-d7d7d7);border-radius:12px;padding:12px;${toneStyle}">
+    <div style="font-size:12px;color:var(--legacy-666);">${esc(label)}</div>
+    <div style="font-family:Caladea,serif;font-size:30px;">${esc(String(value))}</div>
+    ${hint?`<div style="font-size:10px;color:var(--legacy-666);margin-top:2px;">${esc(hint)}</div>`:''}
+  </div>`;
+}
 async function renderKpiView(){
   if(!currentUserCanViewAllTickets()){
     const role=currentUserRole();
@@ -5983,7 +6115,11 @@ async function renderKpiView(){
   const teamFilterEl=document.getElementById('kpi-team-filter');
   document.getElementById('kpi-time-filter').value=kpiTimeFilter;
   document.getElementById('kpi-team-filter').value=kpiTeamFilter;
-  document.getElementById('kpi-range-label').textContent='Loading live KPI stats...';
+  // Only announce loading on the first pull - a timed refresh that blanked the
+  // header every 45 seconds would read as the dashboard breaking.
+  if(!kpiLastLoadedAt)document.getElementById('kpi-range-label').textContent='Loading live KPI stats...';
+  if(kpiFetchInFlight)return;
+  kpiFetchInFlight=true;
   try{
     const params=new URLSearchParams({range:kpiTimeFilter,team:kpiTeamFilter,agent:kpiAgentFilter,company:activeCompany||'all',jiraOnly:activeJira?'true':'false'});
     const res=await fetch('/api/tickets/kpis?'+params.toString(),{credentials:'include'});
@@ -6028,12 +6164,18 @@ async function renderKpiView(){
     document.getElementById('kpi-category-chart').innerHTML=renderSimpleKpiRows(data.categoryRows||[],'category','count');
     document.getElementById('kpi-priority-chart').innerHTML=renderSimpleKpiRows(data.priorityRows||[],'priority','count');
     document.getElementById('kpi-company-rows').innerHTML=(data.companyRows||[]).length?data.companyRows.map(r=>`<tr style="border-bottom:1px solid var(--legacy-f0f0f0);"><td style="padding:8px 10px;">${esc(r.company)}</td><td style="padding:8px 10px;">${r.count}</td></tr>`).join(''):'<tr><td colspan="2" style="padding:12px 10px;color:var(--legacy-666);">No tickets for this filter.</td></tr>';
-    document.getElementById('kpi-jira-ticket-rows').innerHTML=(data.jiraRows||[]).length?data.jiraRows.map(x=>`<tr style="border-bottom:1px solid var(--legacy-f0f0f0);"><td style="padding:8px 10px;">${esc(x.ticket)}</td><td style="padding:8px 10px;">${esc(x.company)}</td><td style="padding:8px 10px;">${esc(x.agent)}</td><td style="padding:8px 10px;font-weight:700;">${esc(x.jira)}</td></tr>`).join(''):'<tr><td colspan="4" style="padding:12px 10px;color:var(--legacy-666);">No Jira-linked tickets for this filter.</td></tr>';
+    document.getElementById('kpi-jira-ticket-rows').innerHTML=(data.jiraRows||[]).length?data.jiraRows.map(x=>`<tr style="border-bottom:1px solid var(--legacy-f0f0f0);"><td class="kpi-cell-wide" style="padding:8px 10px;">${esc(x.ticket)}</td><td style="padding:8px 10px;">${esc(x.company)}</td><td style="padding:8px 10px;">${esc(x.agent)}</td><td style="padding:8px 10px;font-weight:700;">${esc(x.jira)}</td></tr>`).join(''):'<tr><td colspan="4" style="padding:12px 10px;color:var(--legacy-666);">No Jira-linked tickets for this filter.</td></tr>';
     const body=document.getElementById('kpi-agent-rows');
-    body.innerHTML=rows.length?rows.map(r=>`<tr style="border-bottom:1px solid var(--legacy-f0f0f0);"><td style="padding:8px 10px;font-weight:700;">${esc(r.agent)}</td><td style="padding:8px 10px;">${r.total}</td><td style="padding:8px 10px;">${r.new}</td><td style="padding:8px 10px;">${r.inp}</td><td style="padding:8px 10px;">${r.wus||0}</td><td style="padding:8px 10px;">${r.dft||0}</td><td style="padding:8px 10px;">${r.wct||0}</td><td style="padding:8px 10px;">${r.res}</td></tr>`).join(''):'<tr><td colspan="8" style="padding:12px 10px;color:var(--legacy-666);">No tickets in this time range.</td></tr>';
+    body.innerHTML=rows.length?rows.map(r=>{
+      const comp=(r.compliancePct===null||r.compliancePct===undefined)?'-':`${r.compliancePct}%`;
+      const compColor=(r.compliancePct===null||r.compliancePct===undefined)?'':(r.compliancePct>=90?'color:var(--green-700);':r.compliancePct>=75?'color:var(--amber-700);':'color:var(--red-600);font-weight:700;');
+      return`<tr style="border-bottom:1px solid var(--legacy-f0f0f0);"><td style="padding:8px 10px;font-weight:700;">${esc(r.agent)}</td><td style="padding:8px 10px;">${r.total}</td><td style="padding:8px 10px;">${r.new}</td><td style="padding:8px 10px;">${r.inp}</td><td style="padding:8px 10px;">${r.wus||0}</td><td style="padding:8px 10px;">${r.dft||0}</td><td style="padding:8px 10px;">${r.wct||0}</td><td style="padding:8px 10px;">${r.res}</td><td style="padding:8px 10px;${(r.overdue||0)>0?'color:var(--red-600);font-weight:700;':''}">${r.overdue||0}</td><td style="padding:8px 10px;${(r.atRisk||0)>0?'color:var(--amber-700);':''}">${r.atRisk||0}</td><td style="padding:8px 10px;${compColor}">${comp}</td><td style="padding:8px 10px;">${esc(fmtHours(r.avgResolveShiftHours))}</td></tr>`;
+    }).join(''):'<tr><td colspan="12" style="padding:12px 10px;color:var(--legacy-666);">No tickets in this time range.</td></tr>';
   }catch(error){
     document.getElementById('kpi-range-label').textContent=`Live KPI failed (${String(error?.message||error)}). Showing loaded board data.`;
     renderKpiViewLocal();
+  }finally{
+    kpiFetchInFlight=false;
   }
 }
 function renderKpiViewLocal(){
@@ -6148,9 +6290,15 @@ function renderKpiViewLocal(){
   const companyRows=Object.entries(companyCounts).sort((a,b)=>b[1]-a[1]||a[0].localeCompare(b[0]));
   document.getElementById('kpi-company-rows').innerHTML=companyRows.length?companyRows.map(([name,cnt])=>`<tr style="border-bottom:1px solid var(--legacy-f0f0f0);"><td style="padding:8px 10px;">${esc(name)}</td><td style="padding:8px 10px;">${cnt}</td></tr>`).join(''):'<tr><td colspan="2" style="padding:12px 10px;color:var(--legacy-666);">No tickets for this filter.</td></tr>';
   const jiraRows=inRange.filter(t=>ticketJira[t.id]).map(t=>({t,company:companyForTicket(t)||'Unknown',agent:ticketAssignee[t.id]||'Unassigned',jira:ticketJira[t.id]})).sort((a,b)=>new Date((b.t.email?.receivedDateTime)||0)-new Date((a.t.email?.receivedDateTime)||0));
-  document.getElementById('kpi-jira-ticket-rows').innerHTML=jiraRows.length?jiraRows.slice(0,50).map(x=>`<tr style="border-bottom:1px solid var(--legacy-f0f0f0);"><td style="padding:8px 10px;">${esc(x.t.email?.subject||'(no subject)')}</td><td style="padding:8px 10px;">${esc(x.company)}</td><td style="padding:8px 10px;">${esc(x.agent)}</td><td style="padding:8px 10px;font-weight:700;">${esc(x.jira)}</td></tr>`).join(''):'<tr><td colspan="4" style="padding:12px 10px;color:var(--legacy-666);">No Jira-linked tickets for this filter.</td></tr>';
+  document.getElementById('kpi-jira-ticket-rows').innerHTML=jiraRows.length?jiraRows.slice(0,50).map(x=>`<tr style="border-bottom:1px solid var(--legacy-f0f0f0);"><td class="kpi-cell-wide" style="padding:8px 10px;">${esc(x.t.email?.subject||'(no subject)')}</td><td style="padding:8px 10px;">${esc(x.company)}</td><td style="padding:8px 10px;">${esc(x.agent)}</td><td style="padding:8px 10px;font-weight:700;">${esc(x.jira)}</td></tr>`).join(''):'<tr><td colspan="4" style="padding:12px 10px;color:var(--legacy-666);">No Jira-linked tickets for this filter.</td></tr>';
+  const overdueByAgent={};
+  localOverdue.forEach(({t})=>{const a=ticketAssignee[t.id]||'Unassigned';overdueByAgent[a]=(overdueByAgent[a]||0)+1;});
+  const atRiskByAgent={};
+  localAtRisk.forEach(({t})=>{const a=ticketAssignee[t.id]||'Unassigned';atRiskByAgent[a]=(atRiskByAgent[a]||0)+1;});
   const body=document.getElementById('kpi-agent-rows');
-  body.innerHTML=rows.length?rows.map(r=>`<tr style="border-bottom:1px solid var(--legacy-f0f0f0);"><td style="padding:8px 10px;font-weight:700;">${esc(r.agent)}</td><td style="padding:8px 10px;">${r.total}</td><td style="padding:8px 10px;">${r.new}</td><td style="padding:8px 10px;">${r.inp}</td><td style="padding:8px 10px;">${r.wus||0}</td><td style="padding:8px 10px;">${r.dft||0}</td><td style="padding:8px 10px;">${r.wct||0}</td><td style="padding:8px 10px;">${r.res}</td></tr>`).join(''):'<tr><td colspan="8" style="padding:12px 10px;color:var(--legacy-666);">No tickets in this time range.</td></tr>';
+  body.innerHTML=rows.length?rows.map(r=>`<tr style="border-bottom:1px solid var(--legacy-f0f0f0);"><td style="padding:8px 10px;font-weight:700;">${esc(r.agent)}</td><td style="padding:8px 10px;">${r.total}</td><td style="padding:8px 10px;">${r.new}</td><td style="padding:8px 10px;">${r.inp}</td><td style="padding:8px 10px;">${r.wus||0}</td><td style="padding:8px 10px;">${r.dft||0}</td><td style="padding:8px 10px;">${r.wct||0}</td><td style="padding:8px 10px;">${r.res}</td><td style="padding:8px 10px;${overdueByAgent[r.agent]?'color:var(--red-600);font-weight:700;':''}">${overdueByAgent[r.agent]||0}</td><td style="padding:8px 10px;${atRiskByAgent[r.agent]?'color:var(--amber-700);':''}">${atRiskByAgent[r.agent]||0}</td><td style="padding:8px 10px;">-</td><td style="padding:8px 10px;">-</td></tr>`).join(''):'<tr><td colspan="12" style="padding:12px 10px;color:var(--legacy-666);">No tickets in this time range.</td></tr>';
+  kpiLastLoadedAt=Date.now();
+  updateKpiFreshnessLabel();
 }
 function companyGroups(){
   const g=new Map();

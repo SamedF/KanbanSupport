@@ -383,9 +383,21 @@ function kpiDateBounds(range) {
   }
   if (key === 'this_month' || key === 'month') return { start: new Date(now.getFullYear(), now.getMonth(), 1), end: now, label: 'This month' };
   if (key === 'last_30_days') return { start: new Date(dayStart.getTime() - 29 * dayMs), end: now, label: 'Last 30 days' };
+  if (key === 'this_quarter' || key === 'quarter') {
+    return { start: new Date(now.getFullYear(), quarterStartMonth(now.getMonth()), 1), end: now, label: 'This quarter' };
+  }
+  if (key === 'last_quarter') {
+    const thisQuarterStart = new Date(now.getFullYear(), quarterStartMonth(now.getMonth()), 1);
+    const start = new Date(thisQuarterStart.getFullYear(), thisQuarterStart.getMonth() - 3, 1);
+    return { start, end: new Date(thisQuarterStart.getTime() - 1), label: 'Last quarter' };
+  }
   if (key === 'this_year') return { start: new Date(now.getFullYear(), 0, 1), end: now, label: 'This year' };
   return { start: dayStart, end: now, label: 'Today' };
 }
+// The client offers quarter ranges in its dropdown. They were missing above, so
+// picking "This quarter" silently fell through to Today and the dashboard
+// showed a day of data under a quarter's heading.
+function quarterStartMonth(month) { return Math.floor(month / 3) * 3; }
 function isDateInBounds(value, bounds) {
   if (!value || !bounds?.start || !bounds?.end) return false;
   const date = value instanceof Date ? value : new Date(value);
@@ -866,6 +878,123 @@ function shiftSnapshotFor(code) {
 
 shiftStore = loadShiftStore();
 setInterval(sweepIdleShifts, SHIFT_SWEEP_MS).unref?.();
+
+// ---------------------------------------------------------------------------
+// SLA, measured in shift time
+//
+// The board has always drawn SLA badges client-side from the same shift store
+// this file owns. The KPI dashboard needs the same numbers in aggregate, and
+// computing them in the browser would have meant every tab deriving its own
+// answer from whatever slice of tickets it happened to hold. These functions
+// are the server-side twin of the board's getSLAStatus(): same clock (assigned
+// agent's logged-in time, minus breaks, weekdays only), same targets.
+//
+// One deliberate difference: the board can refine the target by ticket subtype
+// (a "Paused" subtype has no clock at all), but the subtype is a board-only
+// concept - the database keeps the category, not the subtype id - so the
+// server targets by priority alone. That makes the server slightly stricter
+// than the badge for paused subtypes, never looser, so no breach is hidden.
+// ---------------------------------------------------------------------------
+const SLA_HOURS_BY_PRIORITY = { High: 4, Medium: 24, Normal: 24, Low: 48 };
+const SLA_DEFAULT_HOURS = 24;
+
+function slaTargetHoursFor(priority) {
+  const key = String(priority || '').trim();
+  const match = Object.keys(SLA_HOURS_BY_PRIORITY).find(k => k.toLowerCase() === key.toLowerCase());
+  return match ? SLA_HOURS_BY_PRIORITY[match] : SLA_DEFAULT_HOURS;
+}
+
+function isWeekendDate(date) {
+  const day = date.getDay();
+  return day === 0 || day === 6;
+}
+
+// Milliseconds of [from,to) landing on a weekday. Walks day by day via setDate
+// rather than adding a fixed 86400000 so a daylight-saving change cannot drift
+// the day boundaries.
+function weekdayMsInRange(from, to) {
+  if (!(to > from)) return 0;
+  let total = 0;
+  const cursor = new Date(from);
+  cursor.setHours(0, 0, 0, 0);
+  while (cursor.getTime() < to) {
+    const dayStart = cursor.getTime();
+    const next = new Date(cursor);
+    next.setDate(next.getDate() + 1);
+    next.setHours(0, 0, 0, 0);
+    const dayEnd = next.getTime();
+    if (!isWeekendDate(cursor)) {
+      const s = Math.max(dayStart, from);
+      const e = Math.min(dayEnd, to);
+      if (e > s) total += e - s;
+    }
+    cursor.setTime(dayEnd);
+  }
+  return total;
+}
+
+// Worked milliseconds for one agent within [fromMs,toMs): their shift sessions,
+// clipped to weekdays, minus any overlapping break.
+function shiftElapsedMs(fromMs, toMs, agentCode) {
+  const rec = shiftStore.agents[String(agentCode || '').trim().toUpperCase()];
+  if (!rec || !Array.isArray(rec.sessions)) return 0;
+  const now = Date.now();
+  let total = 0;
+  rec.sessions.forEach((s) => {
+    const start = Math.max(Number(s.start || 0), fromMs);
+    const end = Math.min(s.end === null || s.end === undefined ? now : Number(s.end), toMs);
+    if (!(end > start)) return;
+    let worked = weekdayMsInRange(start, end);
+    (s.breaks || []).forEach((b) => {
+      const bs = Math.max(Number(b.start || 0), start);
+      const be = Math.min(b.end === null || b.end === undefined ? now : Number(b.end), end);
+      if (be > bs) worked -= weekdayMsInRange(bs, be);
+    });
+    total += Math.max(0, worked);
+  });
+  return total;
+}
+
+// One ticket's SLA position. `state` is the honest answer, not a guess:
+//   met / breached  - resolved inside or outside its target
+//   overdue         - open and already past target
+//   at_risk         - open, under a quarter of the target left
+//   on_track        - open, comfortable
+//   no_clock        - unassigned, so no shift clock has ever started. Saying
+//                     "4h left" for a ticket nobody owns would be a fiction, so
+//                     these are counted and reported separately rather than
+//                     folded into compliance.
+function ticketSlaSnapshot(ticket, now = Date.now()) {
+  const createdMs = ticket?.createdAt ? new Date(ticket.createdAt).getTime() : NaN;
+  const targetHours = slaTargetHoursFor(ticket?.priority);
+  const targetMs = targetHours * 3600000;
+  const resolved = normalizeDbStatusForBoard(ticket?.status) === 'res';
+  const agent = String(ticket?.assignedAgent || '').trim().toUpperCase();
+  const base = { targetHours, resolved, state: 'no_clock', shiftMs: 0, wallMs: 0, overdueMs: 0 };
+  if (!Number.isFinite(createdMs)) return base;
+
+  const endMs = resolved
+    ? (ticket?.resolvedAt ? new Date(ticket.resolvedAt).getTime() : now)
+    : now;
+  const wallMs = Math.max(0, (Number.isFinite(endMs) ? endMs : now) - createdMs);
+  if (!agent) return { ...base, wallMs };
+
+  const shiftMs = shiftElapsedMs(createdMs, Number.isFinite(endMs) ? endMs : now, agent);
+  const remaining = targetMs - shiftMs;
+  if (resolved) {
+    return { ...base, state: remaining >= 0 ? 'met' : 'breached', shiftMs, wallMs, overdueMs: Math.max(0, -remaining) };
+  }
+  if (remaining <= 0) return { ...base, state: 'overdue', shiftMs, wallMs, overdueMs: -remaining };
+  return { ...base, state: remaining / targetMs <= 0.25 ? 'at_risk' : 'on_track', shiftMs, wallMs };
+}
+
+const hoursFromMs = ms => Math.round((Number(ms || 0) / 3600000) * 10) / 10;
+function medianOf(values) {
+  const sorted = values.filter(v => Number.isFinite(v)).sort((a, b) => a - b);
+  if (!sorted.length) return 0;
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+}
 
 async function safeWriteState(state) {
   const nextState = (state && typeof state === 'object') ? state : {};
