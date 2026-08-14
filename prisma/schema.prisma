@@ -119,6 +119,16 @@ model Ticket {
   // for existing rows), unlike the old client-only ephemeral counter this
   // replaces. Not the @id - that stays the internal DB primary key.
   displayNumber   Int?      @unique
+  // Set when an agent marks this ticket as a duplicate of another one: the
+  // externalId of the ticket it duplicates ("" is not used - null means "not a
+  // duplicate"). A duplicate is real inbox noise, not real work, so the KPI
+  // dashboard excludes it from resolved/throughput/SLA figures and counts it
+  // under its own heading instead. Resolving a duplicate used to look
+  // identical to resolving a genuine ticket and quietly inflated every
+  // resolved-ticket number.
+  duplicateOfExternalId String?
+  duplicateMarkedAt     DateTime?
+  duplicateMarkedBy     String?
 
   comments        TicketComment[]
   events          TicketEvent[]
@@ -128,6 +138,7 @@ model Ticket {
   @@index([assignedAgent])
   @@index([csAgent])
   @@index([createdAt])
+  @@index([duplicateOfExternalId])
 }
 
 model TicketComment {

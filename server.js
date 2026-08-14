@@ -718,12 +718,55 @@ async function findTicketRecordByKanbanId(kanbanTicketId) {
     }
   });
 }
+// Server-owned board fields (ticketJira, ticketDuplicateOf) are written here
+// rather than by whatever board snapshot happens to arrive next. Every link,
+// unlink and duplicate marking goes through an endpoint that calls this, so
+// this is the only writer - see the note on safeWriteState for why a client
+// snapshot must never be trusted with these fields.
+function writeServerOwnedFieldIntoState(field, externalId, nextValue) {
+  const id = String(externalId || '').trim();
+  if (!id) return null;
+  try {
+    const state = safeReadState();
+    const map = (state[field] && typeof state[field] === 'object') ? state[field] : {};
+    if (String(map[id] || '') === String(nextValue || '')) return null;
+    if (nextValue) map[id] = nextValue; else delete map[id];
+    state[field] = map;
+    fs.mkdirSync(path.dirname(DATA_PATH), { recursive: true });
+    fs.writeFileSync(DATA_PATH, JSON.stringify(state, null, 2), 'utf8');
+    return { id, field, value: nextValue || null };
+  } catch (error) {
+    console.warn(`Board state write failed for ${field}:`, error.message || error);
+    return null;
+  }
+}
+// Push a server-owned field change to every open board so a tab that never
+// reloads still sees it - and, on removal, stops showing it.
+function broadcastServerOwnedFieldChange(change, actor = null) {
+  if (!change) return;
+  sseBroadcast('board_patch', {
+    actor,
+    origin: null,
+    changes: [{ id: change.id, field: change.field, value: change.value }],
+    added: [],
+    removed: []
+  });
+}
 async function setTicketJiraLink({ kanbanTicketId, jiraTicketKey, userId = null, metadata = null }) {
-  const ticket = await findTicketRecordByKanbanId(kanbanTicketId);
-  if (!ticket) return { ticket: null, updated: false };
+  const externalId = String(kanbanTicketId || '').trim();
   const nextKey = jiraTicketKey ? normalizeJiraKey(jiraTicketKey) : null;
+  const ticket = await findTicketRecordByKanbanId(externalId);
+
+  // Persist to the board state even when the ticket has no database row yet
+  // (a freshly polled ticket is only written to Postgres on the next board
+  // save). Otherwise the link existed nowhere the server would honour and
+  // vanished on the next reload.
+  const stateChange = writeServerOwnedFieldIntoState('ticketJira', externalId, nextKey);
+  broadcastServerOwnedFieldChange(stateChange);
+
+  if (!ticket) return { ticket: null, updated: !!stateChange };
   if (String(ticket.jiraTicketKey || '') === String(nextKey || '')) {
-    return { ticket, updated: false };
+    return { ticket, updated: !!stateChange };
   }
   const updated = await prisma.ticket.update({
     where: { id: ticket.id },
@@ -736,6 +779,53 @@ async function setTicketJiraLink({ kanbanTicketId, jiraTicketKey, userId = null,
     oldValue: ticket.jiraTicketKey || null,
     newValue: nextKey,
     metadata: metadata || undefined
+  });
+  return { ticket: updated, updated: true };
+}
+// ---------------------------------------------------------------------------
+// Duplicates
+//
+// The same customer problem regularly arrives twice - a resend, a reply that
+// Outlook threads under a fresh conversation id, a client writing in from two
+// addresses. Agents cleared the copy by resolving it, which made it
+// indistinguishable from genuinely resolved work: every resolved count, the
+// throughput figure and SLA compliance were all inflated by tickets nobody
+// actually solved.
+//
+// Marking a ticket as a duplicate records what it duplicates, keeps the ticket
+// on the board (it is still a real email someone may need to read), and takes
+// it out of every KPI that measures work done. Same server-owned write path as
+// the Jira link, for the same reason: a board snapshot cannot be trusted to
+// remember it.
+// ---------------------------------------------------------------------------
+async function setTicketDuplicateOf({ kanbanTicketId, duplicateOfExternalId, userId = null, actor = null }) {
+  const externalId = String(kanbanTicketId || '').trim();
+  const nextMaster = String(duplicateOfExternalId || '').trim() || null;
+  if (nextMaster && nextMaster === externalId) throw new Error('ticket_cannot_duplicate_itself');
+
+  const ticket = await findTicketRecordByKanbanId(externalId);
+  const stateChange = writeServerOwnedFieldIntoState('ticketDuplicateOf', externalId, nextMaster);
+  broadcastServerOwnedFieldChange(stateChange, actor);
+
+  if (!ticket) return { ticket: null, updated: !!stateChange };
+  if (String(ticket.duplicateOfExternalId || '') === String(nextMaster || '')) {
+    return { ticket, updated: !!stateChange };
+  }
+  const updated = await prisma.ticket.update({
+    where: { id: ticket.id },
+    data: {
+      duplicateOfExternalId: nextMaster,
+      duplicateMarkedAt: nextMaster ? new Date() : null,
+      duplicateMarkedBy: nextMaster ? (actor || null) : null
+    }
+  });
+  await createTicketAuditEvent({
+    ticketId: ticket.id,
+    userId,
+    eventType: nextMaster ? 'ticket_marked_duplicate' : 'ticket_unmarked_duplicate',
+    oldValue: ticket.duplicateOfExternalId || null,
+    newValue: nextMaster,
+    metadata: { actor: actor || null }
   });
   return { ticket: updated, updated: true };
 }
@@ -1108,6 +1198,23 @@ async function safeWriteState(state) {
   assignFields.forEach((field) => { nextState[field] = mergedAssign[field]; });
   nextState.ticketAssigneeTouchedAt = mergedAssignTouched;
 
+  // Jira links and duplicate markings are server-owned: their endpoints are the
+  // only writers, because a board snapshot cannot distinguish "this ticket has
+  // no Jira link" from "my tab has not heard about the link yet". Taking
+  // ticketJira from the payload meant any tab whose snapshot predated the link
+  // - a background tab, a queued save, a beacon flush on unload - silently
+  // dropped the key here, and upsertBoardTicketsToDatabase then wrote that
+  // absence to the database as NULL. That is why a link disappeared some time
+  // after it was made, with no one having unlinked anything.
+  const keepServerOwned = (field) => {
+    nextState[field] = (currentState[field] && typeof currentState[field] === 'object')
+      ? currentState[field]
+      : ((nextState[field] && typeof nextState[field] === 'object') ? nextState[field] : {});
+  };
+  keepServerOwned('ticketJira');
+  keepServerOwned('ticketDuplicateOf');
+
+  nextState.ticketHubspotId = mergeTicketMap('ticketHubspotId');
   nextState.manualCSOverride = mergeTicketMap('manualCSOverride');
   nextState.ticketCreatedBy = mergeTicketMap('ticketCreatedBy');
   nextState.ticketResolutionMeta = mergeTicketMap('ticketResolutionMeta');
@@ -1141,7 +1248,7 @@ async function safeWriteState(state) {
   // A stale snapshot (e.g. from a lagging tab) must not blindly overwrite
   // fields it didn't correctly merge - keep the current state as the base and
   // only layer in the fields we've safely reconciled above by id/timestamp.
-  const reconciledFields = ['ticketState', 'ticketStageTouchedAt', 'ticketAssigneeTouchedAt', 'ticketNumbers', 'ticketNumberCounter', 'allTickets', 'seenIds', 'ticketAssignee', 'ticketCSOwner', 'ticketAssignmentMode', 'manualSupportOverride', 'manualCSOverride', 'ticketResolutionMeta', 'ticketArchived', 'ticketCreatedBy'];
+  const reconciledFields = ['ticketState', 'ticketStageTouchedAt', 'ticketAssigneeTouchedAt', 'ticketNumbers', 'ticketNumberCounter', 'allTickets', 'seenIds', 'ticketAssignee', 'ticketCSOwner', 'ticketAssignmentMode', 'manualSupportOverride', 'manualCSOverride', 'ticketResolutionMeta', 'ticketArchived', 'ticketCreatedBy', 'ticketJira', 'ticketHubspotId', 'ticketDuplicateOf'];
   const finalState = isStale
     ? { ...currentState, ...Object.fromEntries(reconciledFields.map(key => [key, nextState[key]])), _meta: enrichedMeta }
     : { ...nextState, _meta: enrichedMeta };
@@ -1195,6 +1302,7 @@ async function hydrateStateFromDatabase(baseState = {}) {
   state.ticketCreatedAt = (state.ticketCreatedAt && typeof state.ticketCreatedAt === 'object') ? state.ticketCreatedAt : {};
   state.ticketJira = (state.ticketJira && typeof state.ticketJira === 'object') ? state.ticketJira : {};
   state.ticketHubspotId = (state.ticketHubspotId && typeof state.ticketHubspotId === 'object') ? state.ticketHubspotId : {};
+  state.ticketDuplicateOf = (state.ticketDuplicateOf && typeof state.ticketDuplicateOf === 'object') ? state.ticketDuplicateOf : {};
   state.ticketArchived = (state.ticketArchived && typeof state.ticketArchived === 'object') ? state.ticketArchived : {};
   state.manualCSOverride = (state.manualCSOverride && typeof state.manualCSOverride === 'object') ? state.manualCSOverride : {};
   state.ticketCreatedBy = (state.ticketCreatedBy && typeof state.ticketCreatedBy === 'object') ? state.ticketCreatedBy : {};
@@ -1253,6 +1361,7 @@ async function hydrateStateFromDatabase(baseState = {}) {
     if (ticket.senderEmail) state.ticketClientEmail[externalId] = ticket.senderEmail;
     if (ticket.createdAt) state.ticketCreatedAt[externalId] = ticket.createdAt.toISOString();
     if (ticket.jiraTicketKey) state.ticketJira[externalId] = ticket.jiraTicketKey;
+    if (ticket.duplicateOfExternalId) state.ticketDuplicateOf[externalId] = ticket.duplicateOfExternalId;
     if (ticket.hubspotTicketId) state.ticketHubspotId[externalId] = ticket.hubspotTicketId;
     if (ticket.displayNumber) state.ticketNumbers[externalId] = ticket.displayNumber;
     if (Array.isArray(ticket.comments) && ticket.comments.length) {
@@ -2074,6 +2183,7 @@ async function upsertBoardTicketsToDatabase(state, req) {
   const ticketClientEmail = state.ticketClientEmail || {};
   const ticketCreatedAt = state.ticketCreatedAt || {};
   const ticketJira = state.ticketJira || {};
+  const ticketDuplicateOf = state.ticketDuplicateOf || {};
   const ticketHubspotId = state.ticketHubspotId || {};
   const ticketComments = state.ticketComments || {};
 
@@ -2108,10 +2218,24 @@ async function upsertBoardTicketsToDatabase(state, req) {
     const createdAt = safeDateForDb(email.receivedDateTime || ticketCreatedAt[externalId]) || new Date();
     const body = String(email.bodyPreview || email.preview || email.summary || email.body || email.text || '').trim() || null;
     const companyName = extractCompanyNameFromEmail(senderEmail);
-    const hubspotTicketId = ticketHubspotId[externalId] ? String(ticketHubspotId[externalId]) : null;
-    const jiraTicketKey = ticketJira[externalId] ? String(ticketJira[externalId]) : null;
-
     const existingTicket = existingByExternalId.get(externalId) || null;
+
+    // A board snapshot that carries no Jira key, HubSpot id or duplicate
+    // marking for a ticket is stating "I have nothing to say about this",
+    // never "clear it" - the endpoints that set them own these columns.
+    // Writing the absence straight through here is what deleted links that no
+    // one had unlinked: any save from a tab whose snapshot predated the link
+    // overwrote the column with NULL, and because hydrateStateFromDatabase only
+    // restores a link when the column is non-empty, nothing brought it back.
+    const hubspotTicketId = ticketHubspotId[externalId]
+      ? String(ticketHubspotId[externalId])
+      : (existingTicket?.hubspotTicketId || null);
+    const jiraTicketKey = ticketJira[externalId]
+      ? String(ticketJira[externalId])
+      : (existingTicket?.jiraTicketKey || null);
+    const duplicateOfExternalId = ticketDuplicateOf[externalId]
+      ? String(ticketDuplicateOf[externalId])
+      : (existingTicket?.duplicateOfExternalId || null);
     const comments = Array.isArray(ticketComments[externalId]) ? ticketComments[externalId] : [];
     const existingCommentTexts = new Set((existingTicket?.comments || []).map(c => c.comment));
     const newComments = comments
@@ -2135,6 +2259,7 @@ async function upsertBoardTicketsToDatabase(state, req) {
       && existingTicket.csAgent === csAgent
       && existingTicket.hubspotTicketId === hubspotTicketId
       && existingTicket.jiraTicketKey === jiraTicketKey
+      && existingTicket.duplicateOfExternalId === duplicateOfExternalId
       && existingTicket.body === body;
 
     if (fieldsUnchanged && !newComments.length) continue;
@@ -2158,6 +2283,7 @@ async function upsertBoardTicketsToDatabase(state, req) {
         emailMessageId: externalId,
         hubspotTicketId,
         jiraTicketKey,
+        duplicateOfExternalId,
         body,
         emailRaw: email,
         createdAt,
@@ -2177,6 +2303,7 @@ async function upsertBoardTicketsToDatabase(state, req) {
         emailMessageId: externalId,
         hubspotTicketId,
         jiraTicketKey,
+        duplicateOfExternalId,
         body,
         emailRaw: email,
         resolvedAt: resolvedAtForDb,
@@ -2188,7 +2315,9 @@ async function upsertBoardTicketsToDatabase(state, req) {
       }
     });
 
-    if (status === 'Resolved') {
+    // A duplicate being cleared off the board is not a resolution anyone needs
+    // to be told about, for the same reason it is not counted as one.
+    if (status === 'Resolved' && !duplicateOfExternalId) {
       const alert = await claimResolvedTeamsAlert({
         ticketDbId: ticket.id,
         externalId,
@@ -3749,6 +3878,42 @@ app.get('/api/tickets', requireAuth, async (req, res) => {
   });
   res.json({ tickets });
 });
+// Mark a ticket as a duplicate of another. Body: { duplicateOf }. The value is
+// the board id (externalId) of the ticket this one duplicates.
+app.post('/api/tickets/:externalId/duplicate', requireAuth, async (req, res) => {
+  try {
+    const externalId = String(req.params.externalId || '').trim();
+    const duplicateOf = String(req.body?.duplicateOf || '').trim();
+    if (!externalId || !duplicateOf) return res.status(400).json({ error: 'missing_ticket_or_master' });
+    const actor = String(req.session.username || '').trim().toUpperCase() || null;
+    const result = await setTicketDuplicateOf({
+      kanbanTicketId: externalId,
+      duplicateOfExternalId: duplicateOf,
+      userId: req.session.userId || null,
+      actor
+    });
+    return res.json({ ok: true, duplicateOf, persisted: !!result.ticket });
+  } catch (error) {
+    const message = String(error.message || error);
+    if (message === 'ticket_cannot_duplicate_itself') return res.status(400).json({ error: message });
+    return res.status(500).json({ error: message });
+  }
+});
+app.delete('/api/tickets/:externalId/duplicate', requireAuth, async (req, res) => {
+  try {
+    const externalId = String(req.params.externalId || '').trim();
+    if (!externalId) return res.status(400).json({ error: 'missing_ticket' });
+    await setTicketDuplicateOf({
+      kanbanTicketId: externalId,
+      duplicateOfExternalId: null,
+      userId: req.session.userId || null,
+      actor: String(req.session.username || '').trim().toUpperCase() || null
+    });
+    return res.json({ ok: true });
+  } catch (error) {
+    return res.status(500).json({ error: String(error.message || error) });
+  }
+});
 app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
   try {
     const bounds = kpiDateBounds(req.query.range);
@@ -3787,37 +3952,44 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
     const statusWhere = { AND: [baseWhere, accessWhere] };
     const where = { AND: [baseWhere, accessWhere, rangeWhere] };
 
+    const kpiSelect = {
+      id: true,
+      externalId: true,
+      displayNumber: true,
+      subject: true,
+      status: true,
+      priority: true,
+      category: true,
+      assignedAgent: true,
+      csAgent: true,
+      companyName: true,
+      senderEmail: true,
+      jiraTicketKey: true,
+      duplicateOfExternalId: true,
+      createdAt: true,
+      updatedAt: true,
+      resolvedAt: true
+    };
     const tickets = await prisma.ticket.findMany({
       where,
-      select: {
-        id: true,
-        externalId: true,
-        subject: true,
-        status: true,
-        priority: true,
-        category: true,
-        assignedAgent: true,
-        csAgent: true,
-        companyName: true,
-        senderEmail: true,
-        jiraTicketKey: true,
-        createdAt: true,
-        updatedAt: true,
-        resolvedAt: true
-      },
+      select: kpiSelect,
       orderBy: [{ createdAt: 'desc' }]
     });
     const statusTickets = await prisma.ticket.findMany({
       where: statusWhere,
-      select: {
-        id: true,
-        status: true,
-        assignedAgent: true,
-        csAgent: true,
-        jiraTicketKey: true
-      }
+      select: kpiSelect
     });
-    const scopedTickets = tickets.filter(ticket => kpiTicketInRange(ticket, bounds));
+    const scopedTicketsAll = tickets.filter(ticket => kpiTicketInRange(ticket, bounds));
+
+    // Duplicates are held back from every figure that counts work. They are
+    // still real tickets sitting on the board, so they are reported on their
+    // own rather than quietly dropped: "12 resolved, 3 of them duplicates" is
+    // the honest version of what used to read as "15 resolved".
+    const isDuplicate = t => !!t.duplicateOfExternalId;
+    const duplicatesOpen = statusTickets.filter(isDuplicate);
+    const duplicatesInRange = scopedTicketsAll.filter(isDuplicate);
+    const scopedTickets = scopedTicketsAll.filter(t => !isDuplicate(t));
+    const workTickets = statusTickets.filter(t => !isDuplicate(t));
 
     const statusKeys = ['new', 'inp', 'wus', 'dft', 'wct', 'res'];
     const statusCounts = Object.fromEntries(statusKeys.map(k => [k, 0]));
@@ -3828,14 +4000,19 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
     const csCounts = {};
     let ticketsWithCs = 0;
 
+    const emptyAgentRow = code => ({
+      agent: code, total: 0, new: 0, inp: 0, wus: 0, dft: 0, wct: 0, res: 0,
+      duplicates: 0, overdue: 0, atRisk: 0, slaMet: 0, slaBreached: 0, resolveHours: []
+    });
     const addAgentRow = (agentCode, statusKey) => {
       const rowAgent = String(agentCode || 'Unassigned').trim().toUpperCase() || 'Unassigned';
-      if (!agentRows[rowAgent]) agentRows[rowAgent] = { agent: rowAgent, total: 0, new: 0, inp: 0, wus: 0, dft: 0, wct: 0, res: 0 };
+      if (!agentRows[rowAgent]) agentRows[rowAgent] = emptyAgentRow(rowAgent);
       agentRows[rowAgent].total++;
       if (statusKey in agentRows[rowAgent]) agentRows[rowAgent][statusKey]++;
+      return agentRows[rowAgent];
     };
 
-    for (const ticket of statusTickets) {
+    for (const ticket of workTickets) {
       const statusKey = normalizeDbStatusForBoard(ticket.status);
       if (statusKey in statusCounts) statusCounts[statusKey]++;
     }
@@ -3862,6 +4039,92 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
       if (csOwner) ticketsWithCs++;
     }
 
+    // ---------------------------------------------------------------------
+    // SLA
+    //
+    // Two different questions, deliberately kept apart rather than averaged
+    // into one misleading number:
+    //   backlog  - how the tickets open RIGHT NOW stand against their target.
+    //              Not range-filtered: a ticket that has been overdue for a
+    //              week is still overdue today, and a dashboard set to "Today"
+    //              hiding it would be exactly the wrong answer.
+    //   resolved - of the work finished inside the selected range, how much
+    //              landed inside its target. This is the compliance figure.
+    // ---------------------------------------------------------------------
+    const now = Date.now();
+    const openWorkTickets = workTickets.filter(t => normalizeDbStatusForBoard(t.status) !== 'res');
+    const backlog = { overdue: 0, atRisk: 0, onTrack: 0, noClock: 0 };
+    const overdueRows = [];
+    let oldestOpenMs = 0;
+
+    for (const ticket of openWorkTickets) {
+      const snapshot = ticketSlaSnapshot(ticket, now);
+      if (snapshot.state in backlog) backlog[snapshot.state]++;
+      oldestOpenMs = Math.max(oldestOpenMs, snapshot.wallMs);
+      const owner = String(ticket.assignedAgent || '').trim().toUpperCase() || 'Unassigned';
+      if (snapshot.state === 'overdue' || snapshot.state === 'at_risk') {
+        if (!agentRows[owner]) agentRows[owner] = emptyAgentRow(owner);
+        if (snapshot.state === 'overdue') agentRows[owner].overdue++;
+        else agentRows[owner].atRisk++;
+      }
+      if (snapshot.state === 'overdue') {
+        overdueRows.push({
+          ticketNumber: ticket.displayNumber ? `#${String(ticket.displayNumber).padStart(4, '0')}` : null,
+          externalId: ticket.externalId,
+          subject: ticket.subject || '(no subject)',
+          company: ticket.companyName || 'Unknown',
+          agent: ticket.assignedAgent || 'Unassigned',
+          priority: ticket.priority || 'Normal',
+          status: normalizeDbStatusForBoard(ticket.status),
+          targetHours: snapshot.targetHours,
+          overdueHours: hoursFromMs(snapshot.overdueMs),
+          ageHours: hoursFromMs(snapshot.wallMs),
+          jira: ticket.jiraTicketKey || null
+        });
+      }
+    }
+    overdueRows.sort((a, b) => b.overdueHours - a.overdueHours);
+
+    const resolvedInRange = scopedTickets.filter(t => normalizeDbStatusForBoard(t.status) === 'res');
+    const resolveShiftHours = [];
+    const resolveWallHours = [];
+    let slaMet = 0;
+    let slaBreached = 0;
+    let slaUnmeasured = 0;
+    for (const ticket of resolvedInRange) {
+      const snapshot = ticketSlaSnapshot(ticket, now);
+      const owner = String(ticket.assignedAgent || '').trim().toUpperCase() || 'Unassigned';
+      if (!agentRows[owner]) agentRows[owner] = emptyAgentRow(owner);
+      if (snapshot.state === 'met') { slaMet++; agentRows[owner].slaMet++; }
+      else if (snapshot.state === 'breached') { slaBreached++; agentRows[owner].slaBreached++; }
+      else slaUnmeasured++;
+      if (snapshot.state === 'met' || snapshot.state === 'breached') {
+        resolveShiftHours.push(hoursFromMs(snapshot.shiftMs));
+        agentRows[owner].resolveHours.push(hoursFromMs(snapshot.shiftMs));
+      }
+      resolveWallHours.push(hoursFromMs(snapshot.wallMs));
+    }
+    const slaMeasured = slaMet + slaBreached;
+
+    // A ticket that went back out of Resolved is work that was called done and
+    // was not. Counting it makes a resolved figure that only ever goes up
+    // honest about the times it should have gone down.
+    const reopened = await prisma.ticketEvent.count({
+      where: {
+        eventType: 'ticket_status_changed',
+        oldValue: 'Resolved',
+        NOT: [{ newValue: 'Resolved' }],
+        createdAt: { gte: bounds.start, lte: bounds.end },
+        // Scoped through the ticket so this obeys the same team/agent/company
+        // filter as every other figure on the dashboard rather than quietly
+        // reporting a board-wide total next to filtered ones.
+        ticket: { AND: [baseWhere, accessWhere, { duplicateOfExternalId: null }] }
+      }
+    }).catch(() => 0);
+
+    const createdInRange = scopedTickets.filter(t => isDateInBounds(t.createdAt, bounds)).length;
+    const avgOf = values => (values.length ? Math.round((values.reduce((a, b) => a + b, 0) / values.length) * 10) / 10 : 0);
+
     const sortRows = obj => Object.entries(obj).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
     const agents = Array.from(new Set([
       ...Array.from(SUPPORT_AGENT_CODES),
@@ -3875,18 +4138,65 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
       range: { key: String(req.query.range || 'today'), label: bounds.label, start: bounds.start.toISOString(), end: bounds.end.toISOString() },
       filters: { team, agent, company, jiraOnly },
       totals: {
-        tickets: statusTickets.length,
+        tickets: workTickets.length,
         rangeTickets: scopedTickets.length,
         ticketsWithCs,
         uniqueCs: Object.keys(csCounts).filter(k => k !== 'Unassigned').length,
-        jiraLinked: statusTickets.filter(t => t.jiraTicketKey).length
+        jiraLinked: workTickets.filter(t => t.jiraTicketKey).length,
+        // Reported, never folded in: these are the tickets excluded from every
+        // other number on this dashboard.
+        duplicates: duplicatesOpen.length,
+        duplicatesInRange: duplicatesInRange.length,
+        duplicatesResolvedInRange: duplicatesInRange.filter(t => normalizeDbStatusForBoard(t.status) === 'res').length
       },
+      sla: {
+        targetsByPriority: SLA_HOURS_BY_PRIORITY,
+        backlog,
+        overdue: backlog.overdue,
+        atRisk: backlog.atRisk,
+        oldestOpenHours: hoursFromMs(oldestOpenMs),
+        resolvedInRange: resolvedInRange.length,
+        met: slaMet,
+        breached: slaBreached,
+        // Resolved with no assignee, so no shift clock ever ran for them.
+        // Excluded from the percentage rather than silently counted as met.
+        unmeasured: slaUnmeasured,
+        compliancePct: slaMeasured ? Math.round((slaMet / slaMeasured) * 1000) / 10 : null,
+        avgResolveShiftHours: avgOf(resolveShiftHours),
+        medianResolveShiftHours: Math.round(medianOf(resolveShiftHours) * 10) / 10,
+        avgResolveWallHours: avgOf(resolveWallHours)
+      },
+      throughput: {
+        created: createdInRange,
+        resolved: resolvedInRange.length,
+        reopened,
+        net: createdInRange - resolvedInRange.length,
+        backlogOpen: openWorkTickets.length
+      },
+      overdueRows: overdueRows.slice(0, 25),
+      duplicateRows: duplicatesInRange.slice(0, 25).map(t => ({
+        ticketNumber: t.displayNumber ? `#${String(t.displayNumber).padStart(4, '0')}` : null,
+        externalId: t.externalId,
+        subject: t.subject || '(no subject)',
+        company: t.companyName || 'Unknown',
+        agent: t.assignedAgent || 'Unassigned',
+        status: normalizeDbStatusForBoard(t.status),
+        duplicateOf: t.duplicateOfExternalId
+      })),
       statusCounts,
       categoryRows: sortRows(categoryCounts).map(([category, count]) => ({ category, count })),
       priorityRows: sortRows(priorityCounts).map(([priority, count]) => ({ priority, count })),
       companyRows: sortRows(companyCounts).map(([company, count]) => ({ company, count })),
       csRows: sortRows(csCounts).map(([agent, count]) => ({ agent, count })),
-      agentRows: Object.values(agentRows).sort((a, b) => b.total - a.total || a.agent.localeCompare(b.agent)),
+      agentRows: Object.values(agentRows)
+        .map(({ resolveHours, ...row }) => ({
+          ...row,
+          avgResolveShiftHours: avgOf(resolveHours),
+          compliancePct: (row.slaMet + row.slaBreached)
+            ? Math.round((row.slaMet / (row.slaMet + row.slaBreached)) * 1000) / 10
+            : null
+        }))
+        .sort((a, b) => b.overdue - a.overdue || b.total - a.total || a.agent.localeCompare(b.agent)),
       jiraRows: scopedTickets.filter(t => t.jiraTicketKey).slice(0, 50).map(t => ({
         ticket: t.subject || '(no subject)',
         company: t.companyName || 'Unknown',
@@ -4780,7 +5090,8 @@ const LIVE_SYNC_FIELDS = [
   'ticketAssignmentMode', 'manualSupportOverride', 'manualCSOverride',
   'ticketPriority', 'ticketCategory', 'ticketSubtype', 'ticketJira',
   'ticketHubspotId', 'ticketArchived', 'ticketResolutionMeta',
-  'ticketHasNewReply', 'ticketNumbers', 'ticketComments', 'ticketCreatedBy'
+  'ticketHasNewReply', 'ticketNumbers', 'ticketComments', 'ticketCreatedBy',
+  'ticketDuplicateOf'
 ];
 
 function sseFrame(rev, type, data) {

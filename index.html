@@ -3834,8 +3834,60 @@ th {
       </select>
     </div>
   </div>
-  <div id="kpi-range-label" style="font-size:12px;color:var(--legacy-666);margin-bottom:10px;">Loading</div>
-  <div id="kpi-status-cards" style="display:grid;grid-template-columns:repeat(8,minmax(160px,1fr));gap:12px;margin-bottom:12px;"></div>
+  <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px;">
+    <div id="kpi-range-label" style="font-size:12px;color:var(--legacy-666);">Loading</div>
+    <div style="display:flex;align-items:center;gap:8px;font-size:11px;color:var(--legacy-666);">
+      <span id="kpi-freshness">-</span>
+      <label style="display:inline-flex;align-items:center;gap:5px;cursor:pointer;" title="Re-pull the figures every 45 seconds, and whenever the board changes">
+        <input type="checkbox" id="kpi-autorefresh" checked style="cursor:pointer;"> Auto-refresh
+      </label>
+      <button class="btn-out" id="kpi-refresh-now" type="button" style="font-size:11px;padding:3px 9px;">Refresh</button>
+    </div>
+  </div>
+  <div id="kpi-status-cards" class="kpi-scroll-x" style="display:grid;grid-template-columns:repeat(8,minmax(160px,1fr));gap:12px;margin-bottom:12px;"></div>
+  <div id="kpi-sla-cards" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;margin-bottom:12px;"></div>
+  <div style="background:var(--white);border:1px solid var(--legacy-d7d7d7);border-radius:14px;padding:12px;box-shadow:0 6px 16px rgba(var(--shadow-rgb), .06);margin-bottom:12px;">
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px;">
+      <div style="font-family:Caladea,serif;font-size:24px;">Overdue right now</div>
+      <div style="font-size:12px;color:var(--legacy-666);">Open tickets past their SLA target, worst first. Measured in the assigned agent's shift time, so breaks and weekends do not count against anyone.</div>
+    </div>
+    <div class="kpi-scroll-x">
+      <table class="kpi-table kpi-table-medium">
+        <thead>
+          <tr style="text-align:left;border-bottom:1px solid var(--legacy-ddd);">
+            <th style="padding:8px 10px;">Ticket</th>
+            <th style="padding:8px 10px;">Company</th>
+            <th style="padding:8px 10px;">Support</th>
+            <th style="padding:8px 10px;">Priority</th>
+            <th style="padding:8px 10px;">Stage</th>
+            <th style="padding:8px 10px;">Target</th>
+            <th style="padding:8px 10px;">Overdue by</th>
+          </tr>
+        </thead>
+        <tbody id="kpi-overdue-rows"></tbody>
+      </table>
+    </div>
+  </div>
+  <div style="background:var(--white);border:1px solid var(--legacy-d7d7d7);border-radius:14px;padding:12px;box-shadow:0 6px 16px rgba(var(--shadow-rgb), .06);margin-bottom:12px;">
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px;">
+      <div style="font-family:Caladea,serif;font-size:24px;">Duplicates excluded</div>
+      <div style="font-size:12px;color:var(--legacy-666);">Tickets marked as repeats of another one. They are left out of every figure above so resolving a copy never reads as work done.</div>
+    </div>
+    <div class="kpi-scroll-x">
+      <table class="kpi-table kpi-table-medium">
+        <thead>
+          <tr style="text-align:left;border-bottom:1px solid var(--legacy-ddd);">
+            <th style="padding:8px 10px;">Ticket</th>
+            <th style="padding:8px 10px;">Company</th>
+            <th style="padding:8px 10px;">Support</th>
+            <th style="padding:8px 10px;">Stage</th>
+            <th style="padding:8px 10px;">Duplicate of</th>
+          </tr>
+        </thead>
+        <tbody id="kpi-duplicate-rows"></tbody>
+      </table>
+    </div>
+  </div>
   <div class="responsive-grid-2">
     <div style="background:var(--white);border:1px solid var(--legacy-d7d7d7);border-radius:14px;padding:12px;box-shadow:0 6px 16px rgba(var(--shadow-rgb), .06);">
       <div style="font-family:Caladea,serif;font-size:24px;margin-bottom:8px;">Tickets by Status</div>
@@ -4140,6 +4192,34 @@ th {
   </div>
 </div>
 
+<!--  Duplicate ticket modal  -->
+<div class="modal-bg" id="dup-modal">
+  <div class="modal" style="max-width:560px;">
+    <div class="modal-head"><h2>Mark as duplicate</h2><button class="modal-close-x" data-close="dup-modal"></button></div>
+    <div style="padding:16px 18px;display:flex;flex-direction:column;gap:12px;overflow-y:auto;flex:1;">
+      <div style="font-size:12px;color:var(--slate-500);line-height:1.4;" id="dup-ticket-title"></div>
+      <div style="font-size:11px;color:var(--slate-500);background:var(--slate-50);border:1px solid var(--slate-200);border-radius:10px;padding:10px;line-height:1.45;">
+        A duplicate stays on the board but stops counting as work: it is left out of resolved counts, throughput and SLA compliance on the KPI dashboard, and off its agent's workload.
+      </div>
+      <div class="form-field">
+        <label>This ticket duplicates</label>
+        <div id="dup-candidates" style="display:flex;flex-direction:column;gap:6px;max-height:230px;overflow-y:auto;"></div>
+      </div>
+      <div class="form-field">
+        <label>Or enter a ticket number</label>
+        <input id="dup-input" class="form-input" type="text" placeholder="e.g. 42 or #0042" style="font-size:14px;font-weight:700;"/>
+        <div style="font-size:10px;color:var(--slate-400);margin-top:3px;">The original ticket this one repeats.</div>
+      </div>
+      <div id="dup-msg" style="font-size:11px;color:var(--red-600);min-height:14px;"></div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn-out" id="dup-unmark" style="color:var(--red-600);border-color:var(--red-300);display:none;">Not a duplicate</button>
+      <button class="btn-out" data-close="dup-modal">Cancel</button>
+      <button class="btn-primary" id="dup-save" type="button">Mark as duplicate</button>
+    </div>
+  </div>
+</div>
+
 <!--  Jira link modal  -->
 <div class="modal-bg" id="jira-modal">
   <div class="modal" style="max-width:380px;">
@@ -4390,6 +4470,14 @@ let ticketCreatedBy={}; // ticketId -> creator's agent code, set once at manual-
 let ticketNumbers={};
 let ticketNumberCounter=0;
 let ticketJira={};   // ticketId  Jira key (e.g. 'QT-1234') | null
+// ticketId -> the ticket id this one duplicates. The same problem reaches the
+// helpdesk twice often enough (a resend, a reply Outlook threads under a fresh
+// conversation, a client writing from two addresses) that clearing the copy by
+// resolving it was quietly inflating every resolved figure on the dashboard.
+// Marking it instead keeps the email on the board but takes it out of the KPIs
+// that measure work done. Written by the server (POST/DELETE
+// /api/tickets/:id/duplicate), never by a board snapshot - see ticketJira.
+let ticketDuplicateOf={};
 let ticketHubspotId={}; // ticketId -> HubSpot ticket ID
 let ticketStageTouchedAt={}; // ticketId -> last stage-change timestamp (ms)
 // ticketId -> last assignment-change timestamp (ms). Stage moves have had this
@@ -4460,8 +4548,14 @@ function isArchivedTicket(id){return !!ticketArchived[id];}
 // leastLoadedSupportAgent() balance on LIFETIME volume instead of current
 // load, so it drove agents to equal all-time totals while their real open
 // counts drifted far apart.
+function isDuplicateTicket(id){return !!String(ticketDuplicateOf[id]||'').trim();}
+function duplicateMasterId(id){return String(ticketDuplicateOf[id]||'').trim()||null;}
 function isOpenWorkloadTicket(id){
   if(ticketCategory[id]==='Spam'||isArchivedTicket(id))return false;
+  // A duplicate is not a second piece of work, so it must not weigh on its
+  // agent's pill or pull auto-assignment toward whoever happens to be holding
+  // the copies.
+  if(isDuplicateTicket(id))return false;
   return normalizeTicketStage(ticketState[id]||'new')!=='res';
 }
 function openWorkloadByAgent(){
@@ -4647,6 +4741,16 @@ async function apiUnlinkJiraTicket(kanbanTicketId){
   const out=await res.json().catch(()=>({}));
   return{ok:res.ok,...out};
 }
+async function apiMarkTicketDuplicate(ticketId,duplicateOf){
+  const res=await fetch(`/api/tickets/${encodeURIComponent(ticketId)}/duplicate`,{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({duplicateOf})});
+  const out=await res.json().catch(()=>({}));
+  return{ok:res.ok,...out};
+}
+async function apiUnmarkTicketDuplicate(ticketId){
+  const res=await fetch(`/api/tickets/${encodeURIComponent(ticketId)}/duplicate`,{method:'DELETE',credentials:'include'});
+  const out=await res.json().catch(()=>({}));
+  return{ok:res.ok,...out};
+}
 async function apiGetJiraIssues(keys){
   const uniq=[...new Set((Array.isArray(keys)?keys:[]).map(k=>String(k||'').trim().toUpperCase()).filter(Boolean))];
   if(!uniq.length)return{connected:jiraConnection.connected,issues:[]};
@@ -4663,7 +4767,7 @@ function buildStatePayload(reason){
   const snapshot={
     allTickets,
     seenIds:Object.keys(seen),
-    ticketState,ticketStageTouchedAt,ticketAssigneeTouchedAt,ticketAssigneeBy,ticketHasNewReply,ticketResolutionMeta,ticketArchived,ticketPriority,ticketCategory,ticketSubtype,ticketAssignee,ticketAssignmentMode,manualSupportOverride,manualCSOverride,ticketCSOwner,ticketComments,ticketClientEmail,ticketCreatedAt,ticketCreatedBy,ticketNumbers,ticketNumberCounter,ticketJira,ticketHubspotId,
+    ticketState,ticketStageTouchedAt,ticketAssigneeTouchedAt,ticketAssigneeBy,ticketHasNewReply,ticketResolutionMeta,ticketArchived,ticketPriority,ticketCategory,ticketSubtype,ticketAssignee,ticketAssignmentMode,manualSupportOverride,manualCSOverride,ticketCSOwner,ticketComments,ticketClientEmail,ticketCreatedAt,ticketCreatedBy,ticketNumbers,ticketNumberCounter,ticketJira,ticketDuplicateOf,ticketHubspotId,
     spamSenders:[...spamSenders],hsCache,domainCompanyCache,readMentions:[...readMentions],jiraAlerts,readJiraAlerts:[...readJiraAlerts],jiraStatusSnapshot,companyCustomProps,companyProfiles,companiesViewType,companyNetworkCache,companyFilters,coOwnerMappings,actionHistory,
     _meta:{clientSavedAt:now,clientVersion:stateVersion,clientId:LIVE_CLIENT_ID}
   };
@@ -4889,6 +4993,12 @@ function mergeDatabaseTickets(dbTickets){
       const jiraKey=canonicalJiraKey(row.jiraTicketKey);
       if(jiraKey)ticketJira[id]=jiraKey;
     }
+    // Additive only. Removals come from loadState, which takes the whole map
+    // from the server: a ticket can be marked before its database row exists
+    // (a freshly polled one is only written on the next board save), and
+    // treating a missing column as "not a duplicate" would erase the marking
+    // in exactly that window.
+    if(row.duplicateOfExternalId)ticketDuplicateOf[id]=String(row.duplicateOfExternalId);
     if(row.hubspotTicketId)ticketHubspotId[id]=row.hubspotTicketId;
     if(Array.isArray(row.comments)){
       ticketComments[id]=row.comments.map(c=>({author:c?.user?.displayName||c?.user?.username||'SYSTEM',text:c?.comment||'',comment:c?.comment||'',tags:Array.isArray(c?.tags)?c.tags:[],ts:c?.createdAt||Date.now(),createdAt:c?.createdAt||new Date().toISOString(),isInternal:c?.isInternal!==false}));
@@ -4921,7 +5031,7 @@ let liveRev=0,liveSource=null,liveReloadTimer=null;
 function liveSyncTargets(){
   return {ticketState,ticketStageTouchedAt,ticketAssigneeTouchedAt,ticketAssignee,ticketCSOwner,ticketAssignmentMode,
     manualSupportOverride,manualCSOverride,ticketPriority,ticketCategory,ticketSubtype,
-    ticketJira,ticketHubspotId,ticketArchived,ticketResolutionMeta,ticketHasNewReply,
+    ticketJira,ticketDuplicateOf,ticketHubspotId,ticketArchived,ticketResolutionMeta,ticketHasNewReply,
     ticketNumbers,ticketComments,ticketCreatedBy};
 }
 function setLiveIndicator(state,detail){
@@ -5099,6 +5209,12 @@ async function loadState(){
   ticketNumberCounter=Math.max(ticketNumberCounter,Number(s.ticketNumberCounter||0),...Object.values(ticketNumbers).map(v=>Number(v)||0),0);
   if(s.ticketJira&&typeof s.ticketJira==='object'){
     Object.entries(s.ticketJira).forEach(([k,v])=>{const jiraKey=canonicalJiraKey(v);if(jiraKey)ticketJira[k]=jiraKey;});
+  }
+  // Server-owned, so the server's answer replaces ours outright rather than
+  // being merged into it - an unmarked duplicate has to be able to disappear.
+  if(s.ticketDuplicateOf&&typeof s.ticketDuplicateOf==='object'){
+    Object.keys(ticketDuplicateOf).forEach(k=>{delete ticketDuplicateOf[k];});
+    Object.entries(s.ticketDuplicateOf).forEach(([k,v])=>{const master=String(v||'').trim();if(master)ticketDuplicateOf[k]=master;});
   }
   if(s.ticketHubspotId)Object.assign(ticketHubspotId,s.ticketHubspotId);
   if(s.spamSenders)spamSenders=new Set(s.spamSenders);
@@ -5290,6 +5406,10 @@ function getSLAStatus(id){
   if(!createdAt)return null;
   const col=normalizeTicketStage(ticketState[id]||'new');
   if(col==='res')return null;
+  // A duplicate has no service commitment of its own - the ticket it
+  // duplicates carries the clock. Counting it again would mean one problem
+  // breaching twice.
+  if(isDuplicateTicket(id))return null;
   const st=SUBTYPE_BY_ID[ticketSubtype[id]||''];
   const createdMs=new Date(createdAt).getTime();
   const wallElapsed=Date.now()-createdMs;
@@ -5559,7 +5679,125 @@ function openJiraSettingsModal(){
   document.getElementById('jira-settings-save').style.display=jiraConnection.canConfigure?'':'none';
   document.getElementById('jira-settings-modal').classList.add('open');
 }
-//  Jira modal 
+// ---------------------------------------------------------------------------
+// Duplicates
+//
+// Marking is manual - only a human can tell "they wrote in twice about the
+// same thing" from "they wrote in twice about two things". The modal does the
+// tedious half: it ranks the likely originals (same client, overlapping
+// subject, nearest in time) so the agent picks rather than hunts for a number.
+// ---------------------------------------------------------------------------
+let dupTicketId=null;
+const DUP_SUBJECT_NOISE=new Set(['re','fw','fwd','the','a','an','and','or','to','for','of','on','in','is','it','my','we','you','your','with','from','please','hello','hi','support','ticket','issue','help']);
+function dupSubjectTokens(text){
+  return new Set(String(text||'').toLowerCase().replace(/[^a-z0-9\s]/g,' ').split(/\s+/)
+    .filter(w=>w.length>2&&!DUP_SUBJECT_NOISE.has(w)));
+}
+function dupSubjectOverlap(a,b){
+  const ta=dupSubjectTokens(a),tb=dupSubjectTokens(b);
+  if(!ta.size||!tb.size)return 0;
+  let shared=0;
+  ta.forEach(w=>{if(tb.has(w))shared++;});
+  return shared/Math.min(ta.size,tb.size);
+}
+// Candidates for what a ticket duplicates: never itself, never another
+// duplicate (that would build a chain nobody can follow), and only tickets
+// that already existed - a ticket cannot duplicate one that arrived later.
+function duplicateCandidates(id){
+  const source=allTickets.find(t=>t.id===id);
+  if(!source)return[];
+  const sourceMs=ticketTimestampMs(source)??Date.now();
+  const sourceEmail=String(ticketClientEmail[id]||source.email?.sender||'').toLowerCase();
+  return allTickets
+    .filter(t=>t.id!==id&&!isDuplicateTicket(t.id)&&ticketCategory[t.id]!=='Spam')
+    .map(t=>{
+      const ms=ticketTimestampMs(t)??0;
+      if(ms>sourceMs)return null;
+      const email=String(ticketClientEmail[t.id]||t.email?.sender||'').toLowerCase();
+      const sameClient=!!email&&email===sourceEmail;
+      const overlap=dupSubjectOverlap(source.email?.subject,t.email?.subject);
+      // Rank by how much evidence there is, then by recency: the copy is
+      // almost always near its original in time.
+      const score=(sameClient?2:0)+overlap*2+(1-Math.min(1,(sourceMs-ms)/(30*86400000)));
+      if(!sameClient&&overlap<0.34)return null;
+      return{t,score,sameClient,overlap,ms};
+    })
+    .filter(Boolean)
+    .sort((a,b)=>b.score-a.score)
+    .slice(0,8);
+}
+function renderDuplicateCandidates(id,selected){
+  const box=document.getElementById('dup-candidates');
+  const rows=duplicateCandidates(id);
+  if(!rows.length){
+    box.innerHTML='<div style="font-size:11px;color:var(--slate-400);">No likely original found - enter the ticket number below.</div>';
+    return;
+  }
+  box.innerHTML=rows.map(r=>{
+    const why=[r.sameClient?'same client':'',r.overlap>=0.34?`${Math.round(r.overlap*100)}% subject match`:''].filter(Boolean).join(' - ');
+    const isSel=String(selected||'')===String(r.t.id);
+    return`<button type="button" class="btn-out" data-dup-pick="${esc(r.t.id)}" style="text-align:left;padding:8px 10px;display:flex;flex-direction:column;gap:2px;${isSel?'border-color:var(--indigo-600);background:var(--indigo-50);':''}">
+      <span style="font-weight:700;font-size:11px;">${esc(ticketDisplayNumber(r.t.id))} - ${esc(r.t.email?.subject||'(no subject)')}</span>
+      <span style="font-size:10px;color:var(--slate-500);">${esc(fmtDate(r.t.email?.receivedDateTime))}${why?' - '+esc(why):''}</span>
+    </button>`;
+  }).join('');
+  box.querySelectorAll('[data-dup-pick]').forEach(btn=>btn.addEventListener('click',()=>{
+    dupSelectedMasterId=btn.dataset.dupPick;
+    document.getElementById('dup-input').value=ticketDisplayNumber(dupSelectedMasterId).replace('#','');
+    renderDuplicateCandidates(id,dupSelectedMasterId);
+  }));
+}
+let dupSelectedMasterId=null;
+// The board's ticket ids are opaque Outlook message ids, so agents refer to
+// tickets by the short display number. Resolve whatever they typed back to an
+// id - "#0042", "42" and a pasted raw id all mean the same ticket.
+function ticketIdFromReference(ref){
+  const raw=String(ref||'').trim();
+  if(!raw)return null;
+  if(allTickets.some(t=>String(t.id)===raw))return raw;
+  const num=Number(raw.replace(/^#/,'').replace(/^0+/,''));
+  if(!Number.isFinite(num)||num<=0)return null;
+  const match=Object.entries(ticketNumbers).find(([,v])=>Number(v)===num);
+  return match?match[0]:null;
+}
+function openDuplicateModal(id){
+  dupTicketId=id;
+  dupSelectedMasterId=duplicateMasterId(id);
+  const ticket=allTickets.find(t=>t.id===id);
+  document.getElementById('dup-ticket-title').textContent=`${ticketDisplayNumber(id)} - ${ticket?.email?.subject||''}`;
+  document.getElementById('dup-msg').textContent='';
+  document.getElementById('dup-input').value=dupSelectedMasterId?ticketDisplayNumber(dupSelectedMasterId).replace('#',''):'';
+  document.getElementById('dup-unmark').style.display=isDuplicateTicket(id)?'':'none';
+  document.getElementById('dup-save').textContent=isDuplicateTicket(id)?'Update duplicate':'Mark as duplicate';
+  renderDuplicateCandidates(id,dupSelectedMasterId);
+  document.getElementById('dup-modal').classList.add('open');
+}
+document.getElementById('dup-save').addEventListener('click',async()=>{
+  if(!dupTicketId)return;
+  const typed=document.getElementById('dup-input').value.trim();
+  const masterId=typed?ticketIdFromReference(typed):dupSelectedMasterId;
+  const msg=document.getElementById('dup-msg');
+  if(!masterId){msg.textContent='No ticket matches that number. Pick one from the list above.';return;}
+  if(String(masterId)===String(dupTicketId)){msg.textContent='A ticket cannot be a duplicate of itself.';return;}
+  const out=await apiMarkTicketDuplicate(dupTicketId,masterId);
+  if(!out?.ok){msg.textContent=`Could not mark as duplicate: ${out?.error||'unknown error'}`;return;}
+  ticketDuplicateOf[dupTicketId]=String(masterId);
+  document.getElementById('dup-modal').classList.remove('open');
+  updateWorkload();renderActiveView();
+  showToast(`Marked as duplicate of ${ticketDisplayNumber(masterId)} - excluded from KPIs`,'ok');
+});
+document.getElementById('dup-unmark').addEventListener('click',async()=>{
+  if(!dupTicketId)return;
+  const out=await apiUnmarkTicketDuplicate(dupTicketId);
+  if(!out?.ok){document.getElementById('dup-msg').textContent=`Could not remove the marking: ${out?.error||'unknown error'}`;return;}
+  delete ticketDuplicateOf[dupTicketId];
+  document.getElementById('dup-modal').classList.remove('open');
+  updateWorkload();renderActiveView();
+  showToast('No longer marked as a duplicate','ok');
+});
+document.getElementById('dup-input').addEventListener('keydown',e=>{if(e.key==='Enter')document.getElementById('dup-save').click();});
+
+//  Jira modal
 function openJiraModal(id){
   jiraTicketId=id;
   const ticket=allTickets.find(t=>t.id===id);
@@ -6332,7 +6570,12 @@ async function renderKpiView(){
     const end=new Date(data.range?.end).toLocaleDateString('en-GB',{day:'2-digit',month:'short',year:'numeric'});
     const teamLabel=kpiTeamFilter==='cs'?'CS only':(kpiTeamFilter==='support'?'Support only':'All CS & Support');
     const agentLabel=kpiAgentFilter==='all'?'All CS & Support':kpiAgentFilter;
-    document.getElementById('kpi-range-label').textContent=`Live DB tickets: ${totals.tickets||0} current (range: ${totals.rangeTickets||0})  ${data.range?.label||'Range'}  ${start} to ${end}  ${teamLabel}  ${agentLabel}`;
+    const sla=data.sla||{};
+    const flow=data.throughput||{};
+    const dupNote=totals.duplicates?`  ${totals.duplicates} duplicate${totals.duplicates>1?'s':''} excluded`:'';
+    document.getElementById('kpi-range-label').textContent=`Live DB tickets: ${totals.tickets||0} current (range: ${totals.rangeTickets||0})${dupNote}  ${data.range?.label||'Range'}  ${start} to ${end}  ${teamLabel}  ${agentLabel}`;
+    kpiLastLoadedAt=Date.now();
+    updateKpiFreshnessLabel();
     document.getElementById('kpi-status-cards').innerHTML=`
       <div style="background:var(--white);border:1px solid var(--legacy-d7d7d7);border-radius:12px;padding:12px;"><div style="font-size:12px;color:var(--legacy-666);">New</div><div style="font-family:Caladea,serif;font-size:30px;">${s.new||0}</div></div>
       <div style="background:var(--white);border:1px solid var(--legacy-d7d7d7);border-radius:12px;padding:12px;"><div style="font-size:12px;color:var(--legacy-666);">In Progress</div><div style="font-family:Caladea,serif;font-size:30px;">${s.inp||0}</div></div>
@@ -6342,6 +6585,40 @@ async function renderKpiView(){
       <div style="background:var(--white);border:1px solid var(--legacy-d7d7d7);border-radius:12px;padding:12px;"><div style="font-size:12px;color:var(--legacy-666);">Resolved</div><div style="font-family:Caladea,serif;font-size:30px;">${s.res||0}</div></div>
       <div style="background:var(--white);border:1px solid var(--legacy-d7d7d7);border-radius:12px;padding:12px;"><div style="font-size:12px;color:var(--legacy-666);">Tickets with CS</div><div style="font-family:Caladea,serif;font-size:30px;">${totals.ticketsWithCs||0}</div></div>
       <div style="background:var(--white);border:1px solid var(--legacy-d7d7d7);border-radius:12px;padding:12px;"><div style="font-size:12px;color:var(--legacy-666);">Jira Linked</div><div style="font-family:Caladea,serif;font-size:30px;">${totals.jiraLinked||0}</div></div>`;
+    const compliance=sla.compliancePct;
+    document.getElementById('kpi-sla-cards').innerHTML=[
+      kpiCard('Overdue now',sla.overdue||0,{tone:(sla.overdue||0)>0?'bad':'good',hint:'Open, past SLA target'}),
+      kpiCard('At risk',sla.atRisk||0,{tone:(sla.atRisk||0)>0?'warn':'',hint:'Under 25% of target left'}),
+      kpiCard('SLA met',compliance===null||compliance===undefined?'-':`${compliance}%`,{
+        tone:compliance===null||compliance===undefined?'':(compliance>=90?'good':compliance>=75?'warn':'bad'),
+        hint:`${sla.met||0} of ${(sla.met||0)+(sla.breached||0)} resolved in range`}),
+      kpiCard('Avg resolve',fmtHours(sla.avgResolveShiftHours),{hint:`Median ${fmtHours(sla.medianResolveShiftHours)} - shift time`}),
+      kpiCard('Oldest open',fmtHours(sla.oldestOpenHours),{hint:'Wall clock since arrival'}),
+      kpiCard('Created',flow.created||0,{hint:'In this range'}),
+      kpiCard('Resolved',flow.resolved||0,{hint:`Net ${(flow.net||0)>0?'+':''}${flow.net||0} vs created`,tone:(flow.net||0)>0?'warn':''}),
+      kpiCard('Reopened',flow.reopened||0,{tone:(flow.reopened||0)>0?'warn':'',hint:'Left Resolved again'}),
+      kpiCard('Duplicates',totals.duplicates||0,{hint:`${totals.duplicatesResolvedInRange||0} resolved in range, not counted`})
+    ].join('');
+    document.getElementById('kpi-overdue-rows').innerHTML=(data.overdueRows||[]).length
+      ?data.overdueRows.map(r=>`<tr style="border-bottom:1px solid var(--legacy-f0f0f0);">
+          <td class="kpi-cell-wide" style="padding:8px 10px;"><strong>${esc(r.ticketNumber||'')}</strong> ${esc(r.subject)}</td>
+          <td style="padding:8px 10px;">${esc(r.company)}</td>
+          <td style="padding:8px 10px;">${esc(r.agent)}</td>
+          <td style="padding:8px 10px;">${esc(r.priority)}</td>
+          <td style="padding:8px 10px;">${esc(COL_NAMES[r.status]||r.status)}</td>
+          <td style="padding:8px 10px;">${esc(fmtHours(r.targetHours))}</td>
+          <td style="padding:8px 10px;color:var(--red-600);font-weight:700;">${esc(fmtHours(r.overdueHours))}</td>
+        </tr>`).join('')
+      :'<tr><td colspan="7" style="padding:12px 10px;color:var(--legacy-666);">Nothing is overdue for this filter.</td></tr>';
+    document.getElementById('kpi-duplicate-rows').innerHTML=(data.duplicateRows||[]).length
+      ?data.duplicateRows.map(r=>`<tr style="border-bottom:1px solid var(--legacy-f0f0f0);">
+          <td class="kpi-cell-wide" style="padding:8px 10px;"><strong>${esc(r.ticketNumber||'')}</strong> ${esc(r.subject)}</td>
+          <td style="padding:8px 10px;">${esc(r.company)}</td>
+          <td style="padding:8px 10px;">${esc(r.agent)}</td>
+          <td style="padding:8px 10px;">${esc(COL_NAMES[r.status]||r.status)}</td>
+          <td style="padding:8px 10px;">${esc(r.duplicateOf?ticketDisplayNumber(r.duplicateOf):'-')}</td>
+        </tr>`).join('')
+      :'<tr><td colspan="5" style="padding:12px 10px;color:var(--legacy-666);">No duplicates marked in this range.</td></tr>';
     const maxStatus=Math.max(1,s.new||0,s.inp||0,s.wus||0,s.dft||0,s.wct||0,s.res||0);
     document.getElementById('kpi-status-chart').innerHTML=renderSimpleKpiRows([{label:'New',count:s.new||0},{label:'In Progress',count:s.inp||0},{label:'Waiting On Us',count:s.wus||0},{label:'Due for test',count:s.dft||0},{label:'Waiting On Contact',count:s.wct||0},{label:'Resolved',count:s.res||0}], 'label', 'count').replaceAll('background:var(--teal-700)','background:var(--blue-500)');
     const rows=data.agentRows||[];
@@ -6384,8 +6661,12 @@ function renderKpiViewLocal(){
     if(activeCompany==='all')return true;
     return companyForTicket(t)===activeCompany;
   };
+  // Duplicates are held out here exactly as the server holds them out, so the
+  // offline fallback can't quietly report a different, friendlier number than
+  // the live dashboard.
+  const duplicatesInView=allTickets.filter(t=>isDuplicateTicket(t.id)&&ticketCategory[t.id]!=='Spam'&&!isArchivedTicket(t.id));
   const inRange=allTickets
-    .filter(t=>ticketCategory[t.id]!=='Spam'&&!isArchivedTicket(t.id))
+    .filter(t=>ticketCategory[t.id]!=='Spam'&&!isArchivedTicket(t.id)&&!isDuplicateTicket(t.id))
     .filter(t=>{const ms=ticketTimestampMs(t);return ms!==null&&ms>=bounds.start&&ms<=bounds.end;})
     .filter(ticketMatchesCompany)
     .filter(t=>!activeJira||!!ticketJira[t.id])
@@ -6437,7 +6718,39 @@ function renderKpiViewLocal(){
   document.getElementById('kpi-team-filter').value=kpiTeamFilter;
   const teamLabel=kpiTeamFilter==='cs'?'CS only':(kpiTeamFilter==='support'?'Support only':'All CS & Support');
   const agentLabel=kpiAgentFilter==='all'?'All CS & Support':kpiAgentFilter;
-  document.getElementById('kpi-range-label').textContent=`Tickets considered: ${inRange.length} (non-spam)  ${fmtKpiRangeLabel(kpiTimeFilter,bounds)}  ${teamLabel}  ${agentLabel}`;
+  document.getElementById('kpi-range-label').textContent=`Tickets considered: ${inRange.length} (non-spam, ${duplicatesInView.length} duplicate${duplicatesInView.length===1?'':'s'} excluded)  ${fmtKpiRangeLabel(kpiTimeFilter,bounds)}  ${teamLabel}  ${agentLabel}`;
+  // Same SLA clock the board's badges use, aggregated. Open tickets only -
+  // getSLAStatus deliberately has nothing to say about a resolved one.
+  const openLocal=allTickets.filter(t=>ticketCategory[t.id]!=='Spam'&&!isArchivedTicket(t.id)&&!isDuplicateTicket(t.id)&&normalizeTicketStage(ticketState[t.id]||'new')!=='res'&&ticketVisibleToCurrentUser(t)&&ticketMatchesAgentFilter(t,kpiAgentFilter));
+  const localSla=openLocal.map(t=>({t,status:getSLAStatus(t.id)})).filter(x=>x.status);
+  const localOverdue=localSla.filter(x=>x.status.overdue);
+  const localAtRisk=localSla.filter(x=>!x.status.overdue&&x.status.cls==='sla-urgent');
+  document.getElementById('kpi-sla-cards').innerHTML=[
+    kpiCard('Overdue now',localOverdue.length,{tone:localOverdue.length?'bad':'good',hint:'Open, past SLA target'}),
+    kpiCard('At risk',localAtRisk.length,{tone:localAtRisk.length?'warn':'',hint:'Under 25% of target left'}),
+    kpiCard('Open tickets',openLocal.length,{hint:'Excluding duplicates'}),
+    kpiCard('Duplicates',duplicatesInView.length,{hint:'Excluded from every figure'})
+  ].join('');
+  document.getElementById('kpi-overdue-rows').innerHTML=localOverdue.length
+    ?localOverdue.sort((a,b)=>(b.status.shiftMs||0)-(a.status.shiftMs||0)).slice(0,25).map(({t,status})=>`<tr style="border-bottom:1px solid var(--legacy-f0f0f0);">
+        <td class="kpi-cell-wide" style="padding:8px 10px;"><strong>${esc(ticketDisplayNumber(t.id))}</strong> ${esc(t.email?.subject||'(no subject)')}</td>
+        <td style="padding:8px 10px;">${esc(companyForTicket(t)||'Unknown')}</td>
+        <td style="padding:8px 10px;">${esc(ticketAssignee[t.id]||'Unassigned')}</td>
+        <td style="padding:8px 10px;">${esc(ticketPriority[t.id]||t.priority||'Normal')}</td>
+        <td style="padding:8px 10px;">${esc(COL_NAMES[normalizeTicketStage(ticketState[t.id]||'new')]||'')}</td>
+        <td style="padding:8px 10px;">-</td>
+        <td style="padding:8px 10px;color:var(--red-600);font-weight:700;">${esc(status.text)}</td>
+      </tr>`).join('')
+    :'<tr><td colspan="7" style="padding:12px 10px;color:var(--legacy-666);">Nothing is overdue for this filter.</td></tr>';
+  document.getElementById('kpi-duplicate-rows').innerHTML=duplicatesInView.length
+    ?duplicatesInView.slice(0,25).map(t=>`<tr style="border-bottom:1px solid var(--legacy-f0f0f0);">
+        <td class="kpi-cell-wide" style="padding:8px 10px;"><strong>${esc(ticketDisplayNumber(t.id))}</strong> ${esc(t.email?.subject||'(no subject)')}</td>
+        <td style="padding:8px 10px;">${esc(companyForTicket(t)||'Unknown')}</td>
+        <td style="padding:8px 10px;">${esc(ticketAssignee[t.id]||'Unassigned')}</td>
+        <td style="padding:8px 10px;">${esc(COL_NAMES[normalizeTicketStage(ticketState[t.id]||'new')]||'')}</td>
+        <td style="padding:8px 10px;">${esc(ticketDisplayNumber(duplicateMasterId(t.id)))}</td>
+      </tr>`).join('')
+    :'<tr><td colspan="5" style="padding:12px 10px;color:var(--legacy-666);">No duplicates marked.</td></tr>';
   document.getElementById('kpi-status-cards').innerHTML=`
     <div style="background:var(--white);border:1px solid var(--legacy-d7d7d7);border-radius:12px;padding:12px;"><div style="font-size:12px;color:var(--legacy-666);">New</div><div style="font-family:Caladea,serif;font-size:30px;">${statusCounts.new}</div></div>
     <div style="background:var(--white);border:1px solid var(--legacy-d7d7d7);border-radius:12px;padding:12px;"><div style="font-size:12px;color:var(--legacy-666);">In Progress</div><div style="font-family:Caladea,serif;font-size:30px;">${statusCounts.inp}</div></div>
@@ -7483,20 +7796,22 @@ function makeCard(ticket,isNew=false){
       <button class="com-btn${comments.length?' has-comments':''}" data-inline-toggle="${id}">${unreadMentions?`&#128276; `:''}Notes${comments.length?` <span class="com-badge">${comments.length}</span>`:''}</button>
     </div>
     <div class="card-row1">
-      <div class="card-title">${ticket.isManual?'<span class="manual-badge">Manual</span> ':''}${esc(email.subject||'(no subject)')}</div>
+      <div class="card-title">${ticket.isManual?'<span class="manual-badge">Manual</span> ':''}${esc(trView?trView.subject:(email.subject||'(no subject)'))}</div>
       <button class="pbadge pb-${priority}" data-pr="${id}">${priority}</button>
     </div>
-    <div class="card-summary">${esc(email.summary||'No preview.')}</div>
+    <div class="card-summary">${esc(trView?trView.summary:(email.summary||'No preview.'))}</div>
     <div class="card-controls"><select class="cat-select" data-cat="${id}">${catOpts}</select><select class="cat-select" data-sub="${id}">${subOpts||'<option value="">No subtype</option>'}</select></div>
-    ${slaBadgeHtml}${hsHtml}${jiraDetailsHtml}${resolvedHtml}
+    ${trBannerHtml}${dupBadgeHtml}${slaBadgeHtml}${hsHtml}${jiraDetailsHtml}${resolvedHtml}
     <div class="card-footer">
       ${senderHtml}
       <div class="card-actions">
         <span class="card-date">${fmtDate(email.receivedDateTime)}</span>
         ${jiraBtn}
         ${hsTicketBtn}
+        ${trControlsHtml}
         <button class="open-email-btn" data-oe="${id}"> Open</button>
         ${canEditManual?`<button class="btn-out" data-edit-manual="${id}" title="Edit this manual ticket" style="font-size:10px;padding:2px 7px;"> Edit</button>`:''}
+        ${dupMasterId?'':`<button class="btn-out" data-dup-open="${id}" title="Mark this ticket as a duplicate of another one" style="font-size:10px;padding:2px 7px;">Duplicate</button>`}
         <button class="btn-out" data-archive="${id}" title="Archive this ticket" style="font-size:10px;padding:2px 7px;"> Archive</button>
         <div class="agent-assign-wrap" data-agent-menu="${id}">
           <button class="agent-assign-trigger" type="button" data-agent-trigger="${id}" title="${canAssign ? 'Assign support agent' : 'Only admins and the ticket CS can change support assignment'}"${canAssign ? '' : ' disabled'}>
