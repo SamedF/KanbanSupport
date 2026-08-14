@@ -32,16 +32,30 @@ Open:
 
 ## Ticket translation
 
-The translate button on a ticket runs through a provider layer, so the engine is
-a deployment choice rather than something baked into the app. Set
-`TRANSLATE_PROVIDER` to pin one, or leave it at `auto` to take the first engine
-that is configured, in this order: `libretranslate`, `anthropic`, `mymemory`.
+**It works with no configuration at all.** With no key, no container and nothing
+in `.env`, the button translates: two free public engines are in the chain by
+default. Everything below is about making it faster, private, or better.
+
+The engine runs behind a provider layer. Set `TRANSLATE_PROVIDER` to pin one, or
+leave it at `auto` — which tries each configured engine in order and falls
+through to the next when one is down, out of quota, or cannot handle the
+language. Four separate services have four separate ways of being unavailable,
+and an agent looking at a French ticket does not care which one answers.
 
 | Provider | Cost | Where ticket text goes | Configure with |
 | --- | --- | --- | --- |
 | `libretranslate` | free | your own server | `LIBRETRANSLATE_URL`, optional `LIBRETRANSLATE_API_KEY` |
 | `anthropic` | per call | Anthropic | `ANTHROPIC_API_KEY`, optional `TRANSLATE_MODEL` |
 | `mymemory` | free | MyMemory, a public service | nothing; `MYMEMORY_EMAIL` raises the daily allowance, `MYMEMORY_URL=off` disables it |
+| `libretranslate-public` | free | a volunteer-run public instance | nothing; `TRANSLATE_PUBLIC_FALLBACK=off` disables it, or set it to your preferred instance |
+
+That is also the auto order. The two public engines sit last so they are only
+reached when nothing better is set up, and they complement each other: MyMemory
+cannot be asked to detect a language, so a bare subject like "Annulation" goes
+to the public LibreTranslate, which can.
+
+To keep ticket text off public services entirely, set both `MYMEMORY_URL=off`
+and `TRANSLATE_PUBLIC_FALLBACK=off`, then configure one of the top two.
 
 Translations are cached per ticket, target language and exact source text, and
 the cache is shared across agents, so the second person to open the same French

@@ -5975,7 +5975,7 @@ const TRANSLATE_PROVIDER = String(process.env.TRANSLATE_PROVIDER || 'auto').trim
 // the public free service. MyMemory is last on purpose: it is the only entry
 // that needs no configuration at all, so anywhere earlier it would quietly
 // become the default on every install.
-const TRANSLATE_AUTO_ORDER = ['libretranslate', 'anthropic', 'mymemory'];
+const TRANSLATE_AUTO_ORDER = ['libretranslate', 'anthropic', 'mymemory', 'libretranslate-public'];
 // Every outbound call from the HTTP providers is bounded. A translation runs
 // while an agent watches a spinner, so a hung upstream has to fail, not hang.
 const TRANSLATE_HTTP_TIMEOUT_MS = Number(process.env.TRANSLATE_HTTP_TIMEOUT_MS || 20_000);
@@ -6219,6 +6219,23 @@ const DETECT_STOPWORDS = {
   hu: ['és', 'nem', 'hogy', 'van', 'egy', 'köszönöm', 'kérem', 'vagy', 'ezt', 'meg', 'lehet'],
   id: ['yang', 'dan', 'tidak', 'untuk', 'dengan', 'ini', 'saya', 'kami', 'terima', 'kasih', 'atau', 'sudah']
 };
+// Subject lines are the hard case: "Annulation" and "Fattura errata" carry no
+// function words at all, and a card only sends a subject and a one-line
+// preview. These are the words this inbox actually receives, and they are
+// distinctive enough to decide a language on their own, so they score higher
+// than a stopword.
+const DETECT_CONTENT_WORDS = {
+  fr: ['annulation', 'annuler', 'reservation', 'facture', 'remboursement', 'chambre', 'sejour', 'séjour', 'arrivee', 'arrivée', 'depart', 'départ', 'paiement', 'probleme', 'problème', 'demande', 'disponibilite', 'disponibilité', 'reclamation', 'réclamation'],
+  es: ['cancelacion', 'cancelación', 'cancelar', 'reserva', 'factura', 'reembolso', 'habitacion', 'habitación', 'estancia', 'llegada', 'salida', 'pago', 'problema', 'consulta', 'disponibilidad', 'queja'],
+  de: ['stornierung', 'stornieren', 'buchung', 'rechnung', 'erstattung', 'zimmer', 'aufenthalt', 'anreise', 'abreise', 'zahlung', 'anfrage', 'verfuegbarkeit', 'verfügbarkeit', 'beschwerde'],
+  it: ['cancellazione', 'annullamento', 'prenotazione', 'fattura', 'rimborso', 'camera', 'soggiorno', 'arrivo', 'partenza', 'pagamento', 'problema', 'richiesta', 'disponibilita', 'disponibilità', 'reclamo'],
+  pt: ['cancelamento', 'cancelar', 'reserva', 'fatura', 'reembolso', 'quarto', 'estadia', 'chegada', 'partida', 'pagamento', 'problema', 'pedido', 'disponibilidade', 'reclamacao', 'reclamação'],
+  nl: ['annulering', 'annuleren', 'boeking', 'factuur', 'terugbetaling', 'kamer', 'verblijf', 'aankomst', 'vertrek', 'betaling', 'probleem', 'aanvraag', 'beschikbaarheid', 'klacht'],
+  pl: ['anulowanie', 'rezerwacja', 'faktura', 'zwrot', 'pokoj', 'pokój', 'pobyt', 'przyjazd', 'wyjazd', 'platnosc', 'płatność', 'problem', 'zapytanie', 'reklamacja'],
+  tr: ['iptal', 'rezervasyon', 'fatura', 'iade', 'oda', 'konaklama', 'varis', 'varış', 'odeme', 'ödeme', 'sorun', 'talep', 'musaitlik', 'müsaitlik', 'sikayet', 'şikayet'],
+  ro: ['anulare', 'rezervare', 'factura', 'factură', 'rambursare', 'camera', 'cameră', 'sejur', 'sosire', 'plecare', 'plata', 'plată', 'problema', 'problemă', 'cerere', 'reclamatie', 'reclamație'],
+  en: ['cancellation', 'cancel', 'booking', 'invoice', 'refund', 'room', 'stay', 'arrival', 'departure', 'payment', 'issue', 'request', 'availability', 'complaint']
+};
 // Characters that only a couple of these languages use. Weighted lower than a
 // stopword hit - one stray "ü" in a name should not outvote a sentence.
 const DETECT_CHAR_HINTS = [
@@ -6259,6 +6276,11 @@ function detectLanguageCode(text) {
     for (const [code, list] of Object.entries(DETECT_STOPWORDS)) {
       if (list.includes(word)) bump(code, 1);
     }
+    // Worth the threshold on its own: one of these in a subject line is a
+    // stronger signal than several function words in a sentence.
+    for (const [code, list] of Object.entries(DETECT_CONTENT_WORDS)) {
+      if (list.includes(word)) bump(code, 2);
+    }
   }
   for (const { code, re } of DETECT_CHAR_HINTS) {
     re.lastIndex = 0;
@@ -6296,10 +6318,10 @@ function libreCode(code) {
   return LIBRETRANSLATE_CODES[lower] || lower.split('-')[0];
 }
 
-async function libreTranslateBatch(targetCode, batch) {
+async function libreTranslateBatch(endpoint, apiKey, targetCode, batch) {
   let res;
   try {
-    res = await fetch(`${LIBRETRANSLATE_URL}/translate`, {
+    res = await fetch(`${endpoint}/translate`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -6307,12 +6329,12 @@ async function libreTranslateBatch(targetCode, batch) {
         source: 'auto',
         target: targetCode,
         format: 'text',
-        ...(LIBRETRANSLATE_API_KEY ? { api_key: LIBRETRANSLATE_API_KEY } : {})
+        ...(apiKey ? { api_key: apiKey } : {})
       }),
       signal: AbortSignal.timeout(TRANSLATE_HTTP_TIMEOUT_MS)
     });
   } catch (error) {
-    throw translationError('unreachable', `Could not reach LibreTranslate at ${LIBRETRANSLATE_URL}: ${error?.message || error}`);
+    throw translationError('unreachable', `Could not reach LibreTranslate at ${endpoint}: ${error?.message || error}`);
   }
 
   if (!res.ok) {
@@ -6356,31 +6378,72 @@ async function libreTranslateBatch(targetCode, batch) {
   return { segments: out, sourceLang: sourceLang ? (LIBRETRANSLATE_CODES_REVERSE[sourceLang] || sourceLang) : null };
 }
 
-const libreTranslateProvider = {
+function makeLibreProvider({ id, label, url, apiKey = '', thirdParty = false, selfHosted = false, setupHint = '' }) {
+  return {
+    id,
+    label,
+    free: true,
+    selfHosted,
+    thirdParty,
+    configured: () => !!(typeof url === 'function' ? url() : url),
+    describe: () => (typeof url === 'function' ? url() : url),
+    setupHint,
+    async translate({ targetLang, segments }) {
+      const endpoint = typeof url === 'function' ? url() : url;
+      const key = typeof apiKey === 'function' ? apiKey() : apiKey;
+      const targetCode = libreCode(targetLang);
+      const merged = {};
+      let sourceLang = null;
+      let requests = 0;
+      // Sequential: an instance is usually one process on one box, and a burst
+      // of parallel batches just queues there while raising the odds of a
+      // timeout on the one an agent is waiting for.
+      for (const batch of batchSegments(segments, LIBRETRANSLATE_BATCH_CHARS, LIBRETRANSLATE_BATCH_SEGMENTS)) {
+        const result = await libreTranslateBatch(endpoint, key, targetCode, batch);
+        Object.assign(merged, result.segments);
+        if (!sourceLang && result.sourceLang) sourceLang = result.sourceLang;
+        requests++;
+      }
+      return { segments: merged, sourceLang, usage: { requests, engine: id } };
+    }
+  };
+}
+
+const libreTranslateProvider = makeLibreProvider({
   id: 'libretranslate',
   label: 'LibreTranslate',
-  free: true,
+  url: () => LIBRETRANSLATE_URL,
+  apiKey: () => LIBRETRANSLATE_API_KEY,
   selfHosted: true,
-  configured: () => !!LIBRETRANSLATE_URL,
-  describe: () => LIBRETRANSLATE_URL,
-  setupHint: 'Set LIBRETRANSLATE_URL to a LibreTranslate instance (see docker/libretranslate.compose.yml) and restart.',
-  async translate({ targetLang, segments }) {
-    const targetCode = libreCode(targetLang);
-    const merged = {};
-    let sourceLang = null;
-    let requests = 0;
-    // Sequential: a self-hosted instance is usually one process on one box, and
-    // a burst of parallel batches just queues there while raising the odds of a
-    // timeout on the one an agent is waiting for.
-    for (const batch of batchSegments(segments, LIBRETRANSLATE_BATCH_CHARS, LIBRETRANSLATE_BATCH_SEGMENTS)) {
-      const result = await libreTranslateBatch(targetCode, batch);
-      Object.assign(merged, result.segments);
-      if (!sourceLang && result.sourceLang) sourceLang = result.sourceLang;
-      requests++;
-    }
-    return { segments: merged, sourceLang, usage: { requests, engine: 'libretranslate' } };
-  }
-};
+  setupHint: 'Set LIBRETRANSLATE_URL to a LibreTranslate instance (see docker/libretranslate.compose.yml) and restart.'
+});
+
+// A public LibreTranslate instance, used only when nothing at all is
+// configured. It exists so the button works on a checkout with no key, no
+// container and no environment: MyMemory cannot be told "detect the language
+// for me", and a one-word subject like "Annulation" is not enough for our own
+// detector, so without an engine that autodetects those tickets simply refuse
+// to translate.
+//
+// It is a volunteer-run service. Do not rely on it in production - stand up
+// docker/libretranslate.compose.yml and set LIBRETRANSLATE_URL, which is both
+// faster and keeps ticket text on our own infrastructure. Set
+// TRANSLATE_PUBLIC_FALLBACK=off to refuse it outright.
+const TRANSLATE_PUBLIC_FALLBACK = (() => {
+  const raw = process.env.TRANSLATE_PUBLIC_FALLBACK;
+  if (raw === undefined) return 'https://translate.disroot.org';
+  const value = String(raw).trim();
+  if (!value || /^(off|none|false|0|disabled)$/i.test(value)) return '';
+  return value.replace(/\/+$/, '');
+})();
+
+const librePublicProvider = makeLibreProvider({
+  id: 'libretranslate-public',
+  label: 'LibreTranslate (public instance)',
+  url: () => TRANSLATE_PUBLIC_FALLBACK,
+  thirdParty: true,
+  setupHint: 'Set TRANSLATE_PUBLIC_FALLBACK to a public LibreTranslate instance, or configure your own with LIBRETRANSLATE_URL.'
+});
 
 // ------------------------------------------------------------ MyMemory provider
 
@@ -6734,23 +6797,31 @@ const anthropicProvider = {
 
 const TRANSLATE_PROVIDERS = {
   libretranslate: libreTranslateProvider,
+  'libretranslate-public': librePublicProvider,
   mymemory: myMemoryProvider,
   anthropic: anthropicProvider
 };
 
-// The provider in force, or null when nothing is usable. Resolved per request
-// rather than once at boot so that rotating a key or standing up a
-// LibreTranslate instance takes effect without a restart.
-function activeProvider() {
+// Every engine that could serve this request, best first. In auto mode this is
+// a chain rather than a single choice: these are four separate services with
+// four separate ways of being down, and an agent looking at a French ticket
+// does not care which one answers.
+function translationChain() {
   if (TRANSLATE_PROVIDER !== 'auto') {
     const pinned = TRANSLATE_PROVIDERS[TRANSLATE_PROVIDER];
-    return pinned && pinned.configured() ? pinned : null;
+    // Pinned means pinned. Someone who named an engine does not want a
+    // different one silently substituted.
+    return pinned && pinned.configured() ? [pinned] : [];
   }
-  for (const id of TRANSLATE_AUTO_ORDER) {
-    const provider = TRANSLATE_PROVIDERS[id];
-    if (provider && provider.configured()) return provider;
-  }
-  return null;
+  return TRANSLATE_AUTO_ORDER
+    .map(id => TRANSLATE_PROVIDERS[id])
+    .filter(provider => provider && provider.configured());
+}
+
+// The engine that will be tried first, or null when nothing is usable. Used for
+// display and for the cache key.
+function activeProvider() {
+  return translationChain()[0] || null;
 }
 
 function translationConfigured() { return !!activeProvider(); }
@@ -6765,11 +6836,47 @@ function translationSetupHint() {
   return `No translation provider is configured. ${libreTranslateProvider.setupHint}`;
 }
 
-async function runTranslation({ targetLang, targetName, segments }) {
-  const provider = activeProvider();
-  if (!provider) throw translationError('not_configured', translationSetupHint());
+// Failures worth trying the next engine for: this one is down, out of quota,
+// rate limited, missing a language package, or cannot identify the source. An
+// engine that came back with a usable answer, or refused on content grounds,
+// is not retried elsewhere - that would just spend a second service's quota to
+// get the same answer.
+const TRANSLATE_FAILOVER_CODES = new Set([
+  'unreachable', 'rate_limited', 'quota_exhausted', 'target_unsupported',
+  'source_undetected', 'provider_error', 'unparseable', 'auth_failed', 'not_configured'
+]);
 
-  const result = await provider.translate({ targetLang, targetName, segments });
+async function runTranslation({ targetLang, targetName, segments }) {
+  const chain = translationChain();
+  if (!chain.length) throw translationError('not_configured', translationSetupHint());
+
+  let provider = null;
+  let result = null;
+  let lastError = null;
+  const tried = [];
+  for (const candidate of chain) {
+    try {
+      result = await candidate.translate({ targetLang, targetName, segments });
+      provider = candidate;
+      break;
+    } catch (error) {
+      lastError = error;
+      tried.push(`${candidate.id}: ${error?.translationCode || error?.message || 'failed'}`);
+      const code = error?.translationCode
+        || (error instanceof Anthropic.RateLimitError && 'rate_limited')
+        || (error instanceof Anthropic.APIConnectionError && 'unreachable')
+        || (error instanceof Anthropic.AuthenticationError && 'auth_failed');
+      if (!TRANSLATE_FAILOVER_CODES.has(code)) throw error;
+      console.warn(`Translation via ${candidate.id} failed (${code}); trying the next engine.`);
+    }
+  }
+  // Every engine failed. Report the last one's error, but say what else was
+  // tried so the log explains a failure that looks like "translation is broken"
+  // when it is really four separate services being unavailable.
+  if (!provider) {
+    if (tried.length > 1) console.error('Translation failed on every engine:', tried.join(' | '));
+    throw lastError;
+  }
 
   // A segment the engine failed to return falls back to its original text, so a
   // partial response degrades to "this line is untranslated" rather than to a
