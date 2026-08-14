@@ -5646,6 +5646,9 @@ app.post('/api/qt-detect', requireAdmin, async (req, res) => {
 });
 
 app.use('/qt-seize', requireAuth, express.static(path.join(__dirname, 'public', 'qt-seize')));
+app.get('/assets/vendor/xlsx.full.min.js', requireAuth, (req, res) => {
+  res.sendFile(path.join(__dirname, 'node_modules', 'xlsx', 'dist', 'xlsx.full.min.js'));
+});
 app.use('/assets', requireAuth, express.static(path.join(__dirname, 'public')));
 // index.html carries the entire app - all CSS and all JS are inline - so a
 // cached copy means a browser can keep rendering an old build indefinitely

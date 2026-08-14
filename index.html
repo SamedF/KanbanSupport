@@ -3947,9 +3947,16 @@ th {
         <textarea id="qt-detect-urls" class="qt-detect-textarea" spellcheck="false"
           placeholder="hotel-example.com&#10;https://another-hotel.fr&#10;www.third-hotel.es"></textarea>
         <div class="qt-detect-controls">
+          <input id="qt-detect-file" class="qt-detect-file" type="file" accept=".csv,.tsv,.txt,.xls,.xlsx,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv,text/tab-separated-values">
+          <button class="btn-out" id="qt-detect-import" type="button">Upload file</button>
           <button class="btn-primary" id="qt-detect-run" type="button">Check sites</button>
           <button class="btn-out" id="qt-detect-clear" type="button">Clear</button>
-          <button class="btn-out" id="qt-detect-export" type="button" disabled>Export CSV</button>
+          <select class="qt-detect-select" id="qt-detect-export-format" aria-label="Export format">
+            <option value="csv">CSV</option>
+            <option value="tsv">TSV</option>
+            <option value="xlsx">Excel</option>
+          </select>
+          <button class="btn-out" id="qt-detect-export" type="button" disabled>Export</button>
           <span class="qt-detect-status" id="qt-detect-status">Paste URLs to begin.</span>
         </div>
       </div>
@@ -4192,6 +4199,7 @@ th {
   </div>
 </div>
 
+<script src="/assets/vendor/xlsx.full.min.js"></script>
 <script>
 if(window.location.protocol==='file:'){
   document.body.innerHTML='<div style="font-family:Segoe UI,Arial,sans-serif;padding:32px;color:var(--slate-800)"><h2 style="margin:0 0 10px">Run Via Web Server</h2><p style="margin:0 0 10px">This Kanban must be opened from <strong>http://localhost:3000</strong>, not as a local file.</p><p style="margin:0">Close this tab and open: <a href="http://localhost:3000">http://localhost:3000</a></p></div>';
@@ -6033,19 +6041,69 @@ async function qtDetectRun(){
     qtDetectBusy=false;btn.disabled=false;
   }
 }
-function qtDetectExportCsv(){
-  if(!qtDetectRows.length)return;
-  const esc2=v=>`"${String(v==null?'':v).replace(/"/g,'""')}"`;
-  const lines=[['url','final_url','quicktext_installed','confidence','marker','via','script_src','http_status','status','error','ms']
-    .map(esc2).join(',')];
-  qtDetectRows.forEach(r=>lines.push([r.input,r.finalUrl||r.url||'',r.detected?'yes':'no',r.confidence||'',
-    r.marker||'',r.via||'',r.src||'',r.httpStatus||'',r.status||'',r.error||'',r.ms==null?'':r.ms].map(esc2).join(',')));
-  const blob=new Blob(['﻿'+lines.join('\r\n')],{type:'text/csv;charset=utf-8;'});
+function qtDetectExportRows(){
+  return [
+    ['url','final_url','quicktext_installed','confidence','marker','via','script_src','http_status','status','error','ms'],
+    ...qtDetectRows.map(r=>[r.input,r.finalUrl||r.url||'',r.detected?'yes':'no',r.confidence||'',
+      r.marker||'',r.via||'',r.src||'',r.httpStatus||'',r.status||'',r.error||'',r.ms==null?'':r.ms])
+  ];
+}
+function qtDetectDownload(blob,filename){
   const a=document.createElement('a');
   a.href=URL.createObjectURL(blob);
-  a.download=`quicktext-detection-${new Date().toISOString().slice(0,10)}.csv`;
+  a.download=filename;
   document.body.appendChild(a);a.click();
   setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove();},0);
+}
+function qtDetectExport(){
+  if(!qtDetectRows.length)return;
+  const rows=qtDetectExportRows(),fmt=document.getElementById('qt-detect-export-format')?.value||'csv';
+  const stamp=new Date().toISOString().slice(0,10);
+  if(fmt==='xlsx'){
+    if(window.XLSX){
+      const wb=XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet(rows),'QT Detect');
+      XLSX.writeFile(wb,`quicktext-detection-${stamp}.xlsx`);
+      return;
+    }
+    const htmlRows=rows.map(row=>'<tr>'+row.map(v=>`<td>${esc(v==null?'':v)}</td>`).join('')+'</tr>').join('');
+    qtDetectDownload(new Blob([`<!doctype html><meta charset="utf-8"><table>${htmlRows}</table>`],
+      {type:'application/vnd.ms-excel;charset=utf-8;'}),`quicktext-detection-${stamp}.xls`);
+    return;
+  }
+  const delimiter=fmt==='tsv'?'\t':',';
+  const esc2=v=>`"${String(v==null?'':v).replace(/"/g,'""')}"`;
+  const lines=rows.map(row=>row.map(esc2).join(delimiter));
+  qtDetectDownload(new Blob(['\uFEFF'+lines.join('\r\n')],{type:(fmt==='tsv'?'text/tab-separated-values':'text/csv')+';charset=utf-8;'}),
+    `quicktext-detection-${stamp}.${fmt}`);
+}
+async function qtDetectImportFile(file){
+  if(!file)return;
+  const name=String(file.name||'').toLowerCase();
+  qtDetectSetStatus(`Reading ${file.name}...`);
+  try{
+    let urls=[];
+    if((name.endsWith('.xls')||name.endsWith('.xlsx'))&&window.XLSX){
+      const data=await file.arrayBuffer();
+      const wb=XLSX.read(data,{type:'array'});
+      const first=wb.SheetNames[0];
+      urls=first?qtDetectUrlsFromTable(XLSX.utils.sheet_to_json(wb.Sheets[first],{header:1,raw:false,defval:''})):[];
+    }else{
+      const text=await file.text();
+      if(name.endsWith('.csv'))urls=qtDetectUrlsFromTable(qtDetectParseDelimited(text,','));
+      else if(name.endsWith('.tsv'))urls=qtDetectUrlsFromTable(qtDetectParseDelimited(text,'\t'));
+      else if(name.endsWith('.xls')||name.endsWith('.xlsx'))urls=qtDetectExtractUrlsFromSpreadsheetText(text);
+      else urls=qtDetectParseUrls(text);
+    }
+    if(!urls.length){qtDetectSetStatus('No URL column found in that file.');return;}
+    const textarea=document.getElementById('qt-detect-urls');
+    const existing=qtDetectParseUrls(textarea.value);
+    const merged=[...new Set([...existing,...urls])];
+    textarea.value=merged.join('\n');
+    qtDetectSetStatus(`Loaded ${urls.length} URL${urls.length>1?'s':''} from ${file.name}. Review, then check sites.`);
+  }catch(e){
+    qtDetectSetStatus('Upload failed: '+String(e?.message||e));
+  }
 }
 function renderActiveView(){if(viewMode==='board')renderBoard();else if(viewMode==='spam')renderSpamView();else if(viewMode==='archive')renderArchiveView();else if(viewMode==='kpi')renderKpiView();else if(viewMode==='assignlog')renderAssignLogView();else if(viewMode==='qtSeize')return;else renderCompaniesView();}
 
