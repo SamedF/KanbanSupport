@@ -8895,17 +8895,25 @@ function handleTicketDeepLink(){
 }
 function renderEmailBodyWithImages(body,images){
   const list=Array.isArray(images)?images:[];
-  const inlineByCid=new Map(list.filter(x=>x.isInline&&x.contentId&&x.dataUrl).map(x=>[String(x.contentId).replace(/^<|>$/g,'').toLowerCase(),x]));
+  // Keyed on contentId alone, not on isInline: what decides whether an image
+  // belongs in the body is the body referencing its cid, and Outlook does send
+  // cid-referenced images with isInline unset.
+  const inlineByCid=new Map(list.filter(x=>x.contentId&&x.dataUrl).map(x=>[String(x.contentId).replace(/^<|>$/g,'').toLowerCase(),x]));
   const used=new Set();
   const wrap=document.createElement('div');
   wrap.innerHTML=`<div style="overflow-wrap:break-word">${body}</div>`;
   wrap.querySelectorAll('script,style,iframe,object,embed,form').forEach(el=>el.remove());
   wrap.querySelectorAll('a').forEach(a=>{a.target='_blank';a.rel='noopener noreferrer';});
   wrap.querySelectorAll('img').forEach(img=>{
-    const src=String(img.getAttribute('src')||'');
+    const src=String(img.getAttribute('src')||'').trim();
     const cid=src.match(/^cid:(.+)$/i)?.[1]?.replace(/^<|>$/g,'').toLowerCase();
-    if(cid&&inlineByCid.has(cid)){
+    if(cid){
+      // A cid: src is only meaningful inside the mail store - a browser can
+      // never fetch it. Either we swap in the bytes, or we drop the element:
+      // leaving it renders a broken-image icon and hides the fact that the
+      // picture is available in the gallery below.
       const found=inlineByCid.get(cid);
+      if(!found){img.remove();return;}
       img.src=found.dataUrl;
       img.alt=img.alt||found.name||'Email image';
       used.add(found.id||found.contentId||found.dataUrl);
@@ -8913,7 +8921,11 @@ function renderEmailBodyWithImages(body,images){
     img.loading='lazy';
     img.decoding='async';
   });
-  const visible=list.filter(x=>x.dataUrl&&!used.has(x.id||x.contentId||x.dataUrl)&&!x.isInline);
+  // Anything not placed into the body goes to the gallery - keyed on what was
+  // actually substituted, not on isInline. Outlook marks a pasted screenshot
+  // inline whether or not the body ends up referencing its cid, and filtering
+  // on the flag made those images vanish from the ticket entirely.
+  const visible=list.filter(x=>x.dataUrl&&!used.has(x.id||x.contentId||x.dataUrl));
   if(visible.length){
     const gallery=document.createElement('div');
     gallery.className='email-image-attachments';

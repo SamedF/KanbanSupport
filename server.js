@@ -5733,9 +5733,25 @@ app.post('/api/mcp-proxy', requireAuth, async (req, res) => {
       const mailbox = ownerMatch?.[1] ? decodeURIComponent(ownerMatch[1]) : SUPPORT_MAILBOX;
       if (!msgId) return res.status(400).json({ isError: true, error: 'missing_message_id' });
       const msg = await graphGet(`/users/${encodeURIComponent(mailbox)}/messages/${encodeURIComponent(msgId)}?$select=body,bodyPreview,hasAttachments`, token);
+      // hasAttachments is false when a message carries ONLY inline images.
+      // Graph documents this ("this property doesn't include inline
+      // attachments") and prescribes parsing the body for cid: references
+      // instead. Pasting a screenshot into an Outlook message is exactly that
+      // case, which is why screenshots sent to the helpdesk never rendered:
+      // the fetch below was skipped, so every cid: img in the body stayed
+      // pointing at a scheme the browser cannot resolve.
+      const bodyContent = String(msg?.body?.content || '');
+      // src= covers <img> and Word's <v:imagedata>; background= covers table
+      // backgrounds. Anchored on the attribute name so a link whose query
+      // string happens to contain "cid:" doesn't trigger a pointless fetch.
+      const referencesCid = /(?:src|background)\s*=\s*["']?\s*cid:/i.test(bodyContent);
       let imageAttachments = [];
-      if (msg?.hasAttachments) {
-        const at = await graphGet(`/users/${encodeURIComponent(mailbox)}/messages/${encodeURIComponent(msgId)}/attachments?$top=25&$select=id,name,contentType,size,isInline,contentId,contentBytes`, token);
+      if (msg?.hasAttachments || referencesCid) {
+        // No $select here on purpose: the default representation of a
+        // fileAttachment already carries contentBytes, and narrowing the
+        // projection is the kind of thing that quietly drops it. contentBytes
+        // is the bulk of the payload either way, so there is nothing to save.
+        const at = await graphGet(`/users/${encodeURIComponent(mailbox)}/messages/${encodeURIComponent(msgId)}/attachments?$top=25`, token);
         imageAttachments = (Array.isArray(at?.value) ? at.value : [])
           .filter(a => String(a?.contentType || '').toLowerCase().startsWith('image/') && a?.contentBytes)
           .slice(0, 20)
