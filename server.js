@@ -1478,6 +1478,50 @@ async function graphGet(pathname, token) {
   return graphRequest(pathname, token);
 }
 
+// A GET that wants bytes, not JSON. graphRequest returns null for any response
+// that is not application/json, which is exactly what an attachment's /$value is
+// - so it needs its own path. Used to serve one inline image at a time instead
+// of carrying every image on a message as base64 through the JSON body.
+async function graphGetBinary(pathname, token) {
+  const res = await fetch(`https://graph.microsoft.com/v1.0${pathname}`, {
+    headers: { Authorization: `Bearer ${token}` }
+  });
+  if (!res.ok) {
+    const txt = await res.text().catch(() => '');
+    throw new Error(`graph_error_${res.status}:${txt.slice(0, 400)}`);
+  }
+  return {
+    buffer: Buffer.from(await res.arrayBuffer()),
+    contentType: String(res.headers.get('content-type') || '')
+  };
+}
+
+// The binary sibling of graphGetResilient - same 401-refresh and 429/503/504
+// backoff, because an image request is throttled by the same per-mailbox budget
+// as everything else and a burst of opened tickets is exactly what trips it.
+async function graphGetBinaryResilient(pathname, req) {
+  let token = await graphDelegatedToken(req);
+  let refreshed = false;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await graphGetBinary(pathname, token);
+    } catch (err) {
+      const status = graphErrorStatus(err);
+      if (status === 401 && !refreshed) {
+        refreshed = true;
+        const tokens = await resolveStoredM365Tokens(req);
+        token = (await refreshStoredM365Tokens(tokens, req)).accessToken;
+        continue;
+      }
+      if ((status === 429 || status === 503 || status === 504) && attempt < 2) {
+        await new Promise(r => setTimeout(r, 700 * (attempt + 1)));
+        continue;
+      }
+      throw err;
+    }
+  }
+}
+
 // graphRequest throws `graph_error_<status>:<body>`; this is the status back out.
 function graphErrorStatus(err) {
   return Number(String(err?.message || '').match(/^graph_error_(\d{3})/)?.[1]) || 0;
@@ -6252,27 +6296,62 @@ function imageMimeFor(a) {
 // until Graph runs out, with a hard cap so a pathological thread cannot pin
 // the request or blow the JSON response up unboundedly.
 const MAX_IMAGE_ATTACHMENTS = 60;
+
+// Metadata only. The bytes are fetched one image at a time from
+// /api/message-image, and this is the change that makes pictures show up at all.
+//
+// The previous version listed attachments and read contentBytes out of the
+// listing. That has two problems, and the second one is why a pasted screenshot
+// rendered as nothing:
+//
+//   * every image on the message was base64'd into this route's JSON response.
+//     A reply chain with signatures is routinely 10-20MB of base64 - held in
+//     Node's heap for the length of the request, sent to the browser, and kept
+//     alive in the DOM as data: URLs for as long as the modal is open. Three
+//     agents opening three tickets was most of a pod's memory.
+//   * an attachment whose contentBytes is absent from the listing was silently
+//     dropped, and a dropped attachment is a cid: the body still references -
+//     which the renderer then removes, leaving the message with no picture and
+//     nothing saying one was missing. Whether the listing carries the bytes is
+//     not something this code can guarantee; /attachments/{id}/$value always
+//     returns them.
+//
+// So the listing is projected down to what the cid lookup needs (which also
+// makes it small and quick enough to stop being the call Graph throttles), and
+// an image is only "an image" by its own declared type or filename - not by
+// whether its bytes happened to travel with the listing.
 async function fetchMessageImageAttachments(mailbox, msgId, req) {
   const out = [];
-  // No $select on purpose: the default fileAttachment representation already
-  // carries contentBytes, and narrowing the projection is the kind of thing
-  // that quietly drops it. contentBytes is the bulk of the payload anyway, so
-  // the projection bought nothing and was one more way to lose the bytes.
-  let next = `/users/${encodeURIComponent(mailbox)}/messages/${encodeURIComponent(msgId)}/attachments?$top=50`;
+  const base = `/users/${encodeURIComponent(mailbox)}/messages/${encodeURIComponent(msgId)}/attachments`;
+  const SELECT = '$select=id,name,contentType,size,isInline,contentId';
+  let next = `${base}?$top=50&${SELECT}`;
   for (let page = 0; page < 6 && next && out.length < MAX_IMAGE_ATTACHMENTS; page++) {
-    const data = await graphGetResilient(next, req);
-    for (const a of Array.isArray(data?.value) ? data.value : []) {
+    let data = await graphGetResilient(next, req);
+    let items = Array.isArray(data?.value) ? data.value : [];
+    // A projection that comes back with nothing to identify the attachments by
+    // is useless for cid matching, and the unprojected representation is the one
+    // that is known to be complete. Cheap insurance against a tenant or a
+    // future Graph version that treats $select on attachments differently.
+    if (items.length && items.every(a => !a?.contentId && !a?.name)) {
+      data = await graphGetResilient(next.replace(`&${SELECT}`, ''), req);
+      items = Array.isArray(data?.value) ? data.value : [];
+    }
+    for (const a of items) {
       // itemAttachment (a forwarded mail) and referenceAttachment (a OneDrive
-      // link) carry no bytes at all - nothing to inline.
-      if (!a?.contentBytes || !isImageAttachment(a)) continue;
+      // link) have no bytes to serve, and no id-addressable $value.
+      const type = String(a?.['@odata.type'] || '').toLowerCase();
+      if (type && !type.includes('fileattachment')) continue;
+      if (!a?.id || !isImageAttachment(a)) continue;
       out.push({
-        id: a.id || '',
+        id: a.id,
         name: a.name || 'image',
         contentType: imageMimeFor(a),
-        size: a.size || 0,
+        size: Number(a.size || 0),
         isInline: !!a.isInline,
         contentId: String(a.contentId || '').replace(/^<|>$/g, ''),
-        dataUrl: `data:${imageMimeFor(a)};base64,${a.contentBytes}`
+        // Served by us, from Graph, one request per picture: the browser caches
+        // it, lazy-loads it, and never holds a second base64 copy of it.
+        url: `/api/message-image/${encodeURIComponent(a.id)}?msg=${encodeURIComponent(msgId)}`
       });
       if (out.length >= MAX_IMAGE_ATTACHMENTS) break;
     }
@@ -6284,6 +6363,43 @@ async function fetchMessageImageAttachments(mailbox, msgId, req) {
   }
   return out;
 }
+
+// One inline image, streamed from the mail store.
+//
+// The mailbox is not a parameter. This route turns an id in a URL into a read
+// from Graph with the agent's delegated token, and letting the caller name the
+// mailbox would make it a general-purpose mail reader for anything that token
+// can see. The board only ever renders the helpdesk mailbox, which is what
+// read_resource defaults to, so that is what this serves.
+app.get('/api/message-image/:attachmentId', requireAuth, async (req, res) => {
+  const attachmentId = String(req.params.attachmentId || '');
+  const msgId = String(req.query.msg || '');
+  if (!attachmentId || !msgId) return res.status(400).json({ error: 'missing_message_or_attachment' });
+  try {
+    const mailbox = SUPPORT_MAILBOX;
+    const { buffer, contentType } = await graphGetBinaryResilient(
+      `/users/${encodeURIComponent(mailbox)}/messages/${encodeURIComponent(msgId)}/attachments/${encodeURIComponent(attachmentId)}/$value`,
+      req
+    );
+    // Graph's own type when it gave us a usable one, since it read the real
+    // attachment; ours is a guess from the filename.
+    const type = contentType.startsWith('image/') ? contentType : (String(req.query.type || '') || 'application/octet-stream');
+    res.set('Content-Type', type.startsWith('image/') ? type : 'application/octet-stream');
+    // A mail attachment never changes, so this can be cached hard - but only by
+    // the agent's own browser. It is somebody's mail.
+    res.set('Cache-Control', 'private, max-age=86400, immutable');
+    res.set('Content-Disposition', 'inline');
+    // Belt and braces for the one type here that can carry script: an SVG
+    // attachment is served as bytes, never executed in the board's origin.
+    res.set('X-Content-Type-Options', 'nosniff');
+    res.set('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; sandbox");
+    return res.send(buffer);
+  } catch (err) {
+    const status = graphErrorStatus(err);
+    console.error(`Inline image fetch failed (${status || 'no status'}):`, String(err?.message || err).slice(0, 200));
+    return res.status(status === 404 ? 404 : 502).json({ error: 'image_unavailable', status: status || 0 });
+  }
+});
 
 app.post('/api/mcp-proxy', requireAuth, async (req, res) => {
   try {
@@ -6317,10 +6433,14 @@ app.post('/api/mcp-proxy', requireAuth, async (req, res) => {
       // the fetch below was skipped, so every cid: img in the body stayed
       // pointing at a scheme the browser cannot resolve.
       const bodyContent = String(msg?.body?.content || '');
-      // src= covers <img> and Word's <v:imagedata>; background= covers table
-      // backgrounds. Anchored on the attribute name so a link whose query
-      // string happens to contain "cid:" doesn't trigger a pointless fetch.
-      const referencesCid = /(?:src|background)\s*=\s*["']?\s*cid:/i.test(bodyContent);
+      // How many pictures the body asks for. src= covers <img> and Word's
+      // <v:imagedata>; background= covers table backgrounds. Anchored on the
+      // attribute name so a link whose query string happens to contain "cid:"
+      // does not count. Counting rather than testing, because the count is what
+      // lets the modal say "this message wanted 3 pictures and got none"
+      // instead of quietly rendering the mail with the images deleted.
+      const cidRefs = (bodyContent.match(/(?:src|background)\s*=\s*["']?\s*cid:/gi) || []).length;
+      const referencesCid = cidRefs > 0;
       let imageAttachments = [];
       let imagesError = '';
       if (msg?.hasAttachments || referencesCid) {
@@ -6336,13 +6456,23 @@ app.post('/api/mcp-proxy', requireAuth, async (req, res) => {
           imagesError = String(err?.message || err).slice(0, 200);
         }
       }
+      // A message that asked for pictures and came back with none is a bug
+      // somewhere - a projection, a permission, a message moved mid-read - and
+      // for months it looked identical to a message that simply had no
+      // pictures, because the renderer deletes a cid: it cannot resolve. Say so.
+      if (referencesCid && !imageAttachments.length && !imagesError) {
+        imagesError = `The message references ${cidRefs} inline image${cidRefs === 1 ? '' : 's'}, but the mailbox returned none.`;
+      }
       return res.json({
         isError: false,
         structuredContent: {
           body: { content: msg?.body?.content || '', contentType: msg?.body?.contentType || 'text' },
           bodyPreview: msg?.bodyPreview || '',
           imageAttachments,
-          imagesError
+          imagesError,
+          // What the two sides actually saw, so "no images" is diagnosable from
+          // the browser's network tab instead of a pod log.
+          imageDiag: { cidRefs, hasAttachments: !!msg?.hasAttachments, returned: imageAttachments.length }
         }
       });
     }
@@ -7190,15 +7320,29 @@ const localEngine = require('./translate-local');
 
 const TRANSLATE_LOCAL_ENABLED = !/^(off|none|false|0|disabled)$/i.test(String(process.env.TRANSLATE_LOCAL || '').trim());
 const TRANSLATE_LOCAL_DIR = String(process.env.TRANSLATE_LOCAL_MODELS || path.join(__dirname, 'data', 'mt-models'));
-// Two resident models is about 1.5GB of RSS. Raise it on a bigger box.
+// Two resident models is about 1.5GB of RSS while they are loaded - but they are
+// only loaded while someone is translating: the worker is torn down once it goes
+// idle (TRANSLATE_LOCAL_IDLE_MS in translate-local.js), which returns that
+// memory to the OS rather than holding it until the next deploy. Raise the cap
+// on a bigger box.
 const TRANSLATE_LOCAL_MAX_MODELS = Number(process.env.TRANSLATE_LOCAL_MAX_MODELS || 2);
-// Generous, because the first request for a language downloads it and a long
-// thread is genuinely a minute of CPU. Still bounded - a wedged worker must not
-// hold an agent's request open forever.
-const TRANSLATE_LOCAL_TIMEOUT_MS = Number(process.env.TRANSLATE_LOCAL_TIMEOUT_MS || 300_000);
+// A stall timeout, not a length limit: the worker reports progress after every
+// batch, and each report pushes this deadline out. So the ceiling is "stopped
+// making progress for this long", which is what a wedged worker looks like,
+// while a genuinely long thread is allowed to take as long as it takes.
+const TRANSLATE_LOCAL_TIMEOUT_MS = Number(process.env.TRANSLATE_LOCAL_TIMEOUT_MS || 60_000);
+// Batching knobs, passed through to the worker - see the batching note there for
+// why a whole ticket must not be one batch.
+const TRANSLATE_LOCAL_BATCH_ROWS = Number(process.env.TRANSLATE_LOCAL_BATCH_ROWS || 8);
+const TRANSLATE_LOCAL_BATCH_COST = Number(process.env.TRANSLATE_LOCAL_BATCH_COST || 3200);
 
 function localEngineOptions() {
-  return { cacheDir: TRANSLATE_LOCAL_DIR, maxModels: TRANSLATE_LOCAL_MAX_MODELS };
+  return {
+    cacheDir: TRANSLATE_LOCAL_DIR,
+    maxModels: TRANSLATE_LOCAL_MAX_MODELS,
+    batchRows: TRANSLATE_LOCAL_BATCH_ROWS,
+    batchCost: TRANSLATE_LOCAL_BATCH_COST
+  };
 }
 
 const localProvider = {
@@ -7241,7 +7385,20 @@ const localProvider = {
     const cores = segments.map(s => splitEdges(s.text).core);
     let result;
     try {
-      result = await localEngine.translateTexts(cores, sourceLang, targetLang, localEngineOptions(), TRANSLATE_LOCAL_TIMEOUT_MS);
+      // The progress callback is logged rather than streamed to the client: this
+      // route answers once, and a line per quarter of a long ticket is what
+      // turns "translation is slow" into a number in the pod's log.
+      let logged = 0;
+      result = await localEngine.translateTexts(
+        cores, sourceLang, targetLang, localEngineOptions(), TRANSLATE_LOCAL_TIMEOUT_MS,
+        (p) => {
+          const step = Math.max(1, Math.floor(p.total / 4));
+          if (p.done - logged >= step || p.done === p.total) {
+            logged = p.done;
+            console.log(`Local translation ${sourceLang}->${targetLang} hop ${p.hop}/${p.hops}: ${p.done}/${p.total} rows`);
+          }
+        }
+      );
     } catch (error) {
       // A timeout or a dead worker is worth trying another engine for.
       throw translationError('provider_error', `Local translation failed: ${error?.message || error}`);

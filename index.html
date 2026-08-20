@@ -8177,11 +8177,24 @@ async function trRequest(ticketId,targetLang,segments,{force=false}={}){
     credentials:'include',
     body:JSON.stringify({ticketId,targetLang,segments,force})
   });
-  const data=await r.json().catch(()=>({}));
+  const data=await r.json().catch(()=>null);
   if(!r.ok){
-    const err=new Error(data?.message||data?.error||`Translation failed (${r.status})`);
-    err.code=data?.error;
-    err.retryable=!!data?.retryable;
+    // A body we cannot parse did not come from this app. Every failure the route
+    // itself raises is JSON carrying a reason; an unparseable 502/504 is the
+    // gateway in front of it giving up on a request that ran too long, and
+    // reporting that as a bare "Translation failed (502)" is what left agents
+    // with a status code and nothing to do about it.
+    if(!data){
+      const err=new Error(r.status===502||r.status===503||r.status===504
+        ?'The translation took too long and the connection was dropped before it finished. It may still be running - reopen the ticket in a moment and the finished translation will be there.'
+        :`The translation service answered ${r.status} with no reason given.`);
+      err.code='translation_gateway';
+      err.retryable=true;
+      throw err;
+    }
+    const err=new Error(data.message||data.error||`Translation failed (${r.status})`);
+    err.code=data.error;
+    err.retryable=!!data.retryable;
     throw err;
   }
   const langs=trCachedLangs.get(ticketId)||new Set();
@@ -8201,7 +8214,7 @@ function trReportError(err){
     ||code==='translation_source_undetected'
     ||code==='translation_auth_failed'){showToast(err?.message||'Translation is unavailable','warn');return;}
   if(code==='translation_rate_limited'){showToast('Translation is rate limited right now - try again in a moment','warn');return;}
-  if(code==='translation_unreachable'){showToast(err?.message||'Could not reach the translation service','warn');return;}
+  if(code==='translation_unreachable'||code==='translation_gateway'){showToast(err?.message||'Could not reach the translation service','warn');return;}
   if(code==='too_many_segments'||code==='content_too_large'){showToast('This ticket is too long to translate in one go','warn');return;}
   if(code==='no_translatable_segments'){showToast('Nothing to translate on this ticket','warn');return;}
   showToast(`Translation failed: ${err?.message||'unknown error'}`);
@@ -9052,13 +9065,20 @@ function trIndexInlineImages(list){
   const byKey=new Map();
   const add=(k,x)=>{const key=String(k||'').replace(/^<|>$/g,'').trim().toLowerCase();if(key&&!byKey.has(key))byKey.set(key,x);};
   list.forEach(x=>{
-    if(!x.dataUrl)return;
+    if(!emImageSrc(x))return;
     add(x.contentId,x);
     add(String(x.contentId||'').split('@')[0],x);
     add(x.name,x);
   });
   return byKey;
 }
+
+// Where the bytes for one attachment come from. `url` is the server streaming
+// the picture out of the mail store one request at a time, which is what it now
+// sends; `dataUrl` is the old inline base64, kept so a browser holding a cached
+// copy of this page against an older server still renders its pictures rather
+// than deleting them.
+function emImageSrc(x){return x&&(x.url||x.dataUrl)||'';}
 
 // Remote images in a signature (a CDN behind auth, a host that is simply gone,
 // a tracking pixel) cannot be made to load from here. Leaving the element
@@ -9104,15 +9124,36 @@ function renderEmailBodyWithImages(body,images){
   // A cid: table/cell background can never resolve either, and unlike an <img>
   // it fails silently - drop the attribute so the mail's own colors apply.
   wrap.querySelectorAll('[background^="cid:" i]').forEach(el=>el.removeAttribute('background'));
+
+  // Which cid: references the keyed lookup can actually serve, and which images
+  // no reference reaches. When both sets are non-empty and the same size, the
+  // body and the mailbox are describing the same pictures under names that do
+  // not match, so document order is a better answer than deleting them - see
+  // the fallback in the loop below.
+  const cidOf=img=>String(img.getAttribute('src')||'').trim().match(/^cid:(.+)$/i)?.[1]?.replace(/^<|>$/g,'').toLowerCase()||'';
+  const cidImgs=[...wrap.querySelectorAll('img')].map(cidOf).filter(Boolean);
+  const hit=cid=>inlineByCid.get(cid)||inlineByCid.get(cid.split('@')[0]);
+  const missCount=cidImgs.filter(cid=>!hit(cid)).length;
+  const placed=new Set(cidImgs.map(hit).filter(Boolean).map(x=>x.id||x.contentId));
+  const spare=list.filter(x=>emImageSrc(x)&&!placed.has(x.id||x.contentId));
+  const unmatched=(missCount>0&&missCount===spare.length)?spare.slice():[];
+
   wrap.querySelectorAll('img').forEach(img=>{
     const src=String(img.getAttribute('src')||'').trim();
-    const cid=src.match(/^cid:(.+)$/i)?.[1]?.replace(/^<|>$/g,'').toLowerCase();
+    const cid=cidOf(img);
     if(cid){
       // A cid: src is only meaningful inside the mail store - a browser can
       // never fetch it. Either we swap in the bytes, or we drop the element:
       // leaving it renders a broken-image icon and hides the fact that the
       // picture is available in the gallery below.
-      const found=inlineByCid.get(cid)||inlineByCid.get(cid.split('@')[0]);
+      let found=inlineByCid.get(cid)||inlineByCid.get(cid.split('@')[0]);
+      // Last resort before deleting somebody's screenshot: if the message
+      // carries exactly as many unplaced images as the body has unresolved
+      // cid: references, the two lists are the same pictures under names that
+      // did not match, so pair them off in document order. Outlook and Graph
+      // disagreeing about contentId spelling is the whole reason the lookup
+      // above has three keys, and this is the case where all three miss.
+      if(!found&&unmatched.length)found=unmatched.shift();
       if(!found){
         // Nothing to swap in - the bytes never came back from the mail store.
         // An unlabelled one is signature decoration (a divider, a social icon,
@@ -9123,9 +9164,9 @@ function renderEmailBodyWithImages(body,images){
         else img.remove();
         return;
       }
-      img.src=found.dataUrl;
+      img.src=emImageSrc(found);
       img.alt=img.alt||found.name||'Email image';
-      used.add(found.id||found.contentId||found.dataUrl);
+      used.add(found.id||found.contentId||emImageSrc(found));
     }else if(location.protocol==='https:'&&/^http:\/\//i.test(src)){
       // The board is served over TLS, so a plain-http image in a signature is
       // blocked as mixed content before the request is even made - a broken
@@ -9141,11 +9182,12 @@ function renderEmailBodyWithImages(body,images){
   // actually substituted, not on isInline. Outlook marks a pasted screenshot
   // inline whether or not the body ends up referencing its cid, and filtering
   // on the flag made those images vanish from the ticket entirely.
-  const visible=list.filter(x=>x.dataUrl&&!used.has(x.id||x.contentId||x.dataUrl));
+  const visible=list.filter(x=>emImageSrc(x)&&!used.has(x.id||x.contentId||emImageSrc(x)));
   if(visible.length){
     const gallery=document.createElement('div');
     gallery.className='email-image-attachments';
-    gallery.innerHTML=visible.map(x=>`<a class="email-image-attachment" href="${esc(x.dataUrl)}" target="_blank" rel="noopener noreferrer"><img src="${esc(x.dataUrl)}" alt="${esc(x.name||'Email image')}" loading="lazy" decoding="async"><span>${esc(x.name||'Email image')}</span></a>`).join('');
+    gallery.innerHTML=visible.map(x=>{const u=esc(emImageSrc(x));const n=esc(x.name||'Email image');
+      return `<a class="email-image-attachment" href="${u}" target="_blank" rel="noopener noreferrer"><img src="${u}" alt="${n}" loading="lazy" decoding="async"><span>${n}</span></a>`;}).join('');
     wrap.firstElementChild.appendChild(gallery);
   }
   // The node, not its innerHTML: the error handlers above are the whole point

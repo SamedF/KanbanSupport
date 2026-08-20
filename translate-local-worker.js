@@ -26,9 +26,39 @@ const path = require('path');
 const DTYPE = 'q8';
 // Each resident model is a few hundred MB of RSS. Two covers the normal case (a
 // language and its reverse, or two busy inboxes) without putting the server at
-// risk of being killed.
+// risk of being killed. They are released again once the engine goes idle -
+// see unloadAll and the parent's idle shutdown.
 const MAX_RESIDENT_MODELS = Number(workerData?.maxModels || 2);
 const CACHE_DIR = workerData?.cacheDir || path.join(__dirname, 'data', 'mt-models');
+
+// ------------------------------------------------------------------- batching
+//
+// The pipeline takes an array, and handing it the whole ticket at once looks
+// like the cheap thing to do. It is the opposite. A batch is padded to its
+// longest member and the decoder runs until every row in it has finished, so a
+// batch costs (rows x longest row), not the sum of its rows. A real mail body is
+// a few long paragraphs among a hundred short nodes - "Bonjour,", a name, a
+// signature line, an empty table cell - so one batch of 200 nodes charges every
+// one of those short nodes the full length of the longest paragraph.
+//
+// Measured against this repo's model cache, a 200-node body of that shape sent
+// as a single batch did not finish in ten minutes and peaked over 1.3GB of RSS.
+// That is the "cannot translate an opened ticket" failure: the request outlives
+// the gateway, the gateway answers 502 with an HTML body, and the toast has no
+// reason in it to print beyond the status code.
+//
+// So: sort by length, group like with like, and cap each group by both row count
+// and padded cost. The sort is what makes the cap effective - neighbours in a
+// sorted list are nearly the same length, so almost no padding is added.
+const MAX_BATCH_ROWS = Number(workerData?.batchRows || 8);
+// Rows x longest-row-chars. 3200 is eight rows of 400 chars, or thirty-two of
+// 100 - either way a couple of seconds of CPU and a bounded tensor.
+const MAX_BATCH_COST = Number(workerData?.batchCost || 3200);
+// opus-mt has a 512-token window. A text node longer than that is split on
+// sentence boundaries and rejoined afterwards, because the alternative is the
+// model quietly truncating it: a client's paragraph that stops mid-sentence
+// reads as our bug and is invisible without the original beside it.
+const MAX_TEXT_CHARS = Number(workerData?.maxTextChars || 480);
 
 // Pairs published as ONNX. Anything not here is reached by pivoting through
 // English, which is why en is on both sides of almost every entry.
@@ -93,18 +123,107 @@ async function getPipeline(pair) {
   return built;
 }
 
-// One hop over every string. The pipeline takes an array, so this is one call
-// rather than one per segment.
-async function runHop(pair, texts) {
+// Release every resident model. The parent calls this when nobody has translated
+// anything for a while: a language package sitting idle is several hundred MB of
+// RSS held against the chance that someone translates another ticket, and
+// reloading it from the disk cache costs a couple of seconds.
+async function unloadAll() {
+  const entries = [...resident.values()];
+  resident.clear();
+  for (const entry of entries) {
+    try { await entry.pipeline.dispose?.(); } catch (_) { /* best effort */ }
+  }
+  return entries.length;
+}
+
+// Split a long text into pieces the model's window can hold, keeping every
+// delimiter attached so rejoining is plain concatenation - no character of the
+// client's text is invented or dropped. Sentence ends first; a "sentence" that
+// is still too long (a pasted log line, a list of URLs) is cut at a space.
+function splitLongText(text) {
+  if (text.length <= MAX_TEXT_CHARS) return [text];
+  const pieces = [];
+  let rest = text;
+  while (rest.length > MAX_TEXT_CHARS) {
+    const window = rest.slice(0, MAX_TEXT_CHARS);
+    let cut = Math.max(
+      window.lastIndexOf('. '), window.lastIndexOf('! '), window.lastIndexOf('? '),
+      window.lastIndexOf('\n')
+    );
+    // Only take a boundary that actually divides the window; one at character 3
+    // would turn a paragraph into hundreds of fragments.
+    cut = cut > MAX_TEXT_CHARS * 0.4 ? cut + 1 : -1;
+    if (cut < 0) {
+      const space = window.lastIndexOf(' ');
+      cut = space > MAX_TEXT_CHARS * 0.4 ? space + 1 : MAX_TEXT_CHARS;
+    }
+    pieces.push(rest.slice(0, cut));
+    rest = rest.slice(cut);
+  }
+  if (rest) pieces.push(rest);
+  return pieces;
+}
+
+// Group row indices into batches of similar-length rows, capped by row count and
+// by padded cost. Returns an array of index arrays.
+function planBatches(rows) {
+  const order = rows.map((_, i) => i).sort((a, b) => rows[a].length - rows[b].length);
+  const batches = [];
+  let current = [];
+  let longest = 0;
+  for (const i of order) {
+    const nextLongest = Math.max(longest, rows[i].length);
+    const cost = (current.length + 1) * nextLongest;
+    if (current.length && (current.length >= MAX_BATCH_ROWS || cost > MAX_BATCH_COST)) {
+      batches.push(current);
+      current = [];
+      longest = 0;
+    }
+    current.push(i);
+    longest = Math.max(longest, rows[i].length);
+  }
+  if (current.length) batches.push(current);
+  return batches;
+}
+
+// One hop over every string: split what is too long, batch by length, translate
+// each batch, then put every piece back where it came from.
+async function runHop(pair, texts, onProgress) {
   const translate = await getPipeline(pair);
-  const out = await translate(texts);
-  const list = Array.isArray(out) ? out : [out];
-  return list.map((item, i) => {
-    const text = item?.translation_text;
-    // A hop that produces nothing keeps the input, so a later hop still has
-    // something to work with and the caller falls back to the original.
-    return typeof text === 'string' && text.trim() ? text : texts[i];
-  });
+
+  // Flatten to pieces, remembering which text each piece came from.
+  const rows = [];
+  const layout = texts.map(text => splitLongText(String(text ?? '')).map(piece => {
+    rows.push(piece);
+    return rows.length - 1;
+  }));
+
+  const out = new Array(rows.length);
+  const batches = planBatches(rows);
+  let done = 0;
+  for (const batch of batches) {
+    const input = batch.map(i => rows[i]);
+    // A batch of blank-ish rows has nothing for the model to do, and asking it
+    // anyway is where opus-mt likes to invent a sentence out of "-".
+    if (input.every(t => !t.trim())) {
+      batch.forEach(i => { out[i] = rows[i]; });
+    } else {
+      const result = await translate(input);
+      const list = Array.isArray(result) ? result : [result];
+      batch.forEach((i, k) => {
+        const text = list[k]?.translation_text;
+        // A row that produces nothing keeps its input, so a later hop still has
+        // something to work with and the caller falls back to the original.
+        out[i] = typeof text === 'string' && text.trim() ? text : rows[i];
+      });
+    }
+    done += batch.length;
+    if (onProgress) onProgress(done, rows.length);
+  }
+
+  // Rejoin: a text that was never split is its single piece, one that was gets
+  // its pieces concatenated back in original order, delimiters and all.
+  return layout.map(ids => (ids.length === 1 ? out[ids[0]] : ids.map(id => out[id]).join('')));
 }
 
 parentPort.on('message', async (msg) => {
@@ -113,6 +232,10 @@ parentPort.on('message', async (msg) => {
     if (kind === 'route') {
       // Asked before committing: can this pair be served at all?
       parentPort.postMessage({ id, ok: true, result: { route: route(msg.source, msg.target) } });
+      return;
+    }
+    if (kind === 'unload') {
+      parentPort.postMessage({ id, ok: true, result: { unloaded: await unloadAll() } });
       return;
     }
     if (kind === 'warm') {
@@ -131,7 +254,14 @@ parentPort.on('message', async (msg) => {
         parentPort.postMessage({ id, ok: true, result: { texts, hops } });
         return;
       }
-      for (const hop of hops) texts = await runHop(hop, texts);
+      // Progress is per batch, not per hop. A hundred-node body is now dozens
+      // of small batches rather than one opaque wait, and the parent uses these
+      // to tell a slow translation from a wedged one.
+      for (let h = 0; h < hops.length; h++) {
+        texts = await runHop(hops[h], texts, (done, total) => {
+          parentPort.postMessage({ progress: { id, hop: h + 1, hops: hops.length, done, total } });
+        });
+      }
       parentPort.postMessage({ id, ok: true, result: { texts, hops } });
       return;
     }
