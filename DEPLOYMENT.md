@@ -63,7 +63,7 @@ and an agent looking at a French ticket does not care which one answers.
 
 | Provider | Cost | Where ticket text goes | Configure with |
 | --- | --- | --- | --- |
-| `local` | free | nowhere — stays in this process | nothing; `TRANSLATE_LOCAL=off` disables it, `TRANSLATE_LOCAL_MAX_MODELS` caps resident models (default 2, ~1.5GB) |
+| `local` | free | nowhere — stays in this process | nothing; `TRANSLATE_LOCAL=off` disables it, and see **Keeping the local engine small** below |
 | `libretranslate` | free | your own server | `LIBRETRANSLATE_URL`, optional `LIBRETRANSLATE_API_KEY` |
 | `anthropic` | per call | Anthropic | `ANTHROPIC_API_KEY`, optional `TRANSLATE_MODEL` |
 | `mymemory` | free | MyMemory, a public service | nothing; `MYMEMORY_EMAIL` raises the daily allowance, `MYMEMORY_URL=off` disables it |
@@ -83,6 +83,51 @@ request falls through to the next engine rather than failing.
 To keep ticket text off public services entirely, set `MYMEMORY_URL=off` and
 `TRANSLATE_PUBLIC_FALLBACK=off`. The local engine alone then handles everything
 it has a model for, with nothing leaving the server at all.
+
+### Keeping the local engine small
+
+Translating locally costs memory while it runs, and the shape of that cost was
+measured on this repo's model cache with a mail-sized body, three tickets in a
+row:
+
+| | after ticket 1 | 2 | 3 | peak |
+| --- | --- | --- | --- | --- |
+| ONNX arena on (the runtime's default) | 414MB | 571MB | 682MB | 675MB |
+| arena off (what ships) | 414MB | 416MB | 409MB | 571MB |
+
+The climb is the thing to avoid: ONNX Runtime keeps freed blocks in a per-session
+arena for reuse, and since every ticket is a different shape it kept adding new
+ones, so the footprint only ever went up until the worker was torn down. With the
+arena off each batch hands its memory back and the engine sits flat at around
+410MB, for roughly two thirds more wall clock.
+
+The rest is the model: about 300MB per resident language pair once its ONNX
+sessions are built. So one translation needs ~500–600MB peak, and that is the
+floor unless the model changes. What it does *not* need is to hold that between
+tickets — the worker is torn down once nobody has translated anything for
+`TRANSLATE_LOCAL_IDLE_MS` (45s by default), which measured RSS going from 424MB
+back to 54MB.
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `TRANSLATE_LOCAL_IDLE_MS` | `45000` | How long a loaded model is kept for the next ticket. `0` keeps it resident forever. Lower it to give memory back sooner, at a couple of seconds' reload on the next translation. |
+| `TRANSLATE_LOCAL_MAX_MODELS` | `1` | Resident language pairs (~300MB each). `2` keeps a language and its reverse warm on a bigger box. |
+| `TRANSLATE_LOCAL_ARENA` | off | `on` restores the runtime's own allocator: faster, and the climb above comes back. |
+| `TRANSLATE_LOCAL_HEAP_MB` | unset | V8 heap ceiling for the worker thread. Bounds the JS side only — the weights and tensors are native — but on a small box a worker that dies with an error the app reports beats the kernel choosing a process to kill. |
+| `TRANSLATE_LOCAL_BATCH_ROWS` / `_BATCH_COST` | `8` / `3200` | Rows per model call and rows × longest-row-chars. Lower them for a smaller working set per batch; below about 4 rows it stopped buying memory and only cost time. |
+| `TRANSLATE_LOCAL_THREADS` | `0` (runtime decides) | Not a memory lever — measured within noise at 0 and 2. Set it to stop translation taking CPU from the web server. |
+| `TRANSLATE_LOCAL_BATCH_RATIO` | `8` | How far apart in length two rows may be before they are batched separately. A correctness guard, not a tuning knob — see below. |
+| `TRANSLATE_LOCAL_BEAMS` | `4` (the model's own) | A recorded dead end: greedy decoding measured within noise on peak RSS (539MB against 568MB) and was slower (7.3s against 6.1s over 24 rows), because it keeps generating where a beam search has settled. Lowering it buys nothing. |
+
+**One thing to leave alone.** `TRANSLATE_LOCAL_BATCH_RATIO` exists because
+batching a long paragraph beside a very short line makes
+`@huggingface/transformers` 4.2.0 corrupt *every* row in that batch: it keeps
+generating for rows that have already finished, and since Marian's pad token is
+in the model's own `bad_words_ids` it emits periods instead — a run exactly as
+long as the token budget that was left. Rows of similar length, or rows sent one
+at a time, come back clean, so batches are capped by length spread. There is a
+second guard after the fact that trims a trailing run of repeated punctuation the
+source did not have, and logs when it does.
 
 Translations are cached per ticket, target language and exact source text, and
 the cache is shared across agents, so the second person to open the same French

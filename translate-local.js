@@ -22,8 +22,19 @@ const WORKER_PATH = path.join(__dirname, 'translate-local-worker.js');
 // go away when the burst ends and come back from the disk cache - a couple of
 // seconds on the next request, against hundreds of MB the rest of the day.
 // Set TRANSLATE_LOCAL_IDLE_MS=0 to keep them resident (a box with RAM to spare
-// and an inbox that is translated all day).
-const IDLE_SHUTDOWN_MS = Number(process.env.TRANSLATE_LOCAL_IDLE_MS ?? 120_000);
+// and an inbox that is translated all day), or raise it if the reload on the
+// next ticket is more annoying than the memory. Two minutes was the first guess
+// and it was too generous: agents translate a ticket, read it, and move on, so
+// the window mostly measured how long the memory was held for nobody.
+const IDLE_SHUTDOWN_MS = Number(process.env.TRANSLATE_LOCAL_IDLE_MS ?? 45_000);
+
+// A V8 heap ceiling for the worker thread, in MB. Off by default because the
+// model weights and every tensor are native allocations that this does not
+// count - it bounds the JS side only, which is the string arrays this module
+// passes around. Worth setting on a small box as a backstop: the worker dies
+// with an error the parent already reports and falls through to another engine,
+// which beats the kernel picking a process to kill.
+const HEAP_LIMIT_MB = Number(process.env.TRANSLATE_LOCAL_HEAP_MB || 0);
 
 function localEngineInstalled() {
   try {
@@ -89,8 +100,15 @@ function startWorker(options) {
       maxModels: options.maxModels,
       batchRows: options.batchRows,
       batchCost: options.batchCost,
-      maxTextChars: options.maxTextChars
-    }
+      maxTextChars: options.maxTextChars,
+      beams: options.beams,
+      threads: options.threads,
+      maxNewTokens: options.maxNewTokens,
+      dtype: options.dtype,
+      arena: options.arena,
+      batchRatio: options.batchRatio
+    },
+    ...(HEAP_LIMIT_MB > 0 ? { resourceLimits: { maxOldGenerationSizeMb: HEAP_LIMIT_MB } } : {})
   });
   workerReady = new Promise((resolve, reject) => {
     // A worker that never reports ready - a broken install, a missing native
@@ -191,5 +209,10 @@ module.exports = {
   // For the health/diagnostics view: is a model loaded right now, and is a
   // translation running? Answers "why is this pod using 700MB" without a heap
   // dump.
-  status: () => ({ loaded: !!worker, inFlight: pending.size, idleShutdownMs: IDLE_SHUTDOWN_MS })
+  status: () => ({
+    loaded: !!worker,
+    inFlight: pending.size,
+    idleShutdownMs: IDLE_SHUTDOWN_MS,
+    heapLimitMb: HEAP_LIMIT_MB || null
+  })
 };

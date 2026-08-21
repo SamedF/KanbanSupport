@@ -23,12 +23,73 @@ const path = require('path');
 // Quantised weights. fp32 was tried first and the process was killed loading it
 // on an 8GB box; q8 fits, loads in half the time, and the output was
 // indistinguishable in testing.
-const DTYPE = 'q8';
-// Each resident model is a few hundred MB of RSS. Two covers the normal case (a
-// language and its reverse, or two busy inboxes) without putting the server at
-// risk of being killed. They are released again once the engine goes idle -
-// see unloadAll and the parent's idle shutdown.
-const MAX_RESIDENT_MODELS = Number(workerData?.maxModels || 2);
+const DTYPE = String(workerData?.dtype || 'q8');
+
+// ------------------------------------------------------------ memory ceilings
+//
+// Measured on this repo's model cache, one language pair, a mail-shaped body of
+// 35 text runs, three tickets in a row:
+//
+//   arena on  (what ORT does by default):  414 -> 571 -> 682MB RSS, peak 675MB
+//   arena off (what this sets):            414 -> 416 -> 409MB RSS, peak 571MB
+//
+// That climb is the whole complaint. ONNX Runtime's CPU allocator keeps an arena
+// of freed blocks per session so the next inference can reuse them, and since
+// every ticket is a different shape it kept adding new ones - a translation
+// footprint that only ever went up, until the worker was torn down. Turning the
+// arena and the mem-pattern planner off makes each batch hand its memory back,
+// which trades roughly two thirds more wall clock for a flat ~410MB instead of
+// an unbounded climb. TRANSLATE_LOCAL_ARENA=on restores the old, faster,
+// hungrier behaviour on a box with the RAM for it.
+//
+// The rest of the footprint is the model itself: ~300MB per resident pair once
+// its ONNX sessions are built (a 107MB q8 file on disk). That is the floor while
+// a translation is running, and the reason MAX_RESIDENT_MODELS defaults to one
+// and the parent tears the whole worker down when the burst ends - measured,
+// that takes RSS from 424MB back to 54MB.
+const ARENA = !!workerData?.arena;
+// Threads turned out not to be a memory lever at all - 0 (ORT decides) and 2
+// measured within noise of each other on peak RSS - so this only decides how
+// much CPU translation takes from the web server it shares a box with.
+const THREADS = Math.max(0, Number(workerData?.threads ?? 0));
+const SESSION_OPTIONS = {
+  enableCpuMemArena: ARENA,
+  enableMemPattern: ARENA,
+  executionMode: 'sequential',
+  ...(THREADS > 0 ? { intraOpNumThreads: THREADS, interOpNumThreads: 1 } : {})
+};
+
+// Beam search width, left at the model's own 4 - and worth recording why, since
+// "decode one candidate instead of four" is the obvious-looking saving here and
+// it is not one. Measured after the batching fix below: greedy peaked at 539MB
+// against 568MB for four beams, which is inside the run-to-run noise, and it was
+// *slower* - 7.3s against 6.1s over 24 rows - because greedy keeps generating
+// where a beam search has already settled. Output on a mail-shaped body was
+// identical. So this knob exists to document a dead end; lowering it buys
+// nothing, and beam search is the better decoder on long sentences.
+const BEAMS = Math.max(1, Number(workerData?.beams || 4));
+// Each resident model is ~300MB of RSS once its ONNX sessions are built (from a
+// 107MB q8 file on disk), so the default is one: a pivot route (fr->de is fr-en
+// then en-de) loads its second model, evicts the first, and the pair costs one
+// model's memory instead of two. The reload afterwards is a couple of seconds
+// off the disk cache. Raise it to 2 on a box with RAM to spare and an inbox
+// translated all day, which keeps a language and its reverse warm. They are
+// released either way once the engine goes idle - see unloadAll and the
+// parent's idle shutdown, which measured RSS going from 424MB back to 54MB.
+const MAX_RESIDENT_MODELS = Math.max(1, Number(workerData?.maxModels || 1));
+// A hard ceiling on generated tokens. The pipeline's own default is 256 and the
+// model window is 512. It bounds the damage when the model runs away - see the
+// batching note below, where a finished row keeps emitting periods until the
+// budget is spent - and the per-batch figure is derived from the longest row in
+// that batch, so a batch of short nodes is bounded by its own length.
+const MAX_NEW_TOKENS = Math.max(32, Number(workerData?.maxNewTokens || 256));
+function newTokenBudget(rows) {
+  const longest = rows.reduce((n, t) => Math.max(n, t.length), 0);
+  // Half the characters plus headroom: translations run longer than their
+  // source in some pairs (en->de is the usual example), and truncating a
+  // client's sentence is worse than spending the tokens.
+  return Math.max(48, Math.min(MAX_NEW_TOKENS, Math.ceil(longest / 2) + 32));
+}
 const CACHE_DIR = workerData?.cacheDir || path.join(__dirname, 'data', 'mt-models');
 
 // ------------------------------------------------------------------- batching
@@ -50,15 +111,38 @@ const CACHE_DIR = workerData?.cacheDir || path.join(__dirname, 'data', 'mt-model
 // So: sort by length, group like with like, and cap each group by both row count
 // and padded cost. The sort is what makes the cap effective - neighbours in a
 // sorted list are nearly the same length, so almost no padding is added.
-const MAX_BATCH_ROWS = Number(workerData?.batchRows || 8);
+const MAX_BATCH_ROWS = Math.max(1, Number(workerData?.batchRows || 8));
 // Rows x longest-row-chars. 3200 is eight rows of 400 chars, or thirty-two of
 // 100 - either way a couple of seconds of CPU and a bounded tensor.
-const MAX_BATCH_COST = Number(workerData?.batchCost || 3200);
+const MAX_BATCH_COST = Math.max(200, Number(workerData?.batchCost || 3200));
 // opus-mt has a 512-token window. A text node longer than that is split on
 // sentence boundaries and rejoined afterwards, because the alternative is the
 // model quietly truncating it: a client's paragraph that stops mid-sentence
 // reads as our bug and is invisible without the original beside it.
 const MAX_TEXT_CHARS = Number(workerData?.maxTextChars || 480);
+
+/* The other reason a batch has to be homogeneous, and this one is not about
+   cost. Batching a long row together with a very short one corrupts every row
+   in the batch: transformers.js keeps generating for sequences that have
+   already finished, and because Marian's pad token is in the model's own
+   bad_words_ids it emits periods instead - a run exactly as long as the token
+   budget that was left.
+
+     tr(['Bonjour,', 'Merci de nous confirmer.', <371-char paragraph>])
+       -> "Hello,......................................." (224 dots)
+       -> "Thank you for confirming......................" (193 dots)
+       -> "<the paragraph>.............................." (131 dots)
+
+   The same rows one at a time, or batched with rows of a similar length, come
+   back clean. It is length *ratio* that does it - 371 chars beside 8 breaks,
+   371 beside 190 does not - so cap the spread inside a batch. Sorting already
+   puts similar lengths next to each other, which makes this cheap: it only
+   splits a batch where the sorted run genuinely jumps.
+
+   Reproduced against @huggingface/transformers 4.2.0 with Xenova/opus-mt-fr-en
+   at q8. Raise TRANSLATE_LOCAL_BATCH_RATIO to relax it if a later version fixes
+   the underlying bug; 1 disables batching of unequal rows altogether. */
+const MAX_BATCH_RATIO = Math.max(1, Number(workerData?.batchRatio || 8));
 
 // Pairs published as ONNX. Anything not here is reached by pivoting through
 // English, which is why en is on both sides of almost every entry.
@@ -105,7 +189,10 @@ async function getPipeline(pair) {
 
   const { pipeline } = await getTransformers();
   // First call for a language downloads it; later calls read the disk cache.
-  const built = await pipeline('translation', `Xenova/opus-mt-${pair}`, { dtype: DTYPE });
+  const built = await pipeline('translation', `Xenova/opus-mt-${pair}`, {
+    dtype: DTYPE,
+    session_options: SESSION_OPTIONS
+  });
   resident.set(pair, { pipeline: built, lastUsed: Date.now() });
 
   // Evict least-recently-used beyond the cap, and dispose properly - dropping
@@ -171,19 +258,51 @@ function planBatches(rows) {
   const batches = [];
   let current = [];
   let longest = 0;
+  let shortest = Infinity;
   for (const i of order) {
     const nextLongest = Math.max(longest, rows[i].length);
     const cost = (current.length + 1) * nextLongest;
-    if (current.length && (current.length >= MAX_BATCH_ROWS || cost > MAX_BATCH_COST)) {
+    // A blank row has no length to take a ratio against, and it is never the
+    // row that breaks - blank batches skip the model entirely - so measure the
+    // spread against the shortest row that has any content.
+    const span = Math.max(1, Math.min(shortest, rows[i].length || Infinity));
+    if (current.length && (current.length >= MAX_BATCH_ROWS || cost > MAX_BATCH_COST || nextLongest > span * MAX_BATCH_RATIO)) {
       batches.push(current);
       current = [];
       longest = 0;
+      shortest = Infinity;
     }
     current.push(i);
     longest = Math.max(longest, rows[i].length);
+    if (rows[i].length) shortest = Math.min(shortest, rows[i].length);
   }
   if (current.length) batches.push(current);
   return batches;
+}
+
+/* Safety net for the batching bug above. The ratio cap is a prediction about
+   when the library misbehaves; this is a check on what it actually returned, so
+   a corrupted row cannot reach a client even if a future version breaks under
+   some batch shape we did not predict.
+
+   Only a *trailing* run of one repeated punctuation mark counts, and only when
+   the source does not end that way itself - so a client writing "Help!!!!!" or
+   an ellipsis keeps every character, while 200 machine-generated periods do
+   not. Anything trimmed is logged: silently repairing a model's output is how a
+   real regression stays invisible. */
+const TRAILING_RUN = /([^\w\s])\1{4,}\s*$/;
+function stripRunawayRepeat(source, translated) {
+  if (typeof translated !== 'string') return translated;
+  const m = TRAILING_RUN.exec(translated);
+  if (!m) return translated;
+  const mark = m[1];
+  // How many of that mark the client's own text ends with; keep at least that
+  // many, so "Merci !!!" does not come back as "Thanks".
+  const tail = String(source || '').trimEnd();
+  let keep = 0;
+  while (keep < tail.length && tail[tail.length - 1 - keep] === mark) keep += 1;
+  console.warn(`local translation: trimmed ${m[0].trim().length} repeated "${mark}" from a row (library batch bug); kept ${keep}`);
+  return translated.slice(0, m.index) + mark.repeat(keep);
 }
 
 // One hop over every string: split what is too long, batch by length, translate
@@ -202,16 +321,23 @@ async function runHop(pair, texts, onProgress) {
   const batches = planBatches(rows);
   let done = 0;
   for (const batch of batches) {
-    const input = batch.map(i => rows[i]);
-    // A batch of blank-ish rows has nothing for the model to do, and asking it
-    // anyway is where opus-mt likes to invent a sentence out of "-".
-    if (input.every(t => !t.trim())) {
-      batch.forEach(i => { out[i] = rows[i]; });
-    } else {
-      const result = await translate(input);
+    // Blank rows are dropped per row, not per batch. A batch made entirely of
+    // them was already skipped, but one blank row travelling with real content
+    // still went to the model - and asking opus-mt to translate " " is where it
+    // invents a sentence ("The Commission's proposal is based on the following
+    // conclusions:" came back from a single space). They pass through untouched
+    // and cost nothing.
+    const send = batch.filter(i => rows[i].trim());
+    batch.filter(i => !rows[i].trim()).forEach(i => { out[i] = rows[i]; });
+    if (send.length) {
+      const input = send.map(i => rows[i]);
+      const result = await translate(input, {
+        num_beams: BEAMS,
+        max_new_tokens: newTokenBudget(input)
+      });
       const list = Array.isArray(result) ? result : [result];
-      batch.forEach((i, k) => {
-        const text = list[k]?.translation_text;
+      send.forEach((i, k) => {
+        const text = stripRunawayRepeat(rows[i], list[k]?.translation_text);
         // A row that produces nothing keeps its input, so a later hop still has
         // something to work with and the caller falls back to the original.
         out[i] = typeof text === 'string' && text.trim() ? text : rows[i];

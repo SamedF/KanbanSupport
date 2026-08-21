@@ -7320,12 +7320,36 @@ const localEngine = require('./translate-local');
 
 const TRANSLATE_LOCAL_ENABLED = !/^(off|none|false|0|disabled)$/i.test(String(process.env.TRANSLATE_LOCAL || '').trim());
 const TRANSLATE_LOCAL_DIR = String(process.env.TRANSLATE_LOCAL_MODELS || path.join(__dirname, 'data', 'mt-models'));
-// Two resident models is about 1.5GB of RSS while they are loaded - but they are
-// only loaded while someone is translating: the worker is torn down once it goes
-// idle (TRANSLATE_LOCAL_IDLE_MS in translate-local.js), which returns that
-// memory to the OS rather than holding it until the next deploy. Raise the cap
-// on a bigger box.
-const TRANSLATE_LOCAL_MAX_MODELS = Number(process.env.TRANSLATE_LOCAL_MAX_MODELS || 2);
+// One resident model is about 700MB of RSS while it is loaded, two about 1.5GB -
+// and they are only loaded while someone is translating: the worker is torn down
+// once it goes idle (TRANSLATE_LOCAL_IDLE_MS in translate-local.js), which
+// returns that memory to the OS rather than holding it until the next deploy.
+// The default is one; raise it on a bigger box to keep a language and its
+// reverse warm.
+const TRANSLATE_LOCAL_MAX_MODELS = Number(process.env.TRANSLATE_LOCAL_MAX_MODELS || 1);
+// ONNX Runtime's CPU arena. Off, because on it the footprint climbed with every
+// ticket translated - 414MB, then 571MB, then 682MB over three - and only came
+// back when the worker was torn down. Off, it stays flat at ~410MB, for about
+// two thirds more wall clock. TRANSLATE_LOCAL_ARENA=on for the faster, hungrier
+// behaviour. See the measurements in translate-local-worker.js.
+const TRANSLATE_LOCAL_ARENA = /^(1|on|true|yes)$/i.test(String(process.env.TRANSLATE_LOCAL_ARENA || '').trim());
+// Beam search width, left at the model's own 4. Greedy decoding was tried as a
+// memory saving and is not one: measured within noise on peak RSS and slower,
+// because it keeps generating where a beam search has settled. See the note in
+// translate-local-worker.js before reaching for it.
+const TRANSLATE_LOCAL_BEAMS = Number(process.env.TRANSLATE_LOCAL_BEAMS || 4);
+// ONNX intra-op threads. 0 leaves it to the runtime, which is the default and
+// the fastest; it made no measurable difference to peak RSS, so set this only to
+// stop translation taking CPU from the web server it shares a box with.
+const TRANSLATE_LOCAL_THREADS = Number(process.env.TRANSLATE_LOCAL_THREADS || 0);
+// Hard ceiling on generated tokens per row - a guard against a repetition loop
+// growing a KV cache for tokens nothing asked for. The worker scales it down
+// per batch from the longest row in that batch.
+const TRANSLATE_LOCAL_MAX_NEW_TOKENS = Number(process.env.TRANSLATE_LOCAL_MAX_NEW_TOKENS || 256);
+// Weight precision. q8 is what Xenova publishes for opus-mt and what the disk
+// cache holds; the knob exists so a smaller quantisation can be tried without
+// editing the worker.
+const TRANSLATE_LOCAL_DTYPE = String(process.env.TRANSLATE_LOCAL_DTYPE || 'q8');
 // A stall timeout, not a length limit: the worker reports progress after every
 // batch, and each report pushes this deadline out. So the ceiling is "stopped
 // making progress for this long", which is what a wedged worker looks like,
@@ -7335,13 +7359,24 @@ const TRANSLATE_LOCAL_TIMEOUT_MS = Number(process.env.TRANSLATE_LOCAL_TIMEOUT_MS
 // why a whole ticket must not be one batch.
 const TRANSLATE_LOCAL_BATCH_ROWS = Number(process.env.TRANSLATE_LOCAL_BATCH_ROWS || 8);
 const TRANSLATE_LOCAL_BATCH_COST = Number(process.env.TRANSLATE_LOCAL_BATCH_COST || 3200);
+// How far apart in length two rows may be before they go in separate batches.
+// Not a performance knob - batching a 371-character paragraph beside "Bonjour,"
+// makes the library corrupt every row in that batch with a run of periods. See
+// the reproduction in translate-local-worker.js.
+const TRANSLATE_LOCAL_BATCH_RATIO = Number(process.env.TRANSLATE_LOCAL_BATCH_RATIO || 8);
 
 function localEngineOptions() {
   return {
     cacheDir: TRANSLATE_LOCAL_DIR,
     maxModels: TRANSLATE_LOCAL_MAX_MODELS,
     batchRows: TRANSLATE_LOCAL_BATCH_ROWS,
-    batchCost: TRANSLATE_LOCAL_BATCH_COST
+    batchCost: TRANSLATE_LOCAL_BATCH_COST,
+    beams: TRANSLATE_LOCAL_BEAMS,
+    threads: TRANSLATE_LOCAL_THREADS,
+    maxNewTokens: TRANSLATE_LOCAL_MAX_NEW_TOKENS,
+    dtype: TRANSLATE_LOCAL_DTYPE,
+    arena: TRANSLATE_LOCAL_ARENA,
+    batchRatio: TRANSLATE_LOCAL_BATCH_RATIO
   };
 }
 
