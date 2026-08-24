@@ -9394,38 +9394,43 @@ async function openEmailModal(ticket){
    re-runs exactly this, rather than making the agent close and reopen the
    ticket. Guards on the modal still showing the same ticket: a slow fetch must
    not paint its body over whichever ticket the agent has moved on to. */
-async function loadEmailBody(ticket,uri){
-  const{email,id}=ticket;
+/* The message body, and where it comes from.
+
+   Every open used to be a Graph call for a message that never changes, so the
+   same body was re-fetched by every agent, every time, and the ticket could
+   only show what Graph felt like returning at that moment. The stored copy is
+   asked first now; Graph is the fallback, and what it returns is posted back so
+   the next open - anyone's - is served from the ticket.
+
+   Both paths go through emRenderEmailBody so a cached open and a live one
+   render through the same code rather than two copies that drift. What is
+   stored is the raw body exactly as Graph gave it, not the processed HTML, so
+   the processing below stays the single place it happens and a change to it
+   applies to bodies that were already captured. */
+function emPrepareBodyHtml(raw,isHtml){
+  let body=String(raw||'');
+  if(!body)return '';
+  if(isHtml)return body.replace(/<script[\s\S]*?<\/script>/gi,'').replace(/<style[\s\S]*?<\/style>/gi,'').replace(/<a /gi,'<a target="_blank" ');
+  // Plain-text mail: <br> per newline is not enough on its own, because runs
+  // of spaces and blank lines are the only structure a text mail has. The
+  // pre-wrap wrapper below keeps them.
+  return `<div style="white-space:pre-wrap">${esc(body)}</div>`;
+}
+
+function emRenderEmailBody({ticket,id,bodyHtml,images,imagesError,uri}){
   const host=document.getElementById('em-body');
-  host.innerHTML='<div class="loading"><div class="spinner"></div><span class="loading-label">Loading the message from Outlook...</span></div>';
-  const res=await window.cowork.callMcpTool(READ_TOOL,{uri});
-  if(emTrState.ticketId!==id)return;
-  if(res.isError){renderEmailLoadFailure(ticket,uri,res.error);return;}
-  const sc=res.structuredContent;let body='',images=[];
-  let isHtml=false;
-  if(sc){
-    body=sc.body?.content||sc.bodyPreview||sc.preview||'';
-    isHtml=(sc.body?.contentType||'').toLowerCase()==='html';
-    if(isHtml){body=body.replace(/<script[\s\S]*?<\/script>/gi,'').replace(/<style[\s\S]*?<\/style>/gi,'').replace(/<a /gi,'<a target="_blank" ');}
-    // Plain-text mail: <br> per newline is not enough on its own, because runs
-    // of spaces and blank lines are the only structure a text mail has. The
-    // pre-wrap wrapper below keeps them.
-    else body=`<div style="white-space:pre-wrap">${esc(body)}</div>`;
-  }
-  if(sc&&Array.isArray(sc.imageAttachments))images=sc.imageAttachments;
-  if(!body){const raw=(res.content||[]).map(c=>c.text||'').join('');body=raw?`<div style="white-space:pre-wrap">${esc(raw)}</div>`:'<em style="color:var(--slate-400)">No content.</em>';}
-  const rendered=renderEmailBodyWithImages(body,images);
+  const rendered=renderEmailBodyWithImages(bodyHtml,images||[]);
   // The pictures are a separate Graph call and it is the one that gets
   // throttled. It no longer takes the body down with it, but the agent still
   // has to be told that what they are looking at is missing its images. The
   // notice goes beside the white sheet, not on it, so it stays themed.
-  if(sc?.imagesError){
+  if(imagesError){
     host.replaceChildren(emailNoticeEl({
       tone:'warn',
       text:'The message loaded but its images did not.',
-      detail:sc.imagesError,
-      onRetry:()=>loadEmailBody(ticket,uri),
-      webLink:email.webLink
+      detail:imagesError,
+      onRetry:()=>loadEmailBody(ticket,uri,{refresh:true}),
+      webLink:ticket?.email?.webLink
     }),rendered);
   }else{
     host.replaceChildren(rendered);
@@ -9439,6 +9444,60 @@ async function loadEmailBody(ticket,uri){
   // If the agent already chose to read this ticket in another language, follow
   // through without making them ask again.
   trAutoTranslateBody(id);
+}
+
+// Hand the body we just fetched to the server so the next open does not have to
+// fetch it again. Deliberately not awaited and deliberately silent: this is a
+// cache fill, and an agent reading a ticket should never see it fail.
+function emStoreBody(id,messageId,raw,isHtml,images){
+  try{
+    fetch(`/api/tickets/${encodeURIComponent(id)}/body`,{
+      method:'PUT',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({body:raw,messageId,contentType:isHtml?'html':'text',images:(images||[]).map(a=>({id:a.id,name:a.name,contentType:a.contentType,contentId:a.contentId}))})
+    }).catch(()=>{});
+  }catch(_){}
+}
+
+async function loadEmailBody(ticket,uri,{refresh=false}={}){
+  const{email,id}=ticket;
+  const host=document.getElementById('em-body');
+  host.innerHTML='<div class="loading"><div class="spinner"></div><span class="loading-label">Loading the message...</span></div>';
+  // Stored copy first. A miss, a not-yet-synced ticket and a server that is
+  // unhappy all land in the same place - go and ask Outlook - so this can never
+  // be the reason a ticket will not open.
+  if(!refresh){
+    try{
+      const r=await fetch(`/api/tickets/${encodeURIComponent(id)}/body?messageId=${encodeURIComponent(email?.id||'')}`);
+      if(r.ok){
+        const cached=await r.json();
+        if(emTrState.ticketId!==id)return;
+        if(cached?.cached&&cached.body){
+          emRenderEmailBody({ticket,id,bodyHtml:emPrepareBodyHtml(cached.body,String(cached.contentType||'html')!=='text'),images:cached.images,imagesError:'',uri});
+          return;
+        }
+      }
+    }catch(_){}
+    if(emTrState.ticketId!==id)return;
+  }
+  host.innerHTML='<div class="loading"><div class="spinner"></div><span class="loading-label">Loading the message from Outlook...</span></div>';
+  const res=await window.cowork.callMcpTool(READ_TOOL,{uri});
+  if(emTrState.ticketId!==id)return;
+  if(res.isError){renderEmailLoadFailure(ticket,uri,res.error);return;}
+  const sc=res.structuredContent;let images=[];
+  let isHtml=false,raw='';
+  if(sc){
+    raw=sc.body?.content||sc.bodyPreview||sc.preview||'';
+    isHtml=(sc.body?.contentType||'').toLowerCase()==='html';
+  }
+  if(sc&&Array.isArray(sc.imageAttachments))images=sc.imageAttachments;
+  let bodyHtml=emPrepareBodyHtml(raw,isHtml);
+  // Only a real body is worth keeping. The text-content fallback below and the
+  // 'No content' placeholder are what we show when the fetch came back empty,
+  // and storing either would cache the failure instead of the message.
+  if(bodyHtml)emStoreBody(id,email?.id||'',raw,isHtml,images);
+  if(!bodyHtml){const txt=(res.content||[]).map(c=>c.text||'').join('');bodyHtml=txt?`<div style="white-space:pre-wrap">${esc(txt)}</div>`:'<em style="color:var(--slate-400)">No content.</em>';}
+  emRenderEmailBody({ticket,id,bodyHtml,images,imagesError:sc?.imagesError||'',uri});
 }
 
 /* What to say, and what to offer, for the failure that actually happened. The

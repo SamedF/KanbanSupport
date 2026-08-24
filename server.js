@@ -3355,6 +3355,92 @@ app.delete('/api/tickets/:externalId/duplicate', requireAuth, async (req, res) =
     return res.status(500).json({ error: String(error.message || error) });
   }
 });
+// The stored copy of a message body, and the route that stores it.
+//
+// Opening a ticket called Graph every time, for every agent, for a message
+// that does not change. The client now asks here first and only falls back to
+// Graph on a miss, then posts what it got back. So the first open of a ticket
+// costs what it always did and every later open costs nothing - and once a
+// body is here the ticket keeps showing it even when Graph is throttled,
+// re-authenticating, or refusing the app's credentials outright.
+//
+// Bodies are big, so they live behind their own route rather than riding along
+// on the board's ticket list: prismaClient.js omits the columns globally and
+// this is the one place that opts back in.
+const EMAIL_BODY_MAX_CHARS = Number(process.env.EMAIL_BODY_MAX_CHARS || 1_000_000);
+
+app.get('/api/tickets/:externalId/body', requireAuth, async (req, res) => {
+  try {
+    const externalId = String(req.params.externalId || '').trim();
+    if (!externalId) return res.status(400).json({ error: 'missing_ticket' });
+    const ticket = await prisma.ticket.findUnique({
+      where: { externalId },
+      select: { emailBody: true, emailBodyType: true, emailBodyImages: true, emailBodyAt: true, emailBodyMessageId: true }
+    });
+    // A ticket with no row here yet, and a ticket the board has never pushed to
+    // the database, are the same answer to the caller: nothing stored, go and
+    // fetch it. Not a 404 - the ticket may be perfectly real and simply new.
+    if (!ticket?.emailBody) return res.json({ cached: false });
+    // A ticket is a thread. When a reply is merged in, the ticket keeps its
+    // externalId but the message it now points at changes, and the stored body
+    // is then the wrong message rather than an old copy of the right one. The
+    // caller says which message it wants; a mismatch is a miss, so the reply
+    // gets fetched and replaces this row. Callers that ask for no particular
+    // message still get whatever is stored.
+    const wanted = String(req.query.messageId || '').trim();
+    if (wanted && ticket.emailBodyMessageId && wanted !== ticket.emailBodyMessageId) {
+      return res.json({ cached: false, reason: 'stale_message' });
+    }
+    return res.json({
+      cached: true,
+      body: ticket.emailBody,
+      contentType: ticket.emailBodyType || 'html',
+      images: Array.isArray(ticket.emailBodyImages) ? ticket.emailBodyImages : [],
+      cachedAt: ticket.emailBodyAt,
+      messageId: ticket.emailBodyMessageId
+    });
+  } catch (error) {
+    return res.status(500).json({ error: String(error.message || error) });
+  }
+});
+
+app.put('/api/tickets/:externalId/body', requireAuth, async (req, res) => {
+  try {
+    const externalId = String(req.params.externalId || '').trim();
+    if (!externalId) return res.status(400).json({ error: 'missing_ticket' });
+    const body = String(req.body?.body || '');
+    if (!body.trim()) return res.status(400).json({ error: 'empty_body' });
+    // An outsized body is not stored rather than stored truncated: half a
+    // message that looks whole is worse than falling back to the live fetch,
+    // which still works and still shows all of it.
+    if (body.length > EMAIL_BODY_MAX_CHARS) return res.json({ ok: false, reason: 'too_large', limit: EMAIL_BODY_MAX_CHARS });
+    const contentType = String(req.body?.contentType || 'html').toLowerCase() === 'text' ? 'text' : 'html';
+    const messageId = String(req.body?.messageId || '').trim() || null;
+    // Metadata only. Anything carrying bytes is dropped here as well as at the
+    // source, so a future caller cannot quietly put megabytes of base64 back
+    // into the row that was deliberately emptied of them.
+    const images = (Array.isArray(req.body?.images) ? req.body.images : [])
+      .slice(0, 100)
+      .map(a => ({
+        id: String(a?.id || ''),
+        name: String(a?.name || 'image').slice(0, 300),
+        contentType: String(a?.contentType || '').slice(0, 100),
+        contentId: String(a?.contentId || '').slice(0, 300)
+      }))
+      .filter(a => a.id);
+    // updateMany, not update: a board ticket that has never been synced has no
+    // row, and that is a no-op here rather than a 500. The body is worth
+    // storing when there is somewhere to put it, and never worth failing an
+    // open over.
+    const result = await prisma.ticket.updateMany({
+      where: { externalId },
+      data: { emailBody: body, emailBodyType: contentType, emailBodyImages: images, emailBodyAt: new Date(), emailBodyMessageId: messageId }
+    });
+    return res.json({ ok: true, stored: result.count > 0 });
+  } catch (error) {
+    return res.status(500).json({ error: String(error.message || error) });
+  }
+});
 app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
   try {
     const bounds = kpiDateBounds(req.query.range);
