@@ -2345,22 +2345,25 @@ header {
 }
 
 /* Mail is authored at whatever width the sender's client used - a signature
-   table or a pasted screenshot is routinely wider than this modal - so the body
-   scrolls sideways inside itself.
-   overflow-x: scroll already reserved the axis, but the bar itself was
-   effectively invisible: WebKit hides overlay scrollbars until they are used,
-   and the page's generic thin scrollbar styling gave no track to see when idle.
-   A wide mail therefore looked simply cut off. Same always-visible treatment as
-   .kpi-scroll-x, which exists for exactly this reason. */
+   table or a pasted screenshot is routinely wider than this modal - and the
+   body used to scroll sideways inside itself, with an always-visible
+   horizontal bar pinned under the message.
+   That bar cost a strip of the reading area on every single ticket, so the mail
+   is reflowed to the modal's width instead: long words and URLs break, wide
+   tables and images shrink to fit. Nothing is cut off and there is no bar.
+   Vertical scrolling keeps the visible-track treatment - that one is load
+   bearing, a long thread has to look scrollable. Sideways stays *auto* rather
+   than hidden: a mail table with hard pixel widths can still out-measure the
+   sheet, and clipping it would hide content instead of just hiding a bar. In
+   the normal case nothing overflows, so no bar is drawn. */
 #em-body {
-  overflow-x: scroll;
+  overflow-x: auto;
   overflow-y: auto;
   overscroll-behavior: contain;
   scrollbar-width: thin;
   scrollbar-color: rgba(var(--slate-400-rgb), .85) rgba(var(--slate-200-rgb), .55);
 }
 #em-body::-webkit-scrollbar {
-  height: 12px;
   width: 12px;
 }
 #em-body::-webkit-scrollbar-track {
@@ -2377,21 +2380,31 @@ header {
   background: rgba(var(--slate-500-rgb), .95);
   background-clip: padding-box;
 }
-/* The horizontal bar sits at the bottom edge of the scroll box, so the sheet
-   needs to clear it rather than sit under it. */
-#em-body > div:last-child {
-  margin-bottom: 4px;
-}
 
+/* Wrap rather than widen. anywhere (not break-word) because the usual culprit
+   is a single unbroken tracking URL or a base64 blob, which break-word leaves
+   sticking out past the sheet. */
 #em-body > div {
-  width: max-content;
-  min-width: 100%;
-  max-width: none;
+  width: auto;
+  max-width: 100%;
+  overflow-wrap: anywhere;
 }
 
+/* fixed layout is what stops a mail table from sizing itself to its widest
+   cell and pushing past the sheet again. */
 #em-body table {
-  width: max-content;
-  max-width: none;
+  width: auto;
+  max-width: 100%;
+  table-layout: fixed;
+}
+#em-body td,
+#em-body th {
+  overflow-wrap: anywhere;
+}
+/* Code blocks and pasted logs carry their own long lines. */
+#em-body pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 /* Raw email HTML carries its own inline color/background styles from whatever
@@ -2419,7 +2432,7 @@ header {
 }
 
 #em-body img {
-  max-width: none;
+  max-width: 100%;
   height: auto;
   border-radius: 8px;
 }
@@ -4399,7 +4412,7 @@ th {
 <div id="toast"></div>
 
 <!-- Email modal -->
-<div class="modal-bg" id="email-modal"><div class="modal"><div class="modal-head"><h2 id="em-title"></h2><button class="modal-close-x" data-close="email-modal"></button></div><div class="modal-meta-bar" id="em-meta"></div><div class="tr-bar" id="em-tr-bar"></div><div class="modal-body-scroll" id="em-body"></div><div class="modal-actions"><button class="btn-out" data-close="email-modal">Close</button><button class="btn-out" id="em-outlook">Open in Outlook </button></div></div></div>
+<div class="modal-bg" id="email-modal"><div class="modal"><div class="modal-head"><h2 id="em-title"></h2><button class="modal-close-x" data-close="email-modal"></button></div><div class="modal-meta-bar" id="em-meta"></div><div class="tr-bar" id="em-tr-bar"></div><div class="modal-body-scroll" id="em-body"></div><div class="modal-actions"><button class="btn-out" data-close="email-modal">Close</button><button class="btn-out" id="em-copy" title="Copy the whole message - header and body - to the clipboard">Copy email</button></div></div></div>
 <!-- One shared language picker for every translate trigger on the page. See the
      .tr-trigger CSS for why this is a single element rather than one per card. -->
 <div id="tr-pop" role="dialog" aria-label="Translate ticket">
@@ -8177,11 +8190,24 @@ async function trRequest(ticketId,targetLang,segments,{force=false}={}){
     credentials:'include',
     body:JSON.stringify({ticketId,targetLang,segments,force})
   });
-  const data=await r.json().catch(()=>({}));
+  const data=await r.json().catch(()=>null);
   if(!r.ok){
-    const err=new Error(data?.message||data?.error||`Translation failed (${r.status})`);
-    err.code=data?.error;
-    err.retryable=!!data?.retryable;
+    // A body we cannot parse did not come from this app. Every failure the route
+    // itself raises is JSON carrying a reason; an unparseable 502/504 is the
+    // gateway in front of it giving up on a request that ran too long, and
+    // reporting that as a bare "Translation failed (502)" is what left agents
+    // with a status code and nothing to do about it.
+    if(!data){
+      const err=new Error(r.status===502||r.status===503||r.status===504
+        ?'The translation took too long and the connection was dropped before it finished. It may still be running - reopen the ticket in a moment and the finished translation will be there.'
+        :`The translation service answered ${r.status} with no reason given.`);
+      err.code='translation_gateway';
+      err.retryable=true;
+      throw err;
+    }
+    const err=new Error(data.message||data.error||`Translation failed (${r.status})`);
+    err.code=data.error;
+    err.retryable=!!data.retryable;
     throw err;
   }
   const langs=trCachedLangs.get(ticketId)||new Set();
@@ -8201,7 +8227,7 @@ function trReportError(err){
     ||code==='translation_source_undetected'
     ||code==='translation_auth_failed'){showToast(err?.message||'Translation is unavailable','warn');return;}
   if(code==='translation_rate_limited'){showToast('Translation is rate limited right now - try again in a moment','warn');return;}
-  if(code==='translation_unreachable'){showToast(err?.message||'Could not reach the translation service','warn');return;}
+  if(code==='translation_unreachable'||code==='translation_gateway'){showToast(err?.message||'Could not reach the translation service','warn');return;}
   if(code==='too_many_segments'||code==='content_too_large'){showToast('This ticket is too long to translate in one go','warn');return;}
   if(code==='no_translatable_segments'){showToast('Nothing to translate on this ticket','warn');return;}
   showToast(`Translation failed: ${err?.message||'unknown error'}`);
@@ -8243,7 +8269,7 @@ function trTicketSegments(ticket){
   return segs;
 }
 
-async function trTranslateTicket(id,targetLang){
+async function trTranslateTicket(id,targetLang,{force=false}={}){
   if(trBusy.has(id))return;
   const ticket=allTickets.find(t=>t.id===id);
   if(!ticket)return;
@@ -8257,7 +8283,7 @@ async function trTranslateTicket(id,targetLang){
   renderBoard();
   const noteCount=segments.filter(s=>s.id.startsWith('n')).length;
   try{
-    const data=await trRequest(id,targetLang,segments);
+    const data=await trRequest(id,targetLang,segments,{force});
     const map=data.segments||{};
     trCardCache.set(id,{
       targetLang:data.targetLang,
@@ -8294,7 +8320,7 @@ async function trTranslateTicket(id,targetLang){
 // Called when the email modal finishes rendering a body. A ticket the agent has
 // already chosen to read in another language should not need a second click.
 function trAutoTranslateBody(id){
-  const lang=trTicketLang.get(id);
+  const lang=trTicketLang.get(id)||trCardCache.get(id)?.targetLang;
   if(!lang||!trShown.has(id))return;
   if(emTrState.ticketId!==id||emTrState.busy||emTrState.lang)return;
   trTranslateEmailBody(id,lang);
@@ -8528,6 +8554,31 @@ function trRenderEmailBar(){
   bar.innerHTML=html;
 }
 
+/* A real mail body is nothing like a card: a thread with a quoted history, a
+   signature and a legal footer runs to hundreds of separate text runs, and the
+   server refuses a request over its per-request ceilings. The email path used
+   to hand the whole body over in one go and, when that was too big, print
+   "over the limit" and leave the agent reading the original - which is what
+   "the translation does not work when I open a ticket" looked like from the
+   outside. Split it into requests the server will accept instead. Segment ids
+   stay globally indexed, so each chunk is its own cache entry and the results
+   merge back into one map. */
+function trChunkSegments(segments,maxSegments,maxChars){
+  const chunks=[];
+  let current=[],chars=0;
+  for(const seg of segments){
+    // A single run over the char budget still has to go somewhere - its own
+    // chunk, rather than being split mid-sentence.
+    if(current.length&&(current.length>=maxSegments||chars+seg.text.length>maxChars)){
+      chunks.push(current);current=[];chars=0;
+    }
+    current.push(seg);
+    chars+=seg.text.length;
+  }
+  if(current.length)chunks.push(current);
+  return chunks;
+}
+
 async function trTranslateEmailBody(id,targetLang){
   const body=document.getElementById('em-body');
   const titleEl=document.getElementById('em-title');
@@ -8548,19 +8599,32 @@ async function trTranslateEmailBody(id,targetLang){
   const subject=String(titleEl.textContent||'').trim();
   if(subject)segments.unshift({id:'subject',text:subject});
   if(!segments.length){showToast('Nothing to translate in this message','warn');return;}
-  if(segments.length>trLimits.maxSegments){
-    showToast(`This message has ${segments.length} text runs, over the ${trLimits.maxSegments} limit`,'warn');
-    return;
-  }
+  const chunks=trChunkSegments(
+    segments,
+    Math.max(1,trLimits.maxSegments||600),
+    // Just under the server ceiling: it counts the same characters we do, and a
+    // chunk rejected for being one character over is a whole wasted round trip.
+    Math.max(2000,Math.floor((trLimits.maxChars||200000)*0.9))
+  );
 
   emTrState.busy=true;
   trRenderEmailBar();
   try{
-    const data=await trRequest(id,targetLang,segments);
-    const map=data.segments||{};
-    // The modal can be closed, or moved to another ticket, while this is in
-    // flight - writing into it then would corrupt whatever is on screen now.
-    if(emTrState.ticketId!==id)return;
+    const map={};
+    let data=null;
+    for(const chunk of chunks){
+      const part=await trRequest(id,targetLang,chunk);
+      // The modal can be closed, or moved to another ticket, while this is in
+      // flight - writing into it then would corrupt whatever is on screen now,
+      // and there is no point paying for the chunks that are left.
+      if(emTrState.ticketId!==id)return;
+      Object.assign(map,part.segments||{});
+      // The first answer names the source language. "Cached" only holds if
+      // every chunk was a hit, otherwise the toast would claim a translation
+      // that was just paid for.
+      data=data?{...data,cached:data.cached&&part.cached}:part;
+    }
+    if(!data)return;
     if(typeof map.subject==='string'){
       emTrState.subjectOriginal=subject;
       titleEl.textContent=map.subject;
@@ -8691,17 +8755,14 @@ document.getElementById('com-tr-bar')?.addEventListener('click',ev=>{
   if(ev.target.closest('[data-tr-com-original]')){ev.stopPropagation();trRevertNotes();}
 });
 
-async function trForceRetranslateCard(id,lang){
-  const ticket=allTickets.find(t=>t.id===id);
-  if(!ticket)return;
-  trBusy.add(id);renderBoard();
-  try{
-    const data=await trRequest(id,lang,trCardSegments(ticket),{force:true});
-    trCardCache.set(id,{targetLang:data.targetLang,sourceLang:data.sourceLang,sourceLangName:data.sourceLangName,segments:data.segments||{}});
-    trShown.add(id);
-    showToast(`Re-translated to ${trLangName(data.targetLang)}`,'ok');
-  }catch(err){trReportError(err);}
-  finally{trBusy.delete(id);renderBoard();}
+/* "Re-translate (ignore cache)" for the whole ticket. It used to have its own
+   copy of the request/apply logic, which called a trCardSegments() that does
+   not exist - so the button only ever produced "Translation failed:
+   trCardSegments is not defined", and worse, it never wrote the ticket's
+   remembered language, so a ticket that got here stopped auto-translating its
+   body on open. One path now, with force threaded through it. */
+function trForceRetranslateCard(id,lang){
+  return trTranslateTicket(id,lang,{force:true});
 }
 
 function makeCard(ticket,isNew=false){
@@ -9052,13 +9113,20 @@ function trIndexInlineImages(list){
   const byKey=new Map();
   const add=(k,x)=>{const key=String(k||'').replace(/^<|>$/g,'').trim().toLowerCase();if(key&&!byKey.has(key))byKey.set(key,x);};
   list.forEach(x=>{
-    if(!x.dataUrl)return;
+    if(!emImageSrc(x))return;
     add(x.contentId,x);
     add(String(x.contentId||'').split('@')[0],x);
     add(x.name,x);
   });
   return byKey;
 }
+
+// Where the bytes for one attachment come from. `url` is the server streaming
+// the picture out of the mail store one request at a time, which is what it now
+// sends; `dataUrl` is the old inline base64, kept so a browser holding a cached
+// copy of this page against an older server still renders its pictures rather
+// than deleting them.
+function emImageSrc(x){return x&&(x.url||x.dataUrl)||'';}
 
 // Remote images in a signature (a CDN behind auth, a host that is simply gone,
 // a tracking pixel) cannot be made to load from here. Leaving the element
@@ -9104,15 +9172,36 @@ function renderEmailBodyWithImages(body,images){
   // A cid: table/cell background can never resolve either, and unlike an <img>
   // it fails silently - drop the attribute so the mail's own colors apply.
   wrap.querySelectorAll('[background^="cid:" i]').forEach(el=>el.removeAttribute('background'));
+
+  // Which cid: references the keyed lookup can actually serve, and which images
+  // no reference reaches. When both sets are non-empty and the same size, the
+  // body and the mailbox are describing the same pictures under names that do
+  // not match, so document order is a better answer than deleting them - see
+  // the fallback in the loop below.
+  const cidOf=img=>String(img.getAttribute('src')||'').trim().match(/^cid:(.+)$/i)?.[1]?.replace(/^<|>$/g,'').toLowerCase()||'';
+  const cidImgs=[...wrap.querySelectorAll('img')].map(cidOf).filter(Boolean);
+  const hit=cid=>inlineByCid.get(cid)||inlineByCid.get(cid.split('@')[0]);
+  const missCount=cidImgs.filter(cid=>!hit(cid)).length;
+  const placed=new Set(cidImgs.map(hit).filter(Boolean).map(x=>x.id||x.contentId));
+  const spare=list.filter(x=>emImageSrc(x)&&!placed.has(x.id||x.contentId));
+  const unmatched=(missCount>0&&missCount===spare.length)?spare.slice():[];
+
   wrap.querySelectorAll('img').forEach(img=>{
     const src=String(img.getAttribute('src')||'').trim();
-    const cid=src.match(/^cid:(.+)$/i)?.[1]?.replace(/^<|>$/g,'').toLowerCase();
+    const cid=cidOf(img);
     if(cid){
       // A cid: src is only meaningful inside the mail store - a browser can
       // never fetch it. Either we swap in the bytes, or we drop the element:
       // leaving it renders a broken-image icon and hides the fact that the
       // picture is available in the gallery below.
-      const found=inlineByCid.get(cid)||inlineByCid.get(cid.split('@')[0]);
+      let found=inlineByCid.get(cid)||inlineByCid.get(cid.split('@')[0]);
+      // Last resort before deleting somebody's screenshot: if the message
+      // carries exactly as many unplaced images as the body has unresolved
+      // cid: references, the two lists are the same pictures under names that
+      // did not match, so pair them off in document order. Outlook and Graph
+      // disagreeing about contentId spelling is the whole reason the lookup
+      // above has three keys, and this is the case where all three miss.
+      if(!found&&unmatched.length)found=unmatched.shift();
       if(!found){
         // Nothing to swap in - the bytes never came back from the mail store.
         // An unlabelled one is signature decoration (a divider, a social icon,
@@ -9123,9 +9212,9 @@ function renderEmailBodyWithImages(body,images){
         else img.remove();
         return;
       }
-      img.src=found.dataUrl;
+      img.src=emImageSrc(found);
       img.alt=img.alt||found.name||'Email image';
-      used.add(found.id||found.contentId||found.dataUrl);
+      used.add(found.id||found.contentId||emImageSrc(found));
     }else if(location.protocol==='https:'&&/^http:\/\//i.test(src)){
       // The board is served over TLS, so a plain-http image in a signature is
       // blocked as mixed content before the request is even made - a broken
@@ -9141,11 +9230,12 @@ function renderEmailBodyWithImages(body,images){
   // actually substituted, not on isInline. Outlook marks a pasted screenshot
   // inline whether or not the body ends up referencing its cid, and filtering
   // on the flag made those images vanish from the ticket entirely.
-  const visible=list.filter(x=>x.dataUrl&&!used.has(x.id||x.contentId||x.dataUrl));
+  const visible=list.filter(x=>emImageSrc(x)&&!used.has(x.id||x.contentId||emImageSrc(x)));
   if(visible.length){
     const gallery=document.createElement('div');
     gallery.className='email-image-attachments';
-    gallery.innerHTML=visible.map(x=>`<a class="email-image-attachment" href="${esc(x.dataUrl)}" target="_blank" rel="noopener noreferrer"><img src="${esc(x.dataUrl)}" alt="${esc(x.name||'Email image')}" loading="lazy" decoding="async"><span>${esc(x.name||'Email image')}</span></a>`).join('');
+    gallery.innerHTML=visible.map(x=>{const u=esc(emImageSrc(x));const n=esc(x.name||'Email image');
+      return `<a class="email-image-attachment" href="${u}" target="_blank" rel="noopener noreferrer"><img src="${u}" alt="${n}" loading="lazy" decoding="async"><span>${n}</span></a>`;}).join('');
     wrap.firstElementChild.appendChild(gallery);
   }
   // The node, not its innerHTML: the error handlers above are the whole point
@@ -9153,8 +9243,94 @@ function renderEmailBodyWithImages(body,images){
   return wrap.firstElementChild;
 }
 
+/* ------------------------------------------------------- copy on open
+
+   Agents were opening the ticket, then opening the message itself in Outlook,
+   only to select-all and copy it into HubSpot, a Jira description or a reply.
+   The modal does that for them: the moment the message is on screen it is also
+   on the clipboard - the header the ticket shows (client, dates, SLA, company,
+   Jira, HubSpot) followed by the body as the client sent it. Two flavours go on
+   the clipboard at once, so a paste into anything rich keeps the formatting and
+   the tables, and a paste into a plain box gets readable text rather than
+   markup. Opening the mail in Outlook is no longer part of the flow. */
+
+// The ticket the email modal is currently showing, so the Copy button can
+// re-copy without going hunting for it.
+let emCurrentTicket=null;
+
+// What lands on the clipboard. Read off the modal's own DOM rather than rebuilt
+// from the ticket, so what is copied is exactly what the agent is looking at -
+// including a translation, if one is showing by then.
+function emCopyPayload(){
+  const title=String(document.getElementById('em-title')?.textContent||'').trim();
+  const meta=document.getElementById('em-meta');
+  const host=document.getElementById('em-body');
+  if(!host)return null;
+  // Direct children only: the SLA entry nests spans inside its own, and
+  // collecting those too would print every clock twice.
+  const metaLines=meta?[...meta.querySelectorAll(':scope > span')].map(s=>s.textContent.replace(/\s+/g,' ').trim()).filter(Boolean):[];
+  // The white sheet is the message. Anything else in the host - a spinner, a
+  // "the images did not load" notice - is our chrome and has no business on
+  // somebody's clipboard.
+  const sheet=host.querySelector('.email-body-content');
+  if(!sheet)return null;
+  const bodyText=(sheet.innerText||sheet.textContent||'').replace(/\n{3,}/g,'\n\n').trim();
+  const header=[title,...metaLines].filter(Boolean).join('\n');
+  const html=`<div>${title?`<div style="font-size:16px;font-weight:700;margin-bottom:6px;">${esc(title)}</div>`:''}`
+    +(metaLines.length?`<div style="font-size:12px;color:#475569;margin-bottom:10px;">${metaLines.map(esc).join('<br>')}</div>`:'')
+    +`${sheet.innerHTML}</div>`;
+  return {text:`${header}\n\n${bodyText}`.trim(),html};
+}
+
+// Last resort for a browser that refuses the async clipboard: a hidden textarea
+// and the old command. Plain text only, which is why it is not the first choice.
+function emCopyFallback(text){
+  try{
+    const ta=document.createElement('textarea');
+    ta.value=text;
+    ta.setAttribute('readonly','');
+    ta.style.cssText='position:fixed;top:-1000px;left:-1000px;opacity:0;';
+    document.body.appendChild(ta);
+    ta.select();
+    const ok=document.execCommand('copy');
+    ta.remove();
+    return ok;
+  }catch(_){return false;}
+}
+
+/* auto=true is the copy that happens by itself when a ticket opens: it must not
+   nag. A clipboard write needs the tab focused and the permission granted, and
+   an agent who alt-tabbed away mid-load does not need a red toast about it -
+   the Copy email button is right there. A copy they actually clicked always
+   says what happened. */
+async function emCopyEmail({auto=false}={}){
+  const p=emCopyPayload();
+  if(!p||!p.text){if(!auto)showToast('There is nothing to copy yet - the message has not loaded','warn');return false;}
+  try{
+    if(navigator.clipboard&&typeof ClipboardItem!=='undefined'){
+      await navigator.clipboard.write([new ClipboardItem({
+        'text/html':new Blob([p.html],{type:'text/html'}),
+        'text/plain':new Blob([p.text],{type:'text/plain'})
+      })]);
+    }else if(navigator.clipboard?.writeText){
+      await navigator.clipboard.writeText(p.text);
+    }else if(!emCopyFallback(p.text)){
+      throw new Error('this browser blocks clipboard writes');
+    }
+    showToast(auto?'Email copied - paste it wherever you need it':'Email copied to the clipboard','ok');
+    return true;
+  }catch(err){
+    if(emCopyFallback(p.text)){showToast('Email copied as plain text','ok');return true;}
+    if(!auto)showToast(`Could not copy the email: ${String(err?.message||err)}`,'warn');
+    return false;
+  }
+}
+
+document.getElementById('em-copy')?.addEventListener('click',()=>emCopyEmail());
+
 async function openEmailModal(ticket){
   const{email,id}=ticket;const clientEmail=ticketClientEmail[id];
+  emCurrentTicket=ticket;
   // Any translation belongs to the message that was open before. Clear it
   // first, so nothing from the previous ticket can be reverted into this one.
   trResetEmailState(id);
@@ -9191,13 +9367,12 @@ async function openEmailModal(ticket){
   document.getElementById('em-meta').innerHTML=metaHtml;
   // Manual tickets show description instead of fetching from Outlook
   if(email.isManual){
-    document.getElementById('em-body').innerHTML=email.summary?`<div style="overflow-wrap:break-word;white-space:pre-wrap;">${esc(email.summary)}</div>`:'<em style="color:var(--slate-400)">No description provided.</em>';
-    const ol=document.getElementById('em-outlook');ol.style.display='none';
+    document.getElementById('em-body').innerHTML=email.summary?`<div class="email-body-content" style="overflow-wrap:break-word;white-space:pre-wrap;">${esc(email.summary)}</div>`:'<div class="email-body-content"><em style="color:#64748b">No description provided.</em></div>';
     document.getElementById('email-modal').classList.add('open');
     trAutoTranslateBody(id);
+    emCopyEmail({auto:true});
     return;
   }
-  const ol=document.getElementById('em-outlook');ol.onclick=email.webLink?()=>window.open(email.webLink,'_blank'):null;ol.style.display=email.webLink?'':'none';
   document.getElementById('email-modal').classList.add('open');
   const uri=(email.uri||`mail:///messages/${email.id}`).split('?')[0]+'?owner='+encodeURIComponent(SUPPORT_BOX);
   if(!hasCowork){document.getElementById('em-body').innerHTML=`<p style="color:var(--slate-500);font-style:italic">Outlook content preview is only available in MCP mode.</p>`;return;}
@@ -9246,6 +9421,10 @@ async function loadEmailBody(ticket,uri){
     host.replaceChildren(rendered);
   }
   emSweepBrokenImages(rendered);
+  // The message is on screen, so this is the moment it can be copied - and it
+  // happens before the translation pass below rewrites any of it, so what an
+  // agent pastes is the client's own words rather than machine output.
+  emCopyEmail({auto:true});
   // The body only exists now, so this is the first moment it can be translated.
   // If the agent already chose to read this ticket in another language, follow
   // through without making them ask again.
