@@ -4412,7 +4412,7 @@ th {
 <div id="toast"></div>
 
 <!-- Email modal -->
-<div class="modal-bg" id="email-modal"><div class="modal"><div class="modal-head"><h2 id="em-title"></h2><button class="modal-close-x" data-close="email-modal"></button></div><div class="modal-meta-bar" id="em-meta"></div><div class="tr-bar" id="em-tr-bar"></div><div class="modal-body-scroll" id="em-body"></div><div class="modal-actions"><button class="btn-out" data-close="email-modal">Close</button><button class="btn-out" id="em-copy" title="Copy the whole message - header and body - to the clipboard">Copy email</button></div></div></div>
+<div class="modal-bg" id="email-modal"><div class="modal"><div class="modal-head"><h2 id="em-title"></h2><button class="modal-close-x" data-close="email-modal"></button></div><div class="modal-meta-bar" id="em-meta"></div><div class="tr-bar" id="em-tr-bar"></div><div class="modal-body-scroll" id="em-body"></div><div class="modal-actions"><button class="btn-out" data-close="email-modal">Close</button><button class="btn-out" id="em-copy" title="Copy the whole message - header and body - to the clipboard">Copy email</button><button class="btn-out" id="em-outlook" title="Open this message in Outlook on the web">Open in Outlook</button></div></div></div>
 <!-- One shared language picker for every translate trigger on the page. See the
      .tr-trigger CSS for why this is a single element rather than one per card. -->
 <div id="tr-pop" role="dialog" aria-label="Translate ticket">
@@ -9338,6 +9338,16 @@ async function openEmailModal(ticket){
   // Warm the picker's "cached" markers from whatever the team already has.
   trLoadCachedFor(id).then(()=>{if(emTrState.ticketId===id)trRenderEmailBar();});const hs=clientEmail?hsCache[clientEmail]:null;const isReply=isQuintaSender(email.sender)&&!!clientEmail;
   document.getElementById('em-title').textContent=email.subject||'(no subject)';
+  // Copying the message on open did not replace every reason to open the real
+  // thing - forwarding it, seeing the thread around it, or replying from the
+  // mailbox all still live in Outlook. Hidden rather than disabled when there
+  // is no webLink (manual tickets, and anything Graph did not return one for),
+  // because a dead button next to a working one reads as a bug.
+  const ol=document.getElementById('em-outlook');
+  if(ol){
+    ol.onclick=email.webLink?()=>window.open(email.webLink,'_blank','noopener'):null;
+    ol.style.display=email.webLink?'':'none';
+  }
   const csOwner=ticketCSOwner[id]||null;
   const csMeta=csOwner?`  CS: ${esc(csOwner)}`:'';
   let metaHtml=isReply?`<span><strong>Client:</strong> ${esc(clientEmail)}</span><span><strong>Replied by:</strong> ${esc(email.sender)}</span>`:`<span><strong>From:</strong> ${esc(email.sender||'')}</span>`;
