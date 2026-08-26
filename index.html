@@ -2431,6 +2431,59 @@ header {
   color: var(--text);
 }
 
+/* The toggle's other position: the same message wearing the platform's own
+   surface and text. The mail's inline colors - authored against a white page -
+   are what made a themed body illegible when this was the only mode, so here
+   they are overridden rather than preserved. That is the whole trade: the sheet
+   keeps the client's appearance, this keeps the platform's. The agent picks,
+   and the pictures, tables and layout are untouched either way. */
+.email-body-content.themed {
+  background: var(--surface-soft);
+  color: var(--text);
+}
+[data-theme="dark"] .email-body-content.themed {
+  box-shadow: 0 0 0 1px var(--border);
+}
+/* Inline styles beat a class by specificity, so the mail's own colors only give
+   way to !important. The attribute match is deliberately loose: it catches
+   `color`, `background-color` and shorthand alike, and an element that sets a
+   background but no text color still needs a legible one against ours. */
+.email-body-content.themed [style*="color"],
+.email-body-content.themed [style*="background"],
+.email-body-content.themed font[color],
+.email-body-content.themed [bgcolor] {
+  color: var(--text) !important;
+  background-color: transparent !important;
+  background-image: none !important;
+}
+.email-body-content.themed a,
+.email-body-content.themed a[style*="color"] {
+  color: var(--primary) !important;
+}
+/* Borders the mail drew for tables and quote bars are usually a light gray that
+   disappears against a dark surface, taking the table's structure with it. */
+.email-body-content.themed table,
+.email-body-content.themed td,
+.email-body-content.themed th,
+.email-body-content.themed blockquote,
+.email-body-content.themed hr {
+  border-color: var(--border) !important;
+}
+/* Our own widgets inside the sheet are pinned to light values for the white
+   sheet (see above); in themed mode they can use the tokens again. */
+.email-body-content.themed .email-image-attachments { border-top-color: var(--border); }
+.email-body-content.themed .email-image-attachment {
+  background: var(--surface);
+  border-color: var(--border);
+  color: var(--text);
+}
+.email-body-content.themed .email-image-attachment img { background: var(--surface-muted); }
+.email-body-content.themed .email-image-attachment span { color: var(--muted); }
+.email-body-content.themed .email-image-missing {
+  border-color: var(--border-strong);
+  color: var(--muted) !important;
+}
+
 #em-body img {
   max-width: 100%;
   height: auto;
@@ -8183,13 +8236,25 @@ async function trLoadCachedFor(ticketId){
   }catch(_){return null;}
 }
 
-async function trRequest(ticketId,targetLang,segments,{force=false}={}){
-  const r=await fetch('/api/translate',{
-    method:'POST',
-    headers:{'Content-Type':'application/json'},
-    credentials:'include',
-    body:JSON.stringify({ticketId,targetLang,segments,force})
-  });
+async function trRequestOnce(ticketId,targetLang,segments,{force=false}={}){
+  let r;
+  try{
+    r=await fetch('/api/translate',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      credentials:'include',
+      body:JSON.stringify({ticketId,targetLang,segments,force})
+    });
+  }catch(err){
+    // fetch only rejects when the request never got an answer at all - the
+    // connection dropped, the pod restarted, the laptop lost wifi. It arrived
+    // here as a bare TypeError with no code, so trReportError printed
+    // "Translation failed: Failed to fetch" and the retry below never fired.
+    const e=new Error(`The connection to the translation service dropped before it answered (${String(err?.message||err)}).`);
+    e.code='translation_unreachable';
+    e.retryable=true;
+    throw e;
+  }
   const data=await r.json().catch(()=>null);
   if(!r.ok){
     // A body we cannot parse did not come from this app. Every failure the route
@@ -8214,6 +8279,60 @@ async function trRequest(ticketId,targetLang,segments,{force=false}={}){
   langs.add(data.targetLang);
   trCachedLangs.set(ticketId,langs);
   return data;
+}
+
+/* Why a failed translation request is worth repeating.
+
+   The common failure is not the engine refusing - it is a request that ran
+   long enough for something in between to give up on it, which is what agents
+   saw as "the translation took too long". The server, though, had usually
+   finished: it writes every result to the shared cache under a hash of the
+   exact segments that were sent. So the retry asks for the same chunk again and
+   is answered from that cache, immediately - the expensive work is not redone.
+   Even when the first attempt genuinely died mid-translation, a second pass at
+   one chunk is cheap next to making the agent re-translate the whole ticket.
+
+   Only failures that can plausibly come out differently are retried. A missing
+   API key, an exhausted free quota, an unsupported language pair and a ticket
+   over the size limit will all answer the same way forever, and retrying them
+   just makes the agent wait three times as long for the same sentence. */
+const TR_ATTEMPTS=3;
+function trRetryable(err){
+  const code=err?.code;
+  if(code==='translation_not_configured'
+    ||code==='translation_quota_exhausted'
+    ||code==='translation_target_unsupported'
+    ||code==='translation_source_undetected'
+    ||code==='translation_auth_failed'
+    ||code==='translation_refused'
+    ||code==='too_many_segments'
+    ||code==='content_too_large'
+    ||code==='no_translatable_segments'
+    ||code==='unsupported_target_lang'
+    ||code==='missing_ticket_id')return false;
+  if(code==='translation_gateway'||code==='translation_unreachable')return true;
+  return !!err?.retryable;
+}
+
+async function trRequest(ticketId,targetLang,segments,opts={}){
+  const{force=false}=opts;
+  let last=null;
+  for(let attempt=0;attempt<TR_ATTEMPTS;attempt++){
+    // Backing off rather than retrying straight away: the engine is either
+    // still busy with the attempt that just died, or it is rate limiting us,
+    // and an immediate second request makes both worse.
+    if(attempt)await new Promise(r=>setTimeout(r,1200*attempt));
+    try{
+      // force is honoured on the first attempt only. A retry must be allowed to
+      // take the cache entry the interrupted attempt left behind - that is
+      // precisely what makes retrying a dropped translation nearly free.
+      return await trRequestOnce(ticketId,targetLang,segments,{force:force&&attempt===0});
+    }catch(err){
+      last=err;
+      if(!trRetryable(err))throw err;
+    }
+  }
+  throw last;
 }
 
 // Turn an API failure into one sentence an agent can act on.
@@ -8531,10 +8650,10 @@ function trRevertTextNodes(undo){
 
 // Reset per opened ticket, so a translation can never be attributed to, or
 // reverted against, a different message.
-let emTrState={ticketId:null,lang:null,undo:null,subjectOriginal:null,sourceLangName:null,busy:false};
+let emTrState={ticketId:null,lang:null,undo:null,subjectOriginal:null,sourceLangName:null,busy:false,progress:null};
 
 function trResetEmailState(ticketId){
-  emTrState={ticketId,lang:null,undo:null,subjectOriginal:null,sourceLangName:null,busy:false};
+  emTrState={ticketId,lang:null,undo:null,subjectOriginal:null,sourceLangName:null,busy:false,progress:null};
 }
 
 function trRenderEmailBar(){
@@ -8545,12 +8664,25 @@ function trRenderEmailBar(){
   const on=!!emTrState.lang;
   const busy=emTrState.busy;
   const label=busy?'...':(on?trShortCode(emTrState.lang):trShortCode(trPreferredLang()));
-  let html=`<button class="tr-trigger${on?' active':''}${busy?' busy':''}" data-tr-em-trigger="1" title="Translate this message"${busy?' disabled':''}><span class="tr-glyph">&#127760;</span><span>${esc(busy?'Translating':`Translate (${label})`)}</span></button>`;
+  // A long thread is many requests, and a button that reads "Translating" for
+  // two minutes is indistinguishable from one that has hung. Counting the parts
+  // is what tells the agent it is still moving.
+  const prog=busy&&emTrState.progress&&emTrState.progress.total>1
+    ?` ${emTrState.progress.done}/${emTrState.progress.total}`:'';
+  let html=`<button class="tr-trigger${on?' active':''}${busy?' busy':''}" data-tr-em-trigger="1" title="Translate this message"${busy?' disabled':''}><span class="tr-glyph">&#127760;</span><span>${esc(busy?`Translating${prog}`:`Translate (${label})`)}</span></button>`;
   if(on){
     const from=emTrState.sourceLangName||'the original';
     html+=`<span class="tr-banner-note">Machine translation - ${esc(from)} &rarr; ${esc(trLangName(emTrState.lang))}</span>`
       +`<button class="tr-trigger" data-tr-em-original="1">Show original</button>`;
   }
+  // Sits at the end of the bar: it is a reading preference, not part of the
+  // translation flow, and the translate control has to stay the first thing.
+  const themed=emSheetThemed();
+  html+=`<button class="tr-trigger${themed?' active':''}" data-em-sheet="1" style="margin-left:auto" `
+    +`title="${esc(themed
+      ? 'Showing the message in the platform theme. Switch back to see the colors the client actually sent.'
+      : "Showing the message as the client sent it, on a white sheet. Switch to the platform theme if you'd rather it matched the rest of the board.")}">`
+    +`${esc(themed?'Platform theme':'Original colors')}</button>`;
   bar.innerHTML=html;
 }
 
@@ -8563,6 +8695,14 @@ function trRenderEmailBar(){
    outside. Split it into requests the server will accept instead. Segment ids
    stay globally indexed, so each chunk is its own cache entry and the results
    merge back into one map. */
+// How much work one request carries. Small on purpose - see the note where
+// these are used. Overridable per environment only in the sense that the server
+// limits still cap them; they are otherwise deliberately fixed, because the
+// number that matters is wall-clock per request and that does not vary with the
+// ticket.
+const TR_CHUNK_SEGMENTS=40;
+const TR_CHUNK_CHARS=4000;
+
 function trChunkSegments(segments,maxSegments,maxChars){
   const chunks=[];
   let current=[],chars=0;
@@ -8601,30 +8741,56 @@ async function trTranslateEmailBody(id,targetLang){
   if(!segments.length){showToast('Nothing to translate in this message','warn');return;}
   const chunks=trChunkSegments(
     segments,
-    Math.max(1,trLimits.maxSegments||600),
-    // Just under the server ceiling: it counts the same characters we do, and a
-    // chunk rejected for being one character over is a whole wasted round trip.
-    Math.max(2000,Math.floor((trLimits.maxChars||200000)*0.9))
+    // Not the server's ceiling. The ceiling says what one request is *allowed*
+    // to carry (600 runs, 200k characters); it says nothing about how long that
+    // request will take, and the local models translate at a few hundred
+    // characters a second. Chunking at the ceiling put a whole thread in one
+    // request that ran for minutes and was then killed by the proxy in front of
+    // this app - which is exactly what "the translation took too long" was.
+    // Sized for a request that comes back in seconds instead, so nothing in the
+    // path has a reason to give up, each part is cached the moment it lands, and
+    // a retry only ever re-does one part.
+    Math.max(1,Math.min(TR_CHUNK_SEGMENTS,trLimits.maxSegments||TR_CHUNK_SEGMENTS)),
+    Math.max(1000,Math.min(TR_CHUNK_CHARS,Math.floor((trLimits.maxChars||200000)*0.9)))
   );
 
   emTrState.busy=true;
+  emTrState.progress={done:0,total:chunks.length};
   trRenderEmailBar();
   try{
     const map={};
     let data=null;
+    let failed=null;
     for(const chunk of chunks){
-      const part=await trRequest(id,targetLang,chunk);
-      // The modal can be closed, or moved to another ticket, while this is in
-      // flight - writing into it then would corrupt whatever is on screen now,
-      // and there is no point paying for the chunks that are left.
-      if(emTrState.ticketId!==id)return;
-      Object.assign(map,part.segments||{});
-      // The first answer names the source language. "Cached" only holds if
-      // every chunk was a hit, otherwise the toast would claim a translation
-      // that was just paid for.
-      data=data?{...data,cached:data.cached&&part.cached}:part;
+      try{
+        const part=await trRequest(id,targetLang,chunk);
+        // The modal can be closed, or moved to another ticket, while this is in
+        // flight - writing into it then would corrupt whatever is on screen now,
+        // and there is no point paying for the chunks that are left.
+        if(emTrState.ticketId!==id)return;
+        Object.assign(map,part.segments||{});
+        // The first answer names the source language. "Cached" only holds if
+        // every chunk was a hit, otherwise the toast would claim a translation
+        // that was just paid for.
+        data=data?{...data,cached:data.cached&&part.cached}:part;
+      }catch(err){
+        if(emTrState.ticketId!==id)return;
+        // One part that will not translate is no longer the whole message's
+        // problem. Every other part is already paid for and readable, and a
+        // thread whose quoted history or legal footer failed is still worth
+        // reading in the agent's language - so keep going and say afterwards
+        // that some of it is still in the original.
+        failed=failed||err;
+        // Nothing has translated yet and this failure will not come out
+        // differently - no key configured, quota gone, no model for this
+        // language pair. That is the whole message's problem, not this part's,
+        // so stop rather than asking the same dead question once per chunk.
+        if(!data&&!trRetryable(err))break;
+      }
+      emTrState.progress.done++;
+      trRenderEmailBar();
     }
-    if(!data)return;
+    if(!data){if(failed)trReportError(failed);return;}
     if(typeof map.subject==='string'){
       emTrState.subjectOriginal=subject;
       titleEl.textContent=map.subject;
@@ -8632,13 +8798,18 @@ async function trTranslateEmailBody(id,targetLang){
     emTrState.undo=trApplyTextNodes(nodes,'b',map);
     emTrState.lang=data.targetLang;
     emTrState.sourceLangName=data.sourceLangName||data.sourceLang||null;
-    showToast(data.cached
-      ?`Showing cached ${trLangName(data.targetLang)} translation`
-      :`Message translated to ${trLangName(data.targetLang)}`,'ok');
+    if(failed){
+      showToast(`Translated to ${trLangName(data.targetLang)}, but part of this message could not be: ${failed.message||'unknown error'}`,'warn');
+    }else{
+      showToast(data.cached
+        ?`Showing cached ${trLangName(data.targetLang)} translation`
+        :`Message translated to ${trLangName(data.targetLang)}`,'ok');
+    }
   }catch(err){
     trReportError(err);
   }finally{
     emTrState.busy=false;
+    emTrState.progress=null;
     trRenderEmailBar();
   }
 }
@@ -8747,7 +8918,8 @@ window.addEventListener('scroll',()=>{if(trPopAnchor)trPositionPop(trPopAnchor);
 document.getElementById('em-tr-bar')?.addEventListener('click',ev=>{
   const trigger=ev.target.closest('[data-tr-em-trigger]');
   if(trigger){ev.stopPropagation();if(emTrState.ticketId)trOpenPop(trigger,emTrState.ticketId,'email');return;}
-  if(ev.target.closest('[data-tr-em-original]')){ev.stopPropagation();trRevertEmailBody();}
+  if(ev.target.closest('[data-tr-em-original]')){ev.stopPropagation();trRevertEmailBody();return;}
+  if(ev.target.closest('[data-em-sheet]')){ev.stopPropagation();emToggleSheetMode();}
 });
 document.getElementById('com-tr-bar')?.addEventListener('click',ev=>{
   const trigger=ev.target.closest('[data-tr-com-trigger]');
@@ -9378,6 +9550,7 @@ async function openEmailModal(ticket){
   // Manual tickets show description instead of fetching from Outlook
   if(email.isManual){
     document.getElementById('em-body').innerHTML=email.summary?`<div class="email-body-content" style="overflow-wrap:break-word;white-space:pre-wrap;">${esc(email.summary)}</div>`:'<div class="email-body-content"><em style="color:#64748b">No description provided.</em></div>';
+    emApplySheetMode();
     document.getElementById('email-modal').classList.add('open');
     trAutoTranslateBody(id);
     emCopyEmail({auto:true});
@@ -9417,6 +9590,34 @@ function emPrepareBodyHtml(raw,isHtml){
   return `<div style="white-space:pre-wrap">${esc(body)}</div>`;
 }
 
+/* --------------------------------------------- how the message is dressed
+
+   The mail goes on a white sheet by default - see .email-body-content - because
+   that is the only way to show the client's own colors without the dark theme
+   turning half of them illegible. Agents who would rather have the message look
+   like the rest of the platform can say so, and the choice sticks: per agent,
+   remembered across tickets and sessions. It is one class on the sheet, so
+   switching is instant and never re-fetches or re-translates the message. */
+const EM_SHEET_KEY='kanban.email.sheet';
+function emSheetThemed(){
+  try{return localStorage.getItem(EM_SHEET_KEY)==='themed';}catch(_){return false;}
+}
+function emSetSheetThemed(on){
+  try{localStorage.setItem(EM_SHEET_KEY,on?'themed':'sheet');}catch(_){}
+}
+// Applied to whatever sheet is on screen now, and called from every render, so
+// a cached open, a live one and a manual ticket all honour the same choice.
+function emApplySheetMode(){
+  const themed=emSheetThemed();
+  document.querySelectorAll('#em-body .email-body-content')
+    .forEach(el=>el.classList.toggle('themed',themed));
+}
+function emToggleSheetMode(){
+  emSetSheetThemed(!emSheetThemed());
+  emApplySheetMode();
+  trRenderEmailBar();
+}
+
 function emRenderEmailBody({ticket,id,bodyHtml,images,imagesError,uri}){
   const host=document.getElementById('em-body');
   const rendered=renderEmailBodyWithImages(bodyHtml,images||[]);
@@ -9436,6 +9637,7 @@ function emRenderEmailBody({ticket,id,bodyHtml,images,imagesError,uri}){
     host.replaceChildren(rendered);
   }
   emSweepBrokenImages(rendered);
+  emApplySheetMode();
   // The message is on screen, so this is the moment it can be copied - and it
   // happens before the translation pass below rewrites any of it, so what an
   // agent pastes is the client's own words rather than machine output.

@@ -6732,9 +6732,17 @@ async function runTranslation({ targetLang, targetName, segments }) {
 // own limiter rather than sharing an existing one. Keyed per signed-in agent,
 // not per IP: the whole support team shares one office IP, and an IP-keyed
 // budget would let one agent working through a backlog lock out everyone else.
+// The client splits a long message into many small requests rather than one
+// long one (see the chunking note in index.html), so a request is no longer a
+// useful measure of cost: one open of a long thread is a dozen or more of them,
+// and a cached re-open fires them back to back in a second. The old ceiling of
+// 40 a minute was written when a ticket was one request, and against chunking it
+// would turn a perfectly normal second ticket into a rate-limit warning. The
+// per-request size caps (TRANSLATE_MAX_SEGMENTS / TRANSLATE_MAX_CHARS) are what
+// actually bound the work; this stays as a runaway-client backstop.
 const translateLimiter = rateLimit({
   windowMs: 60 * 1000,
-  max: 40,
+  max: Number(process.env.TRANSLATE_RATE_MAX || 300),
   standardHeaders: true,
   legacyHeaders: false,
   keyGenerator: (req) => String(req.session?.username || req.ip || 'anon').toLowerCase()
