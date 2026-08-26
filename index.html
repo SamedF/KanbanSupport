@@ -4932,6 +4932,21 @@ let ticketAssigneeTouchedAt={};
 // for an auto-assign or a stale-tab overwrite is not the person responsible.
 // This carries the real actor and the reason through to the audit row.
 let ticketAssigneeBy={};
+/* Assignment ordering is decided by comparing timestamps, and those timestamps
+   were not all being read off the same clock. The board mints them with the
+   browser's Date.now(); everything they are compared against - the database
+   row, the audit event that records an assignment - is stamped by the server.
+   On a machine whose clock is a minute slow, every assignment made there was
+   born looking older than the value it was replacing, so the server's copy kept
+   winning and the ticket "went back to the previous agent by itself".
+
+   So mint them in the server's clock instead. The offset comes from
+   /api/shift/state, which the board already polls, and it is accurate to the
+   request latency rather than the millisecond - which is all that ordering
+   between two human actions needs. Zero until that first poll answers, which is
+   exactly today's behaviour, so nothing is worse off while it is unknown. */
+let serverClockOffset=0;
+function boardNow(){return Date.now()+serverClockOffset;}
 // Ring buffer of every assignment change, with the calling function. Assignment
 // has several writers (manual dropdown, workload auto-assign, DB merge, live
 // patches, reply-sender follow), so when one of them undoes another the only
@@ -4954,7 +4969,7 @@ function assignCaller(){
 function setTicketAssignee(id,agent,ts,source){
   if(!id)return false;
   const next=agent||'';
-  const stamp=Number(ts||Date.now());
+  const stamp=Number(ts||boardNow());
   const prev=ticketAssignee[id]||'';
   const prevTs=Number(ticketAssigneeTouchedAt[id]||0);
   if(ticketAssignee[id]===next&&prevTs>=stamp)return false;
@@ -4970,7 +4985,14 @@ function setTicketAssignee(id,agent,ts,source){
     const why=source||assignCaller();
     // A live-sync patch is someone else's change arriving; the actor is the
     // agent named in the patch, not whoever happens to be looking at this tab.
-    const actor=/^liveSync\//.test(why)?why.split('/')[1]:currentUser();
+    // "reconciled/..." is the third case: a value the server's merge or its
+    // database reconciliation decided, which belongs to nobody. Recording the
+    // session that carried it as the actor is what printed a CS agent's
+    // initials against a support reassignment - so record no actor at all, and
+    // let the audit view name it as the sync it was.
+    const actor=/^reconciled\//.test(why)?null
+      :/^liveSync\//.test(why)?why.split('/')[1]
+      :currentUser();
     ticketAssigneeBy[id]={by:actor,source:why,at:stamp,from:prev||''};
     logAssignChange({id:String(id),from:prev||'(none)',to:next||'(none)',result:'applied',ts:stamp,prevTs,by:why,actor,at:Date.now()});
   }
@@ -5534,7 +5556,11 @@ function applyBoardPatch(p){
         // as timestamp 1, not Date.now() - adopting the value is fine, but it
         // must not masquerade as a fresh decision and outrank a real assignment
         // made elsewhere a moment later.
-        if(setTicketAssignee(id,c.value,remoteTs>0?remoteTs:1,'liveSync/'+(p.actor||'?')))touched++;
+        // c.byActor is set only when the sending session's own payload asked
+        // for this value. Null means the server reconciled it - a merge, or the
+        // database's copy winning - and no agent is responsible for it.
+        const src=c.byActor?('liveSync/'+c.byActor):'reconciled/server';
+        if(setTicketAssignee(id,c.value,remoteTs>0?remoteTs:1,src))touched++;
         return;
       }
     }
@@ -5793,6 +5819,8 @@ async function refreshShiftState(){
     const res=await fetch('/api/shift/state',{credentials:'include'});
     if(!res.ok)return;
     const out=await res.json();
+    const serverNow=Number(out?.serverNow||0);
+    if(serverNow>0)serverClockOffset=serverNow-Date.now();
     shiftAgents=out?.agents||{};
     shiftMe=out?.me||null;
     shiftTracked=!!shiftMe;
@@ -6852,18 +6880,23 @@ async function renderAssignLogView(){
     // "How" distinguishes a deliberate dropdown change from workload
     // auto-assign or a patch that arrived from another agent's session.
     const src=String(r.source||'');
-    const how=/manual|applyTicketAgentSelection/i.test(src)?'Manual'
+    // A reconciled change is the server's own doing - a timestamp merge, or the
+    // database's copy of the assignee winning. It has no actor by design, so it
+    // must not fall back to naming the login whose save carried it.
+    const reconciled=/^reconciled/i.test(src);
+    const how=reconciled?'Database sync'
+      :/manual|applyTicketAgentSelection/i.test(src)?'Manual'
       :/liveSync/i.test(src)?'From '+esc(src.split('/')[1]||'another session')
       :/ensureSupportAssignment|leastLoaded|autoAssign|applyCompanyCS/i.test(src)?'Auto (workload)'
-      :/mergeDatabaseTickets|liveSync/i.test(src)?'Sync'
+      :/mergeDatabaseTickets/i.test(src)?'Sync'
       :src?esc(src):'-';
-    const actor=r.actor||r.account||'-';
+    const actor=r.actor||(reconciled?'system':r.account)||'-';
     return `<tr style="border-top:1px solid var(--border);${r.isRevert?'background:rgba(var(--rose-500-rgb,244,63,94),.07);':''}">
       <td style="padding:9px 12px;white-space:nowrap;color:var(--muted);">${when?esc(when.toLocaleString('en-GB',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'})):'-'}</td>
       <td style="padding:9px 12px;"><div style="font-weight:700;">${ticketLabel}</div><div style="color:var(--muted);max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(r.subject||'')}</div></td>
       <td style="padding:9px 12px;">${r.from?`<span class="agent-pill" style="--agent-accent:${agentColor(r.from)}">${esc(r.from)}</span>`:'<span style="color:var(--muted);">unassigned</span>'}</td>
       <td style="padding:9px 12px;">${r.to?`<span class="agent-pill" style="--agent-accent:${agentColor(r.to)}">${esc(r.to)}</span>`:'<span style="color:var(--muted);">unassigned</span>'}</td>
-      <td style="padding:9px 12px;white-space:nowrap;">${esc(actor)}${r.account&&r.account!==actor?`<div style="color:var(--muted);font-size:10.5px;">login: ${esc(r.account)}</div>`:''}</td>
+      <td style="padding:9px 12px;white-space:nowrap;">${esc(actor)}${!reconciled&&r.account&&r.account!==actor?`<div style="color:var(--muted);font-size:10.5px;">login: ${esc(r.account)}</div>`:''}${reconciled?`<div style="color:var(--muted);font-size:10.5px;">not an agent action</div>`:''}</td>
       <td style="padding:9px 12px;white-space:nowrap;">${how}${r.isRevert?`<div style="color:var(--rose-600,#e11d48);font-weight:800;font-size:10.5px;">REVERTED${r.revertedAfterSeconds!==null?` after ${r.revertedAfterSeconds}s`:''}</div>`:''}</td>
     </tr>`;
   }).join('');

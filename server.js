@@ -1317,6 +1317,50 @@ async function hydrateStateFromDatabase(baseState = {}) {
   });
   if (!tickets.length) return state;
 
+  /* When the database's idea of the assignee is allowed to win.
+
+     This used to be gated on Ticket.updatedAt, which is @updatedAt - a
+     whole-row modification time. It is bumped by every write to the row for any
+     reason at all: a status change, a comment, a HubSpot id, a Jira key, and -
+     since the message body is cached on the ticket - the first time anybody
+     opens the mail. None of those are assignment changes, but each one pushed
+     updatedAt past the board's ticketAssigneeTouchedAt and so handed the row's
+     assignedAgent the right to overwrite a newer assignment made on the board.
+     That is the "assignment went back on its own, minutes later" report: assign
+     a ticket, open it (or let anyone touch it), and the next board load
+     re-imposed whichever agent Postgres still had.
+
+     So ask for the time the assignment itself last changed. Every writer of
+     that column - the board save and the MCP patch endpoint - records a
+     ticket_assignedAgent_changed event through auditTicketChanges, so the most
+     recent one of those IS the assignment clock. A ticket with no such event
+     has never been reassigned since it was created, so its creation time is the
+     right answer for it.
+
+     The board's column (status) was gated the same way and had the same
+     defect, so both clocks are read here.
+
+     One groupBy for the whole board rather than a query per ticket. */
+  let lastAssignChangeAt = new Map();
+  let lastStatusChangeAt = new Map();
+  try {
+    const fieldEvents = await prisma.ticketEvent.groupBy({
+      by: ['ticketId', 'eventType'],
+      where: { eventType: { in: ['ticket_assignedAgent_changed', 'ticket_status_changed'] } },
+      _max: { createdAt: true }
+    });
+    fieldEvents.forEach((row) => {
+      const at = new Date(row._max?.createdAt || 0).getTime() || 0;
+      const target = row.eventType === 'ticket_status_changed' ? lastStatusChangeAt : lastAssignChangeAt;
+      if (at > (target.get(row.ticketId) || 0)) target.set(row.ticketId, at);
+    });
+  } catch (error) {
+    // Losing the clocks must not lose the board. Empty maps mean every ticket
+    // falls back to its creation time, which is the conservative direction: the
+    // board's own value keeps winning rather than being overwritten.
+    console.error('Ticket field clock lookup failed:', error?.message || error);
+  }
+
   const existingTickets = Array.isArray(state.allTickets) ? state.allTickets : [];
   const ticketsById = new Map(
     existingTickets
@@ -1375,24 +1419,34 @@ async function hydrateStateFromDatabase(baseState = {}) {
 
     ticketsById.set(externalId, mergedTicket);
     seenIds.add(externalId);
-    const dbTouchedAt = new Date(ticket.updatedAt || ticket.createdAt || Date.now()).getTime();
+    const createdAtMs = new Date(ticket.createdAt || 0).getTime() || 0;
+    // Same reasoning as the assignment clock below: Ticket.updatedAt says the
+    // row changed, not that the column did, so caching a message body or
+    // writing a Jira key used to let the database's stale status pull a ticket
+    // back into the column it had been dragged out of.
+    const dbStatusAt = lastStatusChangeAt.get(ticket.id) || createdAtMs;
     const currentTouchedAt = Number(state.ticketStageTouchedAt[externalId] || 0);
-    if (dbTouchedAt >= currentTouchedAt || !state.ticketState[externalId]) {
+    if (dbStatusAt >= currentTouchedAt || !state.ticketState[externalId]) {
       state.ticketState[externalId] = normalizeDbStatusForBoard(ticket.status);
-      state.ticketStageTouchedAt[externalId] = dbTouchedAt;
+      state.ticketStageTouchedAt[externalId] = dbStatusAt;
     } else {
       state.ticketStageTouchedAt[externalId] = currentTouchedAt;
     }
     if (ticket.priority) state.ticketPriority[externalId] = ticket.priority;
     if (ticket.category) state.ticketCategory[externalId] = ticket.category;
-    // Same timestamp gate as the stage a few lines up. Taking the DB value
-    // unconditionally meant every /api/state read re-imposed whatever assignee
-    // Postgres last saw, undoing a newer assignment held in the JSON state.
+    // Same idea as the stage gate a few lines up, but on the assignment's own
+    // clock rather than the row's - see the note where lastAssignChangeAt is
+    // built for why dbTouchedAt is the wrong question to ask here.
     const assignTouchedAt = Number(state.ticketAssigneeTouchedAt[externalId] || 0);
-    if (dbTouchedAt >= assignTouchedAt) {
+    const dbAssignedAt = lastAssignChangeAt.get(ticket.id) || createdAtMs;
+    if (dbAssignedAt >= assignTouchedAt) {
       if (ticket.assignedAgent) state.ticketAssignee[externalId] = ticket.assignedAgent;
       if (ticket.csAgent) state.ticketCSOwner[externalId] = ticket.csAgent;
-      if (ticket.assignedAgent || ticket.csAgent) state.ticketAssigneeTouchedAt[externalId] = dbTouchedAt;
+      // The assignment's own clock, not the row's. Stamping the JSON with the
+      // row modification time inflated it - it is always >= the real
+      // assignment time - which then made the board's copy look newer than it
+      // was and let it reject a genuinely later change from the MCP endpoint.
+      if (ticket.assignedAgent || ticket.csAgent) state.ticketAssigneeTouchedAt[externalId] = dbAssignedAt;
     }
     if (ticket.assignedAgent || ticket.csAgent) state.ticketAssignmentMode[externalId] = 'support';
     if (ticket.senderEmail) state.ticketClientEmail[externalId] = ticket.senderEmail;
@@ -4714,6 +4768,28 @@ app.post('/api/state', requireAuth, async (req, res) => {
     // origin lets the sending tab ignore its own echo, so a patch in flight
     // can't roll back an edit the user made in the meantime.
     const origin = String(state?._meta?.clientId || '') || null;
+    /* Who a patched assignment is actually attributable to.
+
+       A patch carries the MERGED post-write state, which is the point - it
+       self-heals a stale tab. But it means some values in it are not this
+       session's doing: the per-ticket timestamp merge, or the database
+       reconciliation in hydrateStateFromDatabase, decided them. Stamping the
+       whole patch with the saving session's username made every receiving tab
+       record that person as the agent responsible, which is how a CS agent's
+       initials ended up on a support reassignment they never made and are not
+       even offered the controls to make.
+
+       So say it per change: byActor is set only when this session's payload
+       actually asked for the value that won. Anything else is the server's
+       reconciliation and is attributed to no one. */
+    const requestedAssignee = (state.ticketAssignee && typeof state.ticketAssignee === 'object') ? state.ticketAssignee : {};
+    changes.forEach((change) => {
+      if (!change || change.field !== 'ticketAssignee') return;
+      const key = String(change.id);
+      const asked = Object.prototype.hasOwnProperty.call(requestedAssignee, key)
+        && String(requestedAssignee[key] || '') === String(change.value || '');
+      change.byActor = asked ? actor : null;
+    });
     if (overflow) {
       liveRev = sseBroadcast('board_reload', { reason: 'patch_overflow', actor });
     } else if (changes.length || added.length || removed.length) {
