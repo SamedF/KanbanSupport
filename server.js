@@ -72,8 +72,29 @@ if (M365_SECRET_LOOKS_LIKE_ID) {
 // calls that function - Resolved notifications go through the Power Automate
 // webhook instead. Requesting them anyway forced an admin-consent prompt for
 // permissions the app never actually uses.
-const M365_SCOPES = String(process.env.M365_SCOPES || 'offline_access openid profile email User.Read Mail.Read Mail.Read.Shared').trim();
+// Mail.Send / Mail.Send.Shared were added when replying moved into the board.
+// Shared is the one that matters: the reply is drafted on the message where it
+// lives, in the helpdesk mailbox, which is not the connected identity's own -
+// Mail.Send alone would send from the connected user instead and 403 on the
+// helpdesk draft. An existing connection consented before this line will not
+// carry them, so /api/reply/from-addresses reports the gap and the composer
+// says to reconnect Outlook rather than failing at send time.
+const M365_SCOPES = String(process.env.M365_SCOPES || 'offline_access openid profile email User.Read Mail.Read Mail.Read.Shared Mail.Send Mail.Send.Shared').trim();
+const M365_CAN_SEND_MAIL = /Mail\.Send/i.test(M365_SCOPES);
 const SUPPORT_MAILBOX = String(process.env.SUPPORT_MAILBOX || 'helpdesk@quinta.im').trim().toLowerCase();
+// Which addresses a reply may claim to be from. The helpdesk mailbox is always
+// allowed because that is where the thread already lives; anything else has to
+// be listed here AND have Send As granted to the connected identity in
+// Exchange, or Graph rejects the send. Configured rather than free-text so a
+// typo, or a deliberate attempt to reply as someone else, cannot leave the
+// board - the address is validated against this list server-side.
+const REPLY_FROM_ADDRESSES = (() => {
+  const configured = String(process.env.REPLY_FROM_ADDRESSES || '')
+    .split(/[,;\s]+/)
+    .map(value => value.trim().toLowerCase())
+    .filter(value => value.includes('@'));
+  return [...new Set([SUPPORT_MAILBOX, ...configured])];
+})();
 const CONFIGURED_APP_BASE_URL = String(process.env.APP_BASE_URL || process.env.PUBLIC_BASE_URL || '').trim();
 const APP_BASE_URL = String(CONFIGURED_APP_BASE_URL || `http://localhost:${PORT}`).replace(/\/+$/, '');
 // Teams "Resolved" alerts always link to prod, regardless of which
@@ -240,6 +261,42 @@ function isAuthed(req) { return req.session && req.session.authenticated === tru
 function requireAuth(req, res, next) { return isAuthed(req) ? next() : res.status(401).json({ error: 'unauthorized' }); }
 function isAdminRole(role) { return role === 'admin' || role === 'owner'; }
 function isOwnerRole(role) { return role === 'owner'; }
+// The two decisions that are CS's to make, named once so the client's hidden
+// buttons and the server's enforcement cannot drift apart.
+//
+// Closing a ticket for good (Confirm resolved) and choosing which support agent
+// owns it are review decisions: support does the work and moves the card to
+// Resolved, CS is who signs it off and who hands it out. Support agents used to
+// be able to do both - the resolved-review buttons appeared for whoever the
+// ticket's CS field happened to name, and the assign menu opened for the
+// assignee themselves, so an agent could confirm their own work and pass a
+// ticket on without CS ever seeing it.
+function isCsRole(role) { return normalizeRole(role) === 'cs'; }
+
+/* Which team someone is on, which is NOT simply their stored role.
+
+   Seven of the CS agents' accounts (JAT, JFC, RKH, SKE, TBR, VPO, WPH) still
+   carry the legacy `agent` role, which normalizeRole maps to 'support'. Reading
+   the role alone would therefore have taken Confirm resolved away from half the
+   CS team the moment this restriction shipped, which is why the check the board
+   used before this looked at the trigram and ignored the role entirely.
+
+   So both are consulted: the roster settles it for anyone on it, and the role
+   covers accounts whose username is not an agent trigram at all. Fix the stored
+   roles and this keeps working unchanged. */
+function effectiveTeam(role, username) {
+  const normalized = normalizeRole(role);
+  if (isAdminRole(normalized)) return 'admin';
+  const code = String(username || '').trim().toUpperCase();
+  if (normalized === 'cs' || CS_AGENT_CODES.has(code)) return 'cs';
+  if (SUPPORT_AGENT_CODES.has(code)) return 'support';
+  return normalized === 'cs' ? 'cs' : 'support';
+}
+function canConfirmResolution(role, username) {
+  const team = effectiveTeam(role, username);
+  return team === 'cs' || team === 'admin';
+}
+function canAssignSupportAgent(role, username) { return canConfirmResolution(role, username); }
 function requireAdmin(req, res, next) {
   if (!isAuthed(req)) return res.status(401).json({ error: 'unauthorized' });
   if (!isAdminRole(req.session.role)) return res.status(403).json({ error: 'admin_required' });
@@ -1123,9 +1180,98 @@ function medianOf(values) {
   return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
 }
 
-async function safeWriteState(state) {
+/* The board is saved as one blob, so a role restriction has to be applied to
+   the blob rather than to a route. This strips the two CS-only decisions out of
+   an incoming save when the person saving is not CS, leaving the rest of their
+   save intact.
+
+   Hiding the buttons in the client is presentation only: the same save endpoint
+   accepts any state a tab cares to post, so a support agent's tab (or a stale
+   one, or curl) could still write confirmedAt or move a ticket to another
+   agent. This is where that is actually refused.
+
+   What is deliberately still allowed for support:
+   - moving a ticket into Resolved. Support finishes the work; CS signs it off.
+   - the FIRST assignment of a ticket that has nobody on it, because that is the
+     client's auto-assign for a newly ingested ticket and every open tab runs
+     it, not a person handing work around. Only changing an existing assignment
+     is CS's call. */
+function applyRolePermissionsToStateWrite(currentState, nextState, actor) {
+  const role = normalizeRole(actor?.role) || 'support';
+  const username = actor?.username || '';
+  const refused = [];
+  const isMap = (value) => !!value && typeof value === 'object';
+
+  if (!canConfirmResolution(role, username)) {
+    const currentMeta = isMap(currentState.ticketResolutionMeta) ? currentState.ticketResolutionMeta : {};
+    const incomingMeta = isMap(nextState.ticketResolutionMeta) ? nextState.ticketResolutionMeta : {};
+    Object.keys(incomingMeta).forEach((ticketId) => {
+      const before = isMap(currentMeta[ticketId]) ? currentMeta[ticketId] : {};
+      const after = isMap(incomingMeta[ticketId]) ? incomingMeta[ticketId] : {};
+      const claims = ['confirmedAt', 'confirmedBy', 'sentBackAt', 'sentBackBy', 'sendBackNote']
+        .filter(field => after[field] !== undefined && after[field] !== before[field]);
+      if (!claims.length) return;
+      // Keep whatever CS already recorded, drop what this save tried to add.
+      incomingMeta[ticketId] = { ...after };
+      claims.forEach((field) => {
+        if (before[field] === undefined) delete incomingMeta[ticketId][field];
+        else incomingMeta[ticketId][field] = before[field];
+      });
+      refused.push({ field: 'ticketResolutionMeta', id: ticketId, claims });
+    });
+
+    // The archive stamp Confirm resolved writes alongside the meta. Without
+    // this the ticket would still vanish off the board, which is the visible
+    // half of confirming it.
+    const currentArchived = isMap(currentState.ticketArchived) ? currentState.ticketArchived : {};
+    const incomingArchived = isMap(nextState.ticketArchived) ? nextState.ticketArchived : {};
+    Object.keys(incomingArchived).forEach((ticketId) => {
+      const entry = incomingArchived[ticketId];
+      if (String(entry?.reason || '') !== 'resolved_confirmed') return;
+      // Already archived this way by someone who was allowed to: this save is
+      // just carrying it back, not claiming it.
+      if (String(currentArchived[ticketId]?.reason || '') === 'resolved_confirmed') return;
+      if (currentArchived[ticketId]) incomingArchived[ticketId] = currentArchived[ticketId];
+      else delete incomingArchived[ticketId];
+      refused.push({ field: 'ticketArchived', id: ticketId, claims: ['resolved_confirmed'] });
+    });
+  }
+
+  if (!canAssignSupportAgent(role, username)) {
+    const currentAssignee = isMap(currentState.ticketAssignee) ? currentState.ticketAssignee : {};
+    const incomingAssignee = isMap(nextState.ticketAssignee) ? nextState.ticketAssignee : {};
+    Object.keys(incomingAssignee).forEach((ticketId) => {
+      const before = String(currentAssignee[ticketId] || '').trim();
+      const after = String(incomingAssignee[ticketId] || '').trim();
+      if (!before || before === after) return;
+      incomingAssignee[ticketId] = currentAssignee[ticketId];
+      // manualSupportOverride and ticketAssignmentMode describe the assignment
+      // and are merged on its clock, so a refused reassignment must not leave
+      // its "a human chose this" flag behind - that flag is what stops the
+      // company/workload pass from ever correcting the ticket again.
+      ['manualSupportOverride', 'ticketAssignmentMode'].forEach((field) => {
+        const incoming = isMap(nextState[field]) ? nextState[field] : null;
+        if (!incoming || !Object.prototype.hasOwnProperty.call(incoming, ticketId)) return;
+        const current = isMap(currentState[field]) ? currentState[field] : {};
+        if (Object.prototype.hasOwnProperty.call(current, ticketId)) incoming[ticketId] = current[ticketId];
+        else delete incoming[ticketId];
+      });
+      refused.push({ field: 'ticketAssignee', id: ticketId, claims: [after] });
+    });
+  }
+
+  if (refused.length) {
+    console.warn(`[permissions] dropped ${refused.length} CS-only change(s) from a ${effectiveTeam(role, username)} save by ${actor?.username || 'unknown'}: ${refused.slice(0, 5).map(r => `${r.field}/${r.id}`).join(', ')}`);
+  }
+  return refused;
+}
+
+async function safeWriteState(state, actor = null) {
   const nextState = (state && typeof state === 'object') ? state : {};
   const currentState = safeReadState();
+  // Before any merging, so a refused field is merged from the current state
+  // like any other value this save did not touch.
+  const refusedChanges = actor ? applyRolePermissionsToStateWrite(currentState, nextState, actor) : [];
   const currentMeta = currentState._meta || {};
   const incomingMeta = nextState._meta || {};
   const incomingVersion = Number(incomingMeta.clientVersion || 0);
@@ -1303,7 +1449,7 @@ async function safeWriteState(state) {
     backupCreated = true;
   }
 
-  return { saved: true, partial: isStale, backupCreated, state: finalState };
+  return { saved: true, partial: isStale, backupCreated, refused: refusedChanges, state: finalState };
 }
 async function hydrateStateFromDatabase(baseState = {}) {
   const state = (baseState && typeof baseState === 'object') ? JSON.parse(JSON.stringify(baseState)) : {};
@@ -4744,7 +4890,7 @@ app.post('/api/state', requireAuth, async (req, res) => {
   const state = req.body || {};
   // Snapshot before the write so we can broadcast just what actually changed.
   const beforeState = safeReadState();
-  const result = await safeWriteState(state);
+  const result = await safeWriteState(state, { role: req.session.role, username: req.session.username });
   let ticketDb = { count: 0 };
   try {
     ticketDb = await upsertBoardTicketsToDatabase(result.state || state, req);
@@ -5426,6 +5572,215 @@ app.get('/api/message-image/:attachmentId', requireAuth, async (req, res) => {
     const status = graphErrorStatus(err);
     console.error(`Inline image fetch failed (${status || 'no status'}):`, String(err?.message || err).slice(0, 200));
     return res.status(status === 404 ? 404 : 502).json({ error: 'image_unavailable', status: status || 0 });
+  }
+});
+
+/* ======================== Replying from the board =========================
+
+   An agent used to have to open the message in Outlook to answer it, which
+   meant leaving the board, finding the thread, and remembering which mailbox
+   to answer from. This is that reply, sent from here.
+
+   Threading is why this drafts through Graph's createReply rather than just
+   composing a new mail with a "Re:" subject: createReply produces a draft that
+   already carries the conversation id, In-Reply-To and References headers and
+   the quoted original, so the client's mail app files the answer under the
+   thread they started instead of opening a second one. The agent's text is
+   injected above that quote, exactly where Outlook would put it.
+
+   The draft is created on the message where it lives - the helpdesk mailbox -
+   not in the connected identity's own mailbox, which is what Mail.Send.Shared
+   is for.
+
+   The From address is chosen by the agent but validated here against
+   REPLY_FROM_ADDRESSES. Exchange still has the final say: sending as an address
+   the connected identity has no Send As right on fails at Graph, and that error
+   is passed back rather than swallowed, because "it said it sent and the client
+   never got it" is the one outcome worth being loud about. */
+const REPLY_BODY_MAX_CHARS = Number(process.env.REPLY_BODY_MAX_CHARS || 100_000);
+const MAX_REPLY_RECIPIENTS = 25;
+// Sending mail is not a read: a loop, a double-click, or a bad retry here
+// reaches real clients. Deliberately much tighter than the read endpoints.
+const replyLimiter = rateLimit({ windowMs: 5 * 60 * 1000, max: 40, standardHeaders: true, legacyHeaders: false });
+
+function normalizeEmailAddress(value) {
+  const address = String(value || '').trim().toLowerCase();
+  // Deliberately loose - Exchange is the authority on what it will accept, and
+  // this only needs to reject what is obviously not an address at all.
+  return /^[^\s<>@,;]+@[^\s<>@,;]+\.[^\s<>@,;]+$/.test(address) ? address : '';
+}
+
+function toGraphRecipients(value) {
+  const list = Array.isArray(value) ? value : String(value || '').split(/[,;]/);
+  const addresses = [...new Set(list.map(normalizeEmailAddress).filter(Boolean))].slice(0, MAX_REPLY_RECIPIENTS);
+  return addresses.map(address => ({ emailAddress: { address } }));
+}
+
+// The agent types plain text; the mail goes out as HTML because the quoted
+// original below it is HTML. Escaped first, so a client's own address or an
+// angle-bracketed quote in the reply cannot become markup.
+function replyTextToHtml(text) {
+  const escaped = escapeHtml(String(text || '').replace(/\r\n/g, '\n'));
+  const paragraphs = escaped.split(/\n{2,}/).map(block => block.replace(/\n/g, '<br>'));
+  return `<div style="font-family:Segoe UI,Arial,sans-serif;font-size:14px;color:#0f172a;">${paragraphs.map(p => `<p style="margin:0 0 12px;">${p}</p>`).join('')}</div>`;
+}
+
+// Put the reply above the quoted thread. createReply returns a whole HTML
+// document, so this goes just inside <body> when there is one - prepending to
+// the document instead would put visible text before <html>, which some clients
+// render and others drop.
+function injectReplyIntoDraftHtml(draftHtml, replyHtml) {
+  const draft = String(draftHtml || '');
+  if (!draft.trim()) return replyHtml;
+  const bodyOpen = draft.match(/<body[^>]*>/i);
+  if (bodyOpen) {
+    const at = draft.indexOf(bodyOpen[0]) + bodyOpen[0].length;
+    return draft.slice(0, at) + replyHtml + draft.slice(at);
+  }
+  return replyHtml + draft;
+}
+
+// Which addresses this board may reply from, and whether it can reply at all.
+// The client asks before showing the composer so it can say "reconnect Outlook"
+// up front instead of letting someone write a reply that cannot be sent.
+app.get('/api/reply/from-addresses', requireAuth, async (req, res) => {
+  let connected = false;
+  try {
+    await resolveStoredM365Tokens(req);
+    connected = true;
+  } catch (_) {
+    connected = false;
+  }
+  return res.json({
+    canSend: connected && M365_CAN_SEND_MAIL,
+    connected,
+    // False when the app's configured scopes never asked for Mail.Send. A
+    // connection made before that scope was added is indistinguishable from
+    // here (the token's own scopes are not inspected), so a send can still
+    // fail with a Graph 403 telling the agent to reconnect.
+    scopeConfigured: M365_CAN_SEND_MAIL,
+    defaultAddress: SUPPORT_MAILBOX,
+    addresses: REPLY_FROM_ADDRESSES.map(address => ({
+      address,
+      label: address === SUPPORT_MAILBOX ? `${address} (helpdesk)` : address,
+      isDefault: address === SUPPORT_MAILBOX
+    }))
+  });
+});
+
+app.post('/api/tickets/:externalId/reply', requireAuth, replyLimiter, async (req, res) => {
+  try {
+    const externalId = String(req.params.externalId || '').trim();
+    const messageId = String(req.body?.messageId || '').trim();
+    const bodyText = String(req.body?.body || '').trim();
+    const replyAll = req.body?.replyAll !== false;
+    const subjectOverride = String(req.body?.subject || '').trim();
+    if (!externalId) return res.status(400).json({ error: 'missing_ticket' });
+    if (!bodyText) return res.status(400).json({ error: 'empty_reply' });
+    if (bodyText.length > REPLY_BODY_MAX_CHARS) return res.status(413).json({ error: 'reply_too_long' });
+
+    const from = normalizeEmailAddress(req.body?.from) || SUPPORT_MAILBOX;
+    if (!REPLY_FROM_ADDRESSES.includes(from)) return res.status(403).json({ error: 'reply_from_not_allowed', allowed: REPLY_FROM_ADDRESSES });
+
+    const to = toGraphRecipients(req.body?.to);
+    const cc = toGraphRecipients(req.body?.cc);
+    if (!messageId && !to.length) return res.status(400).json({ error: 'missing_recipients' });
+
+    const token = await graphDelegatedToken(req);
+    const mailbox = SUPPORT_MAILBOX;
+    const replyHtml = replyTextToHtml(bodyText);
+    let sentSubject = subjectOverride;
+
+    if (messageId) {
+      // createReplyAll only when the agent asked for it AND did not name the
+      // recipients themselves - an explicit To list is an instruction, and
+      // quietly adding everyone else back to it would be a data leak.
+      const useReplyAll = replyAll && !to.length;
+      const draft = await graphRequest(
+        `/users/${encodeURIComponent(mailbox)}/messages/${encodeURIComponent(messageId)}/${useReplyAll ? 'createReplyAll' : 'createReply'}`,
+        token,
+        { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) }
+      );
+      const draftId = String(draft?.id || '');
+      if (!draftId) throw new Error('reply_draft_not_created');
+
+      const patch = {
+        body: {
+          contentType: 'HTML',
+          content: injectReplyIntoDraftHtml(draft?.body?.content, replyHtml)
+        }
+      };
+      if (to.length) patch.toRecipients = to;
+      if (cc.length) patch.ccRecipients = cc;
+      if (subjectOverride) patch.subject = subjectOverride;
+      // Only when it differs from the mailbox: setting `from` to the mailbox
+      // that owns the draft is a no-op that can still 403 on a tenant that
+      // treats it as a Send As.
+      if (from !== mailbox) patch.from = { emailAddress: { address: from } };
+
+      const patched = await graphRequest(`/users/${encodeURIComponent(mailbox)}/messages/${encodeURIComponent(draftId)}`, token, {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch)
+      });
+      sentSubject = String(patched?.subject || draft?.subject || sentSubject || '');
+      await graphRequest(`/users/${encodeURIComponent(mailbox)}/messages/${encodeURIComponent(draftId)}/send`, token, { method: 'POST' });
+    } else {
+      // A manual ticket, or one whose Outlook message we no longer have: there
+      // is no thread to reply into, so this is a fresh mail from the mailbox.
+      if (!sentSubject) sentSubject = 'Support ticket update';
+      await graphRequest(`/users/${encodeURIComponent(from)}/sendMail`, token, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          message: {
+            subject: sentSubject,
+            body: { contentType: 'HTML', content: replyHtml },
+            toRecipients: to,
+            ...(cc.length ? { ccRecipients: cc } : {})
+          },
+          saveToSentItems: true
+        })
+      });
+    }
+
+    const actor = String(req.session.username || '').trim().toUpperCase() || null;
+    const ticketRow = await prisma.ticket.findUnique({ where: { externalId }, select: { id: true } }).catch(() => null);
+    if (ticketRow?.id) {
+      await createTicketAuditEvent({
+        ticketId: ticketRow.id,
+        userId: req.session.userId || null,
+        eventType: 'email_reply_sent',
+        newValue: from,
+        metadata: {
+          actor,
+          from,
+          to: to.map(r => r.emailAddress.address),
+          cc: cc.map(r => r.emailAddress.address),
+          replyAll: !!(messageId && replyAll && !to.length),
+          messageId: messageId || null,
+          chars: bodyText.length
+        }
+      });
+    }
+
+    return res.json({
+      ok: true,
+      from,
+      to: to.map(r => r.emailAddress.address),
+      cc: cc.map(r => r.emailAddress.address),
+      subject: sentSubject || null,
+      threaded: !!messageId
+    });
+  } catch (error) {
+    const message = String(error?.message || error);
+    const status = graphErrorStatus(error);
+    if (message.startsWith('m365_not_connected')) return res.status(409).json({ error: 'm365_not_connected' });
+    if (message.startsWith('m365_reauth_required')) return res.status(409).json({ error: 'm365_reauth_required', detail: message });
+    // 403 here is almost always the missing piece rather than a bug: either the
+    // token predates the Mail.Send scopes, or the chosen From has no Send As.
+    if (status === 403) return res.status(403).json({ error: 'reply_send_forbidden', detail: message.slice(0, 300) });
+    if (status === 404) return res.status(404).json({ error: 'reply_message_not_found', detail: message.slice(0, 300) });
+    console.error('Ticket reply failed:', message.slice(0, 400));
+    return res.status(502).json({ error: 'reply_send_failed', detail: message.slice(0, 300) });
   }
 });
 

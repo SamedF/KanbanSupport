@@ -193,6 +193,10 @@ M365_CLIENT_ID=
 M365_CLIENT_SECRET=
 M365_REDIRECT_URI=https://YOUR_DOMAIN/auth/microsoft/callback
 SUPPORT_MAILBOX=helpdesk@quinta.im
+# Optional. Extra addresses the board's Reply composer may send as, on top of
+# SUPPORT_MAILBOX which is always offered. Each one also needs Send As granted
+# to the connected Outlook identity in Exchange, or Graph refuses the send.
+REPLY_FROM_ADDRESSES=
 
 HUBSPOT_CLIENT_ID=
 HUBSPOT_CLIENT_SECRET=
@@ -200,6 +204,25 @@ HUBSPOT_REDIRECT_URI=https://YOUR_DOMAIN/auth/hubspot/callback
 ```
 
 After production deploy, run `node seed-admin.js` once if your hosting platform does not run it automatically.
+
+## Replying to a ticket from the board says Outlook refused the send
+
+Symptom: the reply composer opens, but sending reports "Outlook refused the
+send: reconnect it to grant mail-send permission".
+
+Replying needs two Graph scopes the board did not use before it could reply:
+`Mail.Send` and `Mail.Send.Shared`. `Mail.Send.Shared` is the one that matters -
+the reply is drafted on the message where it lives, in the helpdesk mailbox,
+which is not the connected identity's own.
+
+Both are in the default `M365_SCOPES` now, but a connection made before they
+were added still holds a token without them. Reconnect Outlook (the Microsoft
+sign-in on the board) so consent is granted again, and if the tenant requires
+admin consent for the app, grant that first.
+
+The other cause of the same message is a From address that is not the helpdesk
+mailbox: sending as it needs Send As granted to the connected identity in
+Exchange, per address listed in `REPLY_FROM_ADDRESSES`.
 
 ## Tickets open with no formatting and no images
 

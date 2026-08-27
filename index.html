@@ -2633,6 +2633,9 @@ header {
   gap: 8px;
   justify-content: flex-end;
   background: var(--slate-50);
+  /* Four buttons on the email modal since Reply joined them - on a narrow
+     window they wrap rather than shrinking each other out of readability. */
+  flex-wrap: wrap;
 }
 
 .btn-out,
@@ -2826,6 +2829,93 @@ textarea:focus {
   justify-content: space-between;
   gap: 8px;
   flex-wrap: wrap;
+}
+
+/* The reply composer in the email modal. Sits between the message body and the
+   modal's own action bar, so the quoted message stays visible above whatever is
+   being written about it. It borrows .form-input and .compose-textarea rather
+   than restyling fields, so a reply looks like every other form on the board. */
+.em-reply {
+  border-top: 1px solid var(--border);
+  padding: 12px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  background: var(--neutral-50);
+  /* The body above it scrolls; this must not, or a long reply pushes the Send
+     button off the bottom of the modal. */
+  flex: 0 0 auto;
+}
+
+.em-reply[hidden] { display: none; }
+
+.em-reply-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.em-reply-note {
+  font-size: 11px;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.em-reply-note.warn { color: var(--amber-600); }
+.em-reply-note.bad { color: var(--red-600); }
+
+/* From is narrow and fixed, To/Cc take the rest - on a phone they stack. */
+.em-reply-grid {
+  display: grid;
+  grid-template-columns: minmax(200px, 1fr) minmax(200px, 1fr) minmax(200px, 1fr);
+  gap: 8px;
+}
+
+@media (max-width: 720px) {
+  .em-reply-grid { grid-template-columns: 1fr; }
+}
+
+.em-reply-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.em-reply-field > span {
+  font-size: 10px;
+  font-weight: 800;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: .03em;
+}
+
+#em-reply-body { min-height: 108px; }
+
+.em-reply-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.em-reply-check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.em-reply-buttons {
+  display: flex;
+  gap: 8px;
+  margin-left: auto;
 }
 
 .tag-section {
@@ -4465,7 +4555,30 @@ th {
 <div id="toast"></div>
 
 <!-- Email modal -->
-<div class="modal-bg" id="email-modal"><div class="modal"><div class="modal-head"><h2 id="em-title"></h2><button class="modal-close-x" data-close="email-modal"></button></div><div class="modal-meta-bar" id="em-meta"></div><div class="tr-bar" id="em-tr-bar"></div><div class="modal-body-scroll" id="em-body"></div><div class="modal-actions"><button class="btn-out" data-close="email-modal">Close</button><button class="btn-out" id="em-copy" title="Copy the whole message - header and body - to the clipboard">Copy email</button><button class="btn-out" id="em-outlook" title="Open this message in Outlook on the web">Open in Outlook</button></div></div></div>
+<div class="modal-bg" id="email-modal"><div class="modal"><div class="modal-head"><h2 id="em-title"></h2><button class="modal-close-x" data-close="email-modal"></button></div><div class="modal-meta-bar" id="em-meta"></div><div class="tr-bar" id="em-tr-bar"></div><div class="modal-body-scroll" id="em-body"></div>
+<!-- Replying to the client, without leaving the board. Collapsed until the
+     Reply button is pressed: the modal's first job is still reading the
+     message, and an always-open composer pushes the body out of view. -->
+<div class="em-reply" id="em-reply" hidden>
+  <div class="em-reply-head">
+    <div class="compose-label">Reply to the client</div>
+    <div class="em-reply-note" id="em-reply-note"></div>
+  </div>
+  <div class="em-reply-grid">
+    <label class="em-reply-field"><span>From</span><select class="form-input" id="em-reply-from"></select></label>
+    <label class="em-reply-field"><span>To</span><input class="form-input" id="em-reply-to" type="text" placeholder="client@example.com" autocomplete="off" spellcheck="false"></label>
+    <label class="em-reply-field"><span>Cc</span><input class="form-input" id="em-reply-cc" type="text" placeholder="Optional, comma separated" autocomplete="off" spellcheck="false"></label>
+  </div>
+  <textarea class="compose-textarea" id="em-reply-body" placeholder="Write your reply. The client's message is quoted underneath it, exactly as Outlook would."></textarea>
+  <div class="em-reply-foot">
+    <label class="em-reply-check"><input type="checkbox" id="em-reply-wct" checked> Move ticket to Waiting on Contact</label>
+    <div class="em-reply-buttons">
+      <button class="btn-out" id="em-reply-cancel">Cancel</button>
+      <button class="btn-primary" id="em-reply-send">Send reply</button>
+    </div>
+  </div>
+</div>
+<div class="modal-actions"><button class="btn-out" data-close="email-modal">Close</button><button class="btn-out" id="em-copy" title="Copy the whole message - header and body - to the clipboard">Copy email</button><button class="btn-out" id="em-reply-open" title="Write a reply and send it from the board">Reply</button><button class="btn-out" id="em-outlook" title="Open this message in Outlook on the web">Open in Outlook</button></div></div></div>
 <!-- One shared language picker for every translate trigger on the page. See the
      .tr-trigger CSS for why this is a single element rather than one per card. -->
 <div id="tr-pop" role="dialog" aria-label="Translate ticket">
@@ -4829,6 +4942,59 @@ function isInternalEmailAddress(value){const addr=String(value||'').trim().toLow
 function getClientEmail(emailObj){const sender=(emailObj?.sender||'').toLowerCase();if(!isInternalEmailAddress(sender))return sender||null;const recipients=Array.isArray(emailObj?.recipients)?emailObj.recipients:[];const client=recipients.find(r=>{if(!r||typeof r!=='string')return false;const rl=r.toLowerCase();if(SUPPORT_BOX_ALIASES.includes(rl))return false;if(isInternalEmailAddress(rl))return false;if(NO_REPLY_PATTERNS.some(p=>rl.includes(p)))return false;return true;});return client?client.toLowerCase():null;}
 function csAgentFromSenderEmail(sender){const addr=String(sender||'').trim().toLowerCase();if(!addr.includes('@'))return'';const domain=addr.split('@')[1]||'';if(!INTERNAL_EMAIL_DOMAINS.includes(domain))return'';const local=addr.split('@')[0].toUpperCase();return CS_AGENTS.includes(local)?local:'';}
 function supportAgentFromSenderEmail(sender){const addr=String(sender||'').trim().toLowerCase();if(!addr.includes('@'))return'';const domain=addr.split('@')[1]||'';if(!INTERNAL_EMAIL_DOMAINS.includes(domain))return'';const local=addr.split('@')[0].toUpperCase();return SUPPORT_AGENTS.includes(local)?local:'';}
+/* Which support agents the mail itself names.
+
+   When a CS agent or a client puts a support agent on the To/Cc line, that is
+   already the answer to "whose ticket is this" - it was just invisible to the
+   board, which assigned by workload instead and left CS to move it by hand. The
+   trigram is the mailbox local part (sgu@quinta.im -> SGU), so the roster and
+   the internal domains are all this needs.
+
+   Order is To-then-Cc as Graph returned it (mapMessage concatenates them in
+   that order), so the first name is the most likely owner rather than whoever
+   sorts first alphabetically. */
+function supportAgentsTaggedInEmail(emailObj){
+  const seen=new Set();
+  const tagged=[];
+  (Array.isArray(emailObj?.recipients)?emailObj.recipients:[]).forEach(addr=>{
+    const code=supportAgentFromSenderEmail(addr);
+    if(!code||seen.has(code))return;
+    seen.add(code);
+    tagged.push(code);
+  });
+  return tagged;
+}
+/* Where a ticket goes when the mail names nobody who can take it.
+
+   An admin, deliberately, rather than the least loaded agent. The mail's To/Cc
+   line is the only signal about whose ticket it is; when it carries none - no
+   colleague tagged, or only people who are not on the support roster (a client,
+   a CS agent, an admin account that cannot hold tickets) - nobody has actually
+   been asked to take it, and quietly spreading those across the team by
+   workload made them look assigned when they had never been triaged. They land
+   with an admin to hand out instead.
+
+   Only SUPPORT_AGENTS trigrams are valid here: the server independently
+   rejects anything else for this field (see the assignedAgent check in
+   upsertBoardTicketsToDatabase), so an admin who is not on that roster - AHK,
+   OWNER, or VGU, who is CS - cannot be given a ticket even by name. SGU is the
+   admin who is on it, which is why it is the fallback.
+
+   Fixed rather than computed on purpose: leastLoadedSupportAgent() is a
+   session-local sum, so two tabs could reach different answers for the same
+   untriaged ticket and flap it between them. */
+const FALLBACK_SUPPORT_OWNER='SGU';
+function fallbackSupportOwner(){
+  // Only if SGU is ever retired from the roster does workload decide again -
+  // an invalid assignee would be rejected on save and re-stamped on every
+  // render.
+  return normalizeSupportAgent(FALLBACK_SUPPORT_OWNER)||leastLoadedSupportAgent();
+}
+// Who a ticket lands on when nobody has chosen yet: the agent the mail names,
+// and failing that the admin above.
+function defaultSupportAgentForTicket(emailObj){
+  return supportAgentsTaggedInEmail(emailObj)[0]||fallbackSupportOwner();
+}
 function normalizeEmailList(values){return (Array.isArray(values)?values:[]).map(v=>String(v||'').trim().toLowerCase()).filter(Boolean);}
 function isAutomatic(e){if(!e||!e.sender)return true;const sl=e.sender.toLowerCase();if(sl===SUPPORT_BOX)return true;if(BLOCKED_EMAILS.has(sl))return true;const domain=(sl.split('@')[1]||'');if(BLOCKED_DOMAINS.has(domain))return true;if(NO_REPLY_PATTERNS.some(p=>sl.includes(p)))return true;if(!e.subject&&!e.summary)return true;const tl=((e.subject||'')+' '+(e.summary||'')).toLowerCase();if(NO_REPLY_SUBJECTS.some(p=>tl.includes(p)))return true;if(/\b(newsletter|webinar|digest|event reminder)\b/.test(tl))return true;if(/(microsoft teams meeting|join microsoft teams meeting|meeting invitation|accepted:|declined:|tentative:)/.test(tl))return true;return false;}
 function normalizeThreadSubject(subject){return String(subject||'').toLowerCase().replace(/^\s*((re|fw|fwd)\s*:\s*)+/gi,'').replace(/\s+/g,' ').trim();}
@@ -5125,7 +5291,54 @@ function currentUserRole(){
 function currentUserCanViewAllTickets(){
   return currentUserIsAdmin();
 }
+/* Handing a ticket to a support agent is CS's decision, not support's.
+
+   This used to be ticketVisibleToCurrentUser alone, which for a support agent
+   is "am I the assignee" - so the person holding a ticket could pass it to
+   somebody else, and CS only found out by noticing the initials had changed.
+   Support still sees who holds the ticket; the menu just does not open.
+
+   The server refuses the same change in applyRolePermissionsToStateWrite, so
+   this is only about not offering a control that would be rejected. */
+/* Which team the signed-in person is on, which is not the same question as
+   what their role column says.
+
+   Seven CS agents' accounts still carry the legacy 'agent' role, which
+   currentUserRole() reports as 'support'. Gating on the role alone would have
+   taken the CS review buttons away from half the CS team - the check this
+   replaced looked only at the trigram, for exactly that reason. The roster
+   settles it for anyone on it; the role covers everyone else. Mirrors
+   effectiveTeam() in server.js, which is what actually enforces this. */
+function currentUserTeam(){
+  if(currentUserIsAdmin())return'admin';
+  const role=currentUserRole();
+  const me=currentUser();
+  if(role==='cs'||CS_AGENTS.includes(me))return'cs';
+  if(SUPPORT_AGENTS.includes(me))return'support';
+  return role==='cs'?'cs':'support';
+}
 function currentUserCanAssignTicket(ticket){
+  if(currentUserIsAdmin())return true;
+  if(currentUserTeam()!=='cs')return false;
+  // Deliberately not ticketVisibleToCurrentUser: for a CS agent whose account
+  // still says 'agent' that helper asks "am I the assignee", which a CS agent
+  // never is, and would refuse them every ticket they own.
+  const me=normalizeCSAgent(currentUser());
+  const {csOwner}=ticketFilterAgentValues(ticket);
+  return !!me&&me===normalizeCSAgent(csOwner);
+}
+// Signing a resolved ticket off for good. Same rule, stated separately because
+// it is a different decision and reads better at both call sites than one
+// overloaded helper.
+function currentUserCanConfirmResolution(csOwner){
+  if(currentUserIsAdmin())return true;
+  if(currentUserTeam()!=='cs')return false;
+  const me=normalizeCSAgent(currentUser());
+  return !!me&&me===normalizeCSAgent(csOwner);
+}
+// Replying to the client is the work itself, so whoever holds the ticket can
+// do it: the support agent it is assigned to, the CS who owns it, or an admin.
+function currentUserCanReplyToTicket(ticket){
   if(currentUserIsAdmin())return true;
   return ticketVisibleToCurrentUser(ticket);
 }
@@ -5175,6 +5388,25 @@ async function apiGetTickets(){
 async function apiSaveState(payload){
   try{
     const res=await fetch('/api/state',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify(payload)});
+    // The server drops CS-only changes out of a save made by someone who is
+    // not CS (see applyRolePermissionsToStateWrite) and says which. The rest of
+    // the save still succeeded, so this is not a failure - but it must not pass
+    // silently either, or the board would show a change that was never stored
+    // until the next reload quietly undid it.
+    if(res.ok){
+      const out=await res.json().catch(()=>null);
+      const refused=Array.isArray(out?.refused)?out.refused:[];
+      if(refused.length){
+        const fields=[...new Set(refused.map(r=>String(r?.field||'')))];
+        const what=fields.includes('ticketAssignee')&&fields.length===1
+          ?'Support assignment is CS-only - that change was not saved'
+          :'Confirming a resolved ticket is CS-only - that change was not saved';
+        showToast(what,'warn');
+        // Take the board back to what was actually stored rather than leaving
+        // the refused value on screen.
+        loadState().then(()=>renderActiveView()).catch(()=>{});
+      }
+    }
     return !!res.ok;
   }catch(_){}
   return false;
@@ -5715,8 +5947,9 @@ async function loadState(){
 // Migrates pre-split data where a CS agent code sat in the support-assignee
 // slot. Runs at the end of every loadState, which makes it dangerous: it used
 // to pick a replacement with leastLoadedSupportAgent() - a session-local
-// calculation, so two tabs chose different agents and the ticket flapped - and
-// it cleared manualSupportOverride, destroying the protection a deliberate
+// calculation, so two tabs chose different agents and the ticket flapped (it
+// takes the fixed fallbackSupportOwner() now) - and it cleared
+// manualSupportOverride, destroying the protection a deliberate
 // assignment had just been given. Both are now fixed, and the migration is
 // recorded in the assignment log so a mass move can never again be invisible.
 function normalizeLegacyAssignmentModes(){
@@ -5730,7 +5963,7 @@ function normalizeLegacyAssignmentModes(){
       if(!ticketCSOwner[id])ticketCSOwner[id]=assignee;
       // Never overwrite a deliberate assignment during a data migration.
       if(!manualSupportOverride[id]){
-        setTicketAssignee(id,leastLoadedSupportAgent(),undefined,'legacyMigration');
+        setTicketAssignee(id,fallbackSupportOwner(),undefined,'legacyMigration');
         migrated++;
       }
       ticketAssignmentMode[id]='support';
@@ -6565,7 +6798,7 @@ document.getElementById('ct-submit').addEventListener('click',async()=>{
   if(clientEmail)ticketClientEmail[id]=clientEmail;
   ticketCategory[id]=category;
   if(subtype)ticketSubtype[id]=subtype;
-  setTicketAssignee(id,normalizeSupportAgent(document.getElementById('ct-agent').value)||leastLoadedSupportAgent());
+  setTicketAssignee(id,normalizeSupportAgent(document.getElementById('ct-agent').value)||fallbackSupportOwner());
   ticketAssignmentMode[id]='support';
   const creatorCS=currentUserCSAgent();
   if(creatorCS){ticketCSOwner[id]=creatorCS;manualCSOverride[id]=true;}
@@ -7816,7 +8049,7 @@ function ensureTicketCSOwnerResolved(id,emailObj){
   }
   return ticketCSOwner[id]||null;
 }
-function ensureSupportAssignmentForTicket(id,emailObj,opts={}){if(!id||ticketCategory[id]==='Spam'||isArchivedTicket(id))return false;const currentAssignee=ticketAssignee[id]||'';const keepExistingSupport=!!opts.keepExistingSupport&&SUPPORT_AGENTS.includes(currentAssignee);const supportAgent=keepExistingSupport?currentAssignee:leastLoadedSupportAgent();const csOwner=resolveDefaultCSForTicket(id,emailObj);let changed=false;if(csOwner&&ticketCSOwner[id]!==csOwner&&!manualCSOverride[id]){ticketCSOwner[id]=csOwner;changed=true;}if(ticketAssignee[id]!==supportAgent||ticketAssignmentMode[id]!=='support'){setTicketAssignee(id,supportAgent);ticketAssignmentMode[id]='support';changed=true;}if(manualSupportOverride[id]===undefined){manualSupportOverride[id]=false;changed=true;}return changed;}
+function ensureSupportAssignmentForTicket(id,emailObj,opts={}){if(!id||ticketCategory[id]==='Spam'||isArchivedTicket(id))return false;const currentAssignee=ticketAssignee[id]||'';const keepExistingSupport=!!opts.keepExistingSupport&&SUPPORT_AGENTS.includes(currentAssignee);const supportAgent=keepExistingSupport?currentAssignee:defaultSupportAgentForTicket(emailObj);const csOwner=resolveDefaultCSForTicket(id,emailObj);let changed=false;if(csOwner&&ticketCSOwner[id]!==csOwner&&!manualCSOverride[id]){ticketCSOwner[id]=csOwner;changed=true;}if(ticketAssignee[id]!==supportAgent||ticketAssignmentMode[id]!=='support'){setTicketAssignee(id,supportAgent);ticketAssignmentMode[id]='support';changed=true;}if(manualSupportOverride[id]===undefined){manualSupportOverride[id]=false;changed=true;}return changed;}
 function shouldRefreshHubspotCacheEntry(email){const ce=String(email||'').toLowerCase();if(!ce)return false;if(!(ce in hsCache))return true;const cached=hsCache[ce];const related=allTickets.filter(t=>ticketCategory[t.id]!=='Spam'&&!isArchivedTicket(t.id)&&(ticketClientEmail[t.id]||getClientEmail(t.email))===ce);if(!related.length)return false;if(cached===null)return related.some(t=>isSupportAssignedTicket(t.id)&&!ticketCSOwner[t.id]);if(!cached||!cached.companyName||!cached.companyId||!cached.coOwner)return true;return related.some(t=>isSupportAssignedTicket(t.id)&&!ticketCSOwner[t.id]);}
 function applyCompanyCSAssignments(){let changed=0;let reassigned=0;allTickets.forEach(t=>{if(ticketCategory[t.id]==='Spam'||isArchivedTicket(t.id))return;const id=t.id;const ce=ticketClientEmail[id]||getClientEmail(t.email);if(!ce)return;const cs=resolveDefaultCSForTicket(id,t.email);if(cs&&ticketCSOwner[id]!==cs&&!manualCSOverride[id]){ticketCSOwner[id]=cs;changed++;}if(manualSupportOverride[id])return;if(!SUPPORT_AGENTS.includes(ticketAssignee[id])||ticketAssignmentMode[id]!=='support'){if(ensureSupportAssignmentForTicket(id,t.email,{keepExistingSupport:true})){changed++;reassigned++;}}});
   // Retiring an agent from SUPPORT_AGENTS makes every ticket they hold fail the
@@ -8061,13 +8294,22 @@ async function buildAgentUI(){
   });
 }
 const nextPriority=cur=>PRIORITIES[(PRIORITIES.indexOf(cur)+1)%PRIORITIES.length];
-function agentAssignMenuHtml(selected){
-  const renderGroup=(label,agents)=>`<div class="agent-assign-group">${label}</div>`+agents.map(a=>`
+/* The assign menu, with the mail's own answer at the top.
+
+   `tagged` is whoever the message put on To/Cc. They are listed first, under
+   their own heading, because a CS agent choosing an assignee should not have to
+   open the mail to remember who was named in it - and the full roster is still
+   right below, since being tagged is a strong hint rather than a rule. */
+function agentAssignMenuHtml(selected,tagged=[]){
+  const renderOption=(a,extra='')=>`
     <button class="agent-assign-option${a===selected?' active':''}" type="button" data-agent-pick="${esc(a)}">
-      <span>${esc(a)}</span>
+      <span>${esc(a)}${extra}</span>
       <span class="agent-assign-dot" style="background:${agentColor(a)}"></span>
-    </button>`).join('');
-  return renderGroup('Support',SUPPORT_AGENTS);
+    </button>`;
+  const renderGroup=(label,agents,extra='')=>agents.length?`<div class="agent-assign-group">${label}</div>`+agents.map(a=>renderOption(a,extra)).join(''):'';
+  const taggedList=(Array.isArray(tagged)?tagged:[]).filter(a=>SUPPORT_AGENTS.includes(a));
+  return renderGroup('Tagged in the email',taggedList,' <span style="opacity:.6;">in mail</span>')
+    +renderGroup(taggedList.length?'All support':'Support',SUPPORT_AGENTS);
 }
 
 function getAgentAssignMenuElement(wrap){
@@ -8162,13 +8404,22 @@ function resolvedReviewHtml(id,csOwner){
   const resolvedAt=resolvedAtForTicket(id);
   const remaining=Math.max(0,RESOLVED_RETENTION_MS-(Date.now()-resolvedAt));
   const hoursLeft=Math.ceil(remaining/(60*60*1000));
-  const role=String(currentSessionUser?.role||'').toLowerCase();
-  const canReview=role==='admin'||role==='owner'||normalizeCSAgent(currentUser())===normalizeCSAgent(csOwner);
+  // Support moves the card here; CS is who signs it off. The old test matched
+  // on the CS trigram alone, so a support agent who happened to be named in a
+  // ticket's CS field got both buttons and could confirm their own work.
+  const canReview=currentUserCanConfirmResolution(csOwner);
   const status=meta.sentBackAt?'Sent back by CS':`Auto-hides in ${hoursLeft||1}h unless CS sends it back`;
-  const actions=canReview?`<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px;"><button class="btn-primary" data-res-confirm="${id}" style="font-size:10px;padding:4px 8px;">Confirm resolved</button><button class="btn-out" data-res-sendback="${id}" style="font-size:10px;padding:4px 8px;">Send back</button></div>`:'';
+  const actions=canReview?`<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px;"><button class="btn-primary" data-res-confirm="${id}" style="font-size:10px;padding:4px 8px;">Confirm resolved</button><button class="btn-out" data-res-sendback="${id}" style="font-size:10px;padding:4px 8px;">Send back</button></div>`
+    // Not a disabled button: a greyed-out "Confirm resolved" reads as broken.
+    // Saying whose call it is answers the question the button would raise.
+    :`<div style="margin-top:5px;opacity:.75;">Waiting on ${csOwner?esc(normalizeCSAgent(csOwner)||csOwner):'CS'} to confirm - only CS can close this.</div>`;
   return`<div style="margin-top:7px;padding:7px 8px;border:1px solid var(--green-200);border-radius:8px;background:var(--green-50);color:var(--green-800);font-size:10px;line-height:1.35;"><strong>CS review</strong><div>${esc(status)}</div>${actions}</div>`;
 }
 function confirmTicketResolved(id){
+  if(!currentUserCanConfirmResolution(ticketCSOwner[id])){
+    showToast('Only the ticket CS can confirm a resolved ticket','warn');
+    return;
+  }
   ticketResolutionMeta[id]={...(ticketResolutionMeta[id]||{}),confirmedAt:Date.now(),confirmedBy:currentUser()};
   ticketArchived[id]={archivedAt:Date.now(),archivedBy:currentUser(),reason:'resolved_confirmed'};
   saveState('resolved_confirmed_by_cs');
@@ -8176,6 +8427,10 @@ function confirmTicketResolved(id){
   showToast('Resolved ticket confirmed and archived','ok');
 }
 async function sendResolvedTicketBack(id){
+  if(!currentUserCanConfirmResolution(ticketCSOwner[id])){
+    showToast('Only the ticket CS can send a resolved ticket back','warn');
+    return;
+  }
   const note=prompt('Add a note for why this ticket is being sent back:');
   if(note===null)return;
   const text=String(note||'').trim();
@@ -8974,8 +9229,11 @@ function makeCard(ticket,isNew=false){
   const{email,id}=ticket;
   ensureTicketNumber(id);
   const priority=ticketPriority[id]||ticket.priority;
-  const agent=normalizeSupportAgent(ticketAssignee[id])||leastLoadedSupportAgent();
+  const agent=normalizeSupportAgent(ticketAssignee[id])||defaultSupportAgentForTicket(email);
   if(ticketAssignee[id]!==agent)setTicketAssignee(id,agent);
+  // Who the mail put on the To/Cc line, for the assign menu and the hint next
+  // to it. Computed once per card rather than per control.
+  const taggedSupport=supportAgentsTaggedInEmail(email);
   const csOwner=ensureTicketCSOwnerResolved(id,email)||normalizeCSAgent(ticketCSOwner[id]||'');
   const showCSBadge=!!csOwner;
   const canAssign = currentUserCanAssignTicket(ticket);
@@ -9096,13 +9354,14 @@ function makeCard(ticket,isNew=false){
         ${dupMasterId?'':`<button class="btn-out" data-dup-open="${id}" title="Mark this ticket as a duplicate of another one" style="font-size:10px;padding:2px 7px;">Duplicate</button>`}
         <button class="btn-out" data-archive="${id}" title="Archive this ticket" style="font-size:10px;padding:2px 7px;"> Archive</button>
         <div class="agent-assign-wrap" data-agent-menu="${id}">
-          <button class="agent-assign-trigger" type="button" data-agent-trigger="${id}" title="${canAssign ? 'Assign support agent' : 'Only admins and the ticket CS can change support assignment'}"${canAssign ? '' : ' disabled'}>
+          <button class="agent-assign-trigger" type="button" data-agent-trigger="${id}" title="${canAssign ? (taggedSupport.length?`Assign support agent - tagged in the email: ${esc(taggedSupport.join(', '))}` : 'Assign support agent') : 'Only admins and the ticket CS can change support assignment'}"${canAssign ? '' : ' disabled'}>
             <span class="agent-assign-label">${esc(agent)}</span>
             <span class="agent-assign-chevron">v</span>
           </button>
-          <div class="agent-assign-menu" data-agent-menu-id="${id}">${agentAssignMenuHtml(agent)}</div>
+          <div class="agent-assign-menu" data-agent-menu-id="${id}">${agentAssignMenuHtml(agent,taggedSupport)}</div>
         </div>
         ${showCSBadge?`<span class="agent-badge-card" style="background:${agentColor(csOwner)};opacity:.75;cursor:default;" title="CS owner">${csOwner} CS</span>`:''}
+        ${taggedSupport.length&&taggedSupport[0]!==agent?`<span class="agent-badge-card" style="background:${agentColor(taggedSupport[0])};opacity:.55;cursor:default;" title="Tagged in the email: ${esc(taggedSupport.join(', '))} - CS can assign it to them">@${esc(taggedSupport[0])} in mail</span>`:''}
       </div>
     </div>
     ${inlineSectionHtml}`;
@@ -9533,9 +9792,229 @@ async function emCopyEmail({auto=false}={}){
 
 document.getElementById('em-copy')?.addEventListener('click',()=>emCopyEmail());
 
+/* ===================== Replying without leaving the board =================
+
+   The Reply button opens a composer under the message: From, To, Cc, the text,
+   and Send. The reply is drafted and sent by the server through Graph's
+   createReply, so it lands in the client's existing thread rather than starting
+   a new one - see /api/tickets/:externalId/reply.
+
+   Three things are deliberately the client's job here and not the server's:
+
+   - the prefill. To is the client, Cc is everyone else who was on the original
+     mail bar the helpdesk mailbox, which is the reply-all an agent would have
+     made in Outlook, still editable before it goes.
+   - the internal note. A reply that leaves no trace on the board is a reply
+     nobody else on the team knows about, so the text is posted to the ticket's
+     thread as well.
+   - moving the ticket to Waiting on Contact, because that is what answering a
+     client means, offered as a checkbox rather than done silently.
+
+   Whether replying is possible at all is asked once per session and cached:
+   the connection can be missing, or consented before Mail.Send existed, and it
+   is better to say so on the button than to let someone write a reply that
+   cannot be sent. */
+let emReplyCapability=null;
+let emReplySending=false;
+
+async function emLoadReplyCapability(force=false){
+  if(emReplyCapability&&!force)return emReplyCapability;
+  try{
+    const res=await fetch('/api/reply/from-addresses',{credentials:'include'});
+    emReplyCapability=res.ok
+      ?await res.json()
+      :{canSend:false,connected:false,scopeConfigured:false,addresses:[]};
+  }catch(_){
+    emReplyCapability={canSend:false,connected:false,scopeConfigured:false,addresses:[]};
+  }
+  return emReplyCapability;
+}
+
+function emReplyEls(){
+  return {
+    panel:document.getElementById('em-reply'),
+    note:document.getElementById('em-reply-note'),
+    from:document.getElementById('em-reply-from'),
+    to:document.getElementById('em-reply-to'),
+    cc:document.getElementById('em-reply-cc'),
+    body:document.getElementById('em-reply-body'),
+    wct:document.getElementById('em-reply-wct'),
+    send:document.getElementById('em-reply-send'),
+    open:document.getElementById('em-reply-open')
+  };
+}
+
+// Everyone who was on the original mail except the helpdesk mailbox itself and
+// whoever is already in To - Cc'ing the ticket's own inbox would file the
+// reply back into the board as a new ticket.
+function emReplyDefaultCc(ticket,toAddress){
+  const skip=new Set([String(toAddress||'').toLowerCase(),...SUPPORT_BOX_ALIASES.map(a=>String(a).toLowerCase())]);
+  return (Array.isArray(ticket?.email?.recipients)?ticket.email.recipients:[])
+    .map(a=>String(a||'').trim().toLowerCase())
+    .filter(a=>a.includes('@')&&!skip.has(a))
+    .filter((a,i,arr)=>arr.indexOf(a)===i)
+    .slice(0,10);
+}
+
+function emCloseReply(){
+  const els=emReplyEls();
+  if(els.panel)els.panel.hidden=true;
+  if(els.open)els.open.textContent='Reply';
+}
+
+// Closing keeps the draft (an agent who hid the panel to re-read the message
+// expects their text back); opening a DIFFERENT ticket must not, or a reply
+// written for one client goes out to another.
+function emResetReply(ticket){
+  const els=emReplyEls();
+  emCloseReply();
+  [els.to,els.cc,els.body].forEach(el=>{ if(el) el.value=''; });
+  if(els.wct)els.wct.checked=true;
+  if(els.open){
+    const canReply=!!ticket&&currentUserCanReplyToTicket(ticket);
+    els.open.style.display=canReply?'':'none';
+  }
+}
+
+async function emOpenReply(){
+  const ticket=emCurrentTicket;
+  const els=emReplyEls();
+  if(!ticket||!els.panel)return;
+  if(!currentUserCanReplyToTicket(ticket)){
+    showToast('You can only reply to tickets assigned to you','warn');
+    return;
+  }
+  const id=ticket.id;
+  const cap=await emLoadReplyCapability();
+  // Whatever the composer can and cannot do, said before anything is typed.
+  if(els.note){
+    if(!cap.connected){
+      els.note.textContent='Outlook is not connected - reconnect it to send from here.';
+      els.note.className='em-reply-note bad';
+    }else if(!cap.scopeConfigured){
+      els.note.textContent='This deployment has no mail-send permission configured.';
+      els.note.className='em-reply-note bad';
+    }else{
+      els.note.textContent=ticket.email?.isManual
+        ?'This ticket has no Outlook thread - the reply goes out as a new email.'
+        :'Sent as a reply in the existing thread, quoting the client message.';
+      els.note.className='em-reply-note';
+    }
+  }
+  if(els.from){
+    const addresses=Array.isArray(cap.addresses)&&cap.addresses.length
+      ?cap.addresses
+      :[{address:cap.defaultAddress||SUPPORT_BOX,label:cap.defaultAddress||SUPPORT_BOX,isDefault:true}];
+    els.from.innerHTML=addresses.map(a=>`<option value="${esc(a.address)}"${a.isDefault?' selected':''}>${esc(a.label||a.address)}</option>`).join('');
+    // One address is not a choice - keep it visible (it is what the client will
+    // see as the sender) but do not present it as one.
+    els.from.disabled=addresses.length<2;
+  }
+  const client=ticketClientEmail[id]||getClientEmail(ticket.email)||ticket.email?.sender||'';
+  // Only prefill what is empty, so reopening the panel after closing it does
+  // not discard a half-written reply.
+  if(els.to&&!els.to.value.trim())els.to.value=client;
+  if(els.cc&&!els.cc.value.trim())els.cc.value=emReplyDefaultCc(ticket,client).join(', ');
+  if(els.send)els.send.disabled=!cap.canSend;
+  els.panel.hidden=false;
+  if(els.open)els.open.textContent='Hide reply';
+  if(els.body)els.body.focus();
+  els.panel.scrollIntoView({block:'nearest',behavior:'smooth'});
+}
+
+function emReplyErrorMessage(status,payload){
+  const code=String(payload?.error||'');
+  if(code==='m365_not_connected')return'Outlook is not connected - reconnect it and try again.';
+  if(code==='m365_reauth_required')return'Outlook needs signing in again before it can send.';
+  if(code==='reply_send_forbidden')return'Outlook refused the send: reconnect it to grant mail-send permission, or that From address has no Send As right.';
+  if(code==='reply_from_not_allowed')return'That From address is not allowed on this board.';
+  if(code==='reply_message_not_found')return'The original message is no longer in the mailbox - reply from Outlook instead.';
+  if(code==='missing_recipients')return'Add at least one recipient.';
+  if(code==='reply_too_long')return'That reply is too long to send.';
+  if(status===429)return'Too many replies sent just now - wait a moment and try again.';
+  return`Reply failed: ${payload?.detail||code||status}`;
+}
+
+async function emSendReply(){
+  const ticket=emCurrentTicket;
+  const els=emReplyEls();
+  if(!ticket||emReplySending)return;
+  if(!currentUserCanReplyToTicket(ticket)){
+    showToast('You can only reply to tickets assigned to you','warn');
+    return;
+  }
+  const id=ticket.id;
+  const bodyText=String(els.body?.value||'').trim();
+  if(!bodyText){showToast('Write something before sending','warn');return;}
+  const to=String(els.to?.value||'').split(/[,;]/).map(v=>v.trim()).filter(Boolean);
+  const from=String(els.from?.value||'').trim();
+  if(!to.length){showToast('Add at least one recipient','warn');return;}
+
+  emReplySending=true;
+  if(els.send){els.send.disabled=true;els.send.textContent='Sending...';}
+  try{
+    const res=await fetch(`/api/tickets/${encodeURIComponent(id)}/reply`,{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      credentials:'include',
+      body:JSON.stringify({
+        // No message id for a manual ticket: there is no Outlook thread to
+        // reply into, and the server sends a fresh mail instead.
+        messageId:ticket.email?.isManual?'':String(ticket.email?.id||''),
+        subject:ticket.email?.isManual?`Re: ${String(ticket.email?.subject||'').trim()}`.trim():'',
+        from,
+        to,
+        cc:String(els.cc?.value||'').split(/[,;]/).map(v=>v.trim()).filter(Boolean),
+        // The To list is explicit, so the server must not widen it.
+        replyAll:false,
+        body:bodyText
+      })
+    });
+    const out=await res.json().catch(()=>({}));
+    if(!res.ok||!out?.ok){
+      showToast(emReplyErrorMessage(res.status,out),'warn');
+      return;
+    }
+    // The board's own record of the reply. CLIENT_TAG marks it as something the
+    // client was actually told, as opposed to an internal note.
+    postTicketComment(id,`Replied to ${out.to.join(', ')||'client'} from ${out.from}:\n\n${bodyText}`,[CLIENT_TAG]);
+    if(els.body)els.body.value='';
+    if(els.cc)els.cc.value='';
+    emCloseReply();
+    if(els.wct?.checked&&normalizeTicketStage(ticketState[id]||'new')!=='wct'){
+      ticketState[id]='wct';
+      ticketStageTouchedAt[id]=Date.now();
+      await saveState('ticket_reply_waiting_on_contact');
+      renderActiveView();
+      const rs=await syncTicketStatusToHubspot(id,'wct');
+      if(!rs?.ok&&rs?.reason!=='missing_hubspot_ticket_id')showToast(`HubSpot status sync failed: ${rs?.error||rs?.reason}`,'warn');
+    }
+    showToast(`Reply sent from ${out.from}`,'ok');
+  }catch(err){
+    showToast(`Reply failed: ${String(err?.message||err)}`,'warn');
+  }finally{
+    emReplySending=false;
+    if(els.send){els.send.disabled=false;els.send.textContent='Send reply';}
+  }
+}
+
+document.getElementById('em-reply-open')?.addEventListener('click',()=>{
+  const panel=document.getElementById('em-reply');
+  if(panel&&!panel.hidden){emCloseReply();return;}
+  emOpenReply();
+});
+document.getElementById('em-reply-cancel')?.addEventListener('click',()=>emCloseReply());
+document.getElementById('em-reply-send')?.addEventListener('click',()=>emSendReply());
+// Ctrl/Cmd+Enter sends, as it does in every mail client. Plain Enter is a
+// newline - a reply is prose, not a chat message.
+document.getElementById('em-reply-body')?.addEventListener('keydown',ev=>{
+  if((ev.ctrlKey||ev.metaKey)&&ev.key==='Enter'){ev.preventDefault();emSendReply();}
+});
+
 async function openEmailModal(ticket){
   const{email,id}=ticket;const clientEmail=ticketClientEmail[id];
   emCurrentTicket=ticket;
+  emResetReply(ticket);
   // Any translation belongs to the message that was open before. Clear it
   // first, so nothing from the previous ticket can be reverted into this one.
   trResetEmailState(id);
