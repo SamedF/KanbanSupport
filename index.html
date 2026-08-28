@@ -3465,121 +3465,334 @@ textarea:focus {
   padding: 16px 18px 20px;
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 16px;
+}
+
+/* The input is a card of its own rather than loose fields on the page
+   background: a run is a deliberate act with a cost (one HTTP fetch per site),
+   so the thing you press it with should look like a control panel. */
+.qt-detect-input {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--white);
+  padding: 14px 15px 13px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
 }
 
 .qt-detect-label {
-  display: block;
-  font-size: 12px;
-  font-weight: 700;
-  color: var(--slate-500);
-  margin-bottom: 6px;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.qt-detect-label .qt-detect-hint {
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 600;
+  color: var(--muted-light);
 }
 
 .qt-detect-textarea {
   width: 100%;
-  min-height: 130px;
+  min-height: 132px;
   resize: vertical;
   border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: 10px 12px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 12px;
-  line-height: 1.6;
+  border-radius: var(--radius);
+  padding: 11px 12px;
+  /* A list of URLs is data, and lines up far better read in a monospace face -
+     a mistyped domain is spottable at a glance instead of by proofreading. */
+  font-family: "JetBrains Mono", "Cascadia Code", Consolas, ui-monospace, monospace;
+  font-size: 12.5px;
+  line-height: 1.65;
   color: var(--text);
-  background: var(--white);
+  background: var(--bg-soft);
+  transition: border-color .15s ease, box-shadow .15s ease, background .15s ease;
 }
 
 .qt-detect-textarea:focus {
   outline: none;
-  border-color: var(--indigo-400, #818cf8);
+  background: var(--white);
+  border-color: var(--primary);
+  box-shadow: 0 0 0 4px rgba(var(--indigo-600-rgb), .12);
 }
+
+.qt-detect-textarea::placeholder { color: var(--muted-light); }
 
 .qt-detect-controls {
   display: flex;
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
-  margin-top: 10px;
 }
 
-.qt-detect-file {
-  display: none;
-}
+/* Pushes everything after it to the right edge: run/clear read as the actions,
+   export as the thing you do afterwards. */
+.qt-detect-controls .qt-detect-spacer { flex: 1 1 auto; }
+
+.qt-detect-file { display: none; }
 
 .qt-detect-select {
-  height: 34px;
   border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 0 28px 0 10px;
+  border-radius: 10px;
+  padding: 6px 9px;
   font-size: 12px;
   font-weight: 700;
-  color: var(--slate-700);
+  color: var(--text);
   background: var(--white);
 }
 
 .qt-detect-status {
   font-size: 12px;
-  color: var(--slate-500);
+  color: var(--muted);
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
 }
+
+/* Spins only while a run is in flight. The check is one request for the whole
+   list, so there is no honest percentage to show - this says "still working"
+   without pretending to know how far along it is. */
+.qt-detect-status.busy::before {
+  content: "";
+  width: 11px;
+  height: 11px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  border: 2px solid rgba(var(--indigo-600-rgb), .25);
+  border-top-color: var(--primary);
+  animation: qt-detect-spin .7s linear infinite;
+}
+
+@keyframes qt-detect-spin { to { transform: rotate(360deg); } }
+
+@media (prefers-reduced-motion: reduce) {
+  .qt-detect-status.busy::before { animation-duration: 2.4s; }
+}
+
+/* ---- Results ---- */
 
 .qt-detect-summary {
-  display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
-  margin-bottom: 10px;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 10px;
 }
 
+/* One tile per outcome, and they are buttons: with a few hundred sites checked,
+   "show me only the failures" is the next thing anybody wants, and the count
+   they just read is the obvious thing to click to get it. */
 .qt-detect-stat {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 11px 13px 12px;
   border: 1px solid var(--border);
-  border-radius: 999px;
-  padding: 4px 12px;
-  font-size: 12px;
-  font-weight: 700;
+  border-radius: var(--radius);
   background: var(--white);
-  color: var(--slate-600);
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+  overflow: hidden;
+  transition: border-color .15s ease, box-shadow .15s ease, transform .15s ease;
 }
 
-.qt-detect-stat.yes { background: rgba(var(--green-500-rgb), .14); border-color: rgba(var(--green-300-rgb), .5); color: var(--emerald-800); }
-.qt-detect-stat.no { background: rgba(var(--slate-200-rgb), .5); }
-.qt-detect-stat.err { background: rgba(var(--amber-500-rgb), .16); border-color: rgba(var(--amber-500-rgb), .45); color: var(--amber-800); }
+.qt-detect-stat::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 3px;
+  background: var(--border-strong);
+}
+
+.qt-detect-stat:hover { transform: translateY(-1px); box-shadow: 0 6px 16px rgba(var(--shadow-rgb), .07); }
+.qt-detect-stat[aria-pressed="true"] { border-color: var(--border-strong); box-shadow: 0 0 0 3px rgba(var(--shadow-rgb), .05); }
+.qt-detect-stat[disabled] { opacity: .5; cursor: default; transform: none; box-shadow: none; }
+
+.qt-detect-stat-value {
+  font-size: 22px;
+  font-weight: 800;
+  line-height: 1.1;
+  letter-spacing: -.02em;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.qt-detect-stat-label {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--muted);
+}
+
+.qt-detect-stat.yes::before { background: var(--green-500); }
+.qt-detect-stat.yes .qt-detect-stat-value { color: var(--emerald-800); }
+.qt-detect-stat.yes[aria-pressed="true"] { border-color: rgba(var(--green-500-rgb), .55); box-shadow: 0 0 0 3px rgba(var(--green-500-rgb), .14); }
+
+.qt-detect-stat.no::before { background: var(--border-strong); }
+.qt-detect-stat.err::before { background: var(--amber-500); }
+.qt-detect-stat.err .qt-detect-stat-value { color: var(--amber-800); }
+.qt-detect-stat.err[aria-pressed="true"] { border-color: rgba(var(--amber-500-rgb), .5); box-shadow: 0 0 0 3px rgba(var(--amber-500-rgb), .16); }
+
+.qt-detect-stat.all::before { background: var(--primary); }
+.qt-detect-stat.all[aria-pressed="true"] { border-color: rgba(var(--indigo-600-rgb), .5); box-shadow: 0 0 0 3px rgba(var(--indigo-600-rgb), .14); }
 
 .qt-detect-table-wrap {
-  overflow-x: auto;
   border: 1px solid var(--border);
-  border-radius: 12px;
+  border-radius: var(--radius-lg);
   background: var(--white);
+  overflow: auto;
+  /* Enough to be worth scrolling inside rather than growing the page forever. */
+  max-height: min(62vh, 720px);
 }
 
 .qt-detect-table {
   width: 100%;
-  border-collapse: collapse;
-  font-size: 12px;
-  min-width: 720px;
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: 12.5px;
 }
 
-.qt-detect-table th,
-.qt-detect-table td {
+/* Sticky, because the whole point of this tool is a long list and a column you
+   cannot name is a column you have to scroll back up to read. */
+.qt-detect-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--bg-soft);
+  border-bottom: 1px solid var(--border);
   padding: 9px 12px;
   text-align: left;
-  border-bottom: 1px solid var(--border);
-  vertical-align: top;
-}
-
-.qt-detect-table tr:last-child td { border-bottom: 0; }
-
-.qt-pill {
-  display: inline-block;
-  border-radius: 999px;
-  padding: 2px 9px;
-  font-size: 11px;
+  font-size: 10.5px;
   font-weight: 800;
+  letter-spacing: .05em;
+  text-transform: uppercase;
+  color: var(--muted);
   white-space: nowrap;
 }
 
-.qt-pill.yes { background: rgba(var(--green-500-rgb), .18); color: var(--emerald-800); }
-.qt-pill.no { background: rgba(var(--slate-200-rgb), .7); color: var(--slate-600); }
-.qt-pill.err { background: rgba(var(--amber-500-rgb), .2); color: var(--amber-800); }
+.qt-detect-table td {
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+  color: var(--text);
+}
+
+.qt-detect-table tbody tr:last-child td { border-bottom: 0; }
+.qt-detect-table tbody tr { transition: background .12s ease; }
+.qt-detect-table tbody tr:hover td { background: var(--bg-soft); }
+
+.qt-detect-site {
+  font-family: "JetBrains Mono", "Cascadia Code", Consolas, ui-monospace, monospace;
+  font-size: 12px;
+  word-break: break-all;
+  max-width: 340px;
+}
+
+.qt-detect-redirect {
+  color: var(--muted);
+  font-size: 11px;
+  margin-top: 3px;
+  word-break: break-all;
+}
+
+.qt-detect-evidence {
+  max-width: 300px;
+  word-break: break-all;
+  color: var(--muted);
+  font-size: 11.5px;
+}
+
+.qt-detect-evidence code {
+  font-family: "JetBrains Mono", "Cascadia Code", Consolas, ui-monospace, monospace;
+  font-size: 11px;
+  color: var(--text-soft);
+}
+
+.qt-detect-num {
+  white-space: nowrap;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+/* The header has its own text-align, so it needs saying again to sit over the
+   numbers it labels rather than off to their left. */
+.qt-detect-table thead th.qt-detect-num { text-align: right; }
+
+/* Nothing yet, nothing left after filtering, and a finished run with no rows
+   all land here - a panel that says which, rather than a blank rectangle that
+   looks like something failed to draw. */
+.qt-detect-empty {
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-lg);
+  background: var(--white);
+  padding: 34px 24px;
+  text-align: center;
+  color: var(--muted);
+}
+
+.qt-detect-empty-mark {
+  width: 42px;
+  height: 42px;
+  margin: 0 auto 12px;
+  border-radius: 13px;
+  display: grid;
+  place-items: center;
+  background: var(--bg-soft);
+  color: var(--muted-light);
+}
+
+.qt-detect-empty-mark svg { width: 21px; height: 21px; }
+
+.qt-detect-empty strong {
+  display: block;
+  font-size: 14px;
+  color: var(--text);
+  margin-bottom: 4px;
+}
+
+.qt-detect-empty span { font-size: 12.5px; }
+
+.qt-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border-radius: 999px;
+  padding: 3px 10px 3px 8px;
+  font-size: 11px;
+  font-weight: 800;
+  white-space: nowrap;
+  border: 1px solid transparent;
+}
+
+.qt-pill::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  flex: 0 0 auto;
+}
+
+.qt-pill.yes { background: rgba(var(--green-500-rgb), .14); border-color: rgba(var(--green-300-rgb), .6); color: var(--emerald-800); }
+.qt-pill.no { background: rgba(var(--slate-200-rgb), .55); border-color: var(--border); color: var(--slate-600); }
+.qt-pill.err { background: rgba(var(--amber-500-rgb), .16); border-color: rgba(var(--amber-500-rgb), .45); color: var(--amber-800); }
+
+@media (max-width: 700px) {
+  .qt-detect-body { padding: 13px 13px 16px; }
+  .qt-detect-controls { gap: 7px; }
+  .qt-detect-controls .qt-detect-spacer { flex-basis: 100%; height: 0; }
+  .qt-detect-site, .qt-detect-evidence { max-width: none; }
+}
 
 .qt-seize-frame {
   width: 100%;
@@ -4515,21 +4728,25 @@ th {
     </div>
     <div class="qt-detect-body">
       <div class="qt-detect-input">
-        <label class="qt-detect-label" for="qt-detect-urls">Site URLs &mdash; one per line, or paste a CSV column</label>
+        <label class="qt-detect-label" for="qt-detect-urls">
+          <span>Site URLs</span>
+          <span class="qt-detect-hint">One per line &mdash; or paste a column straight out of a spreadsheet</span>
+        </label>
         <textarea id="qt-detect-urls" class="qt-detect-textarea" spellcheck="false"
           placeholder="hotel-example.com&#10;https://another-hotel.fr&#10;www.third-hotel.es"></textarea>
         <div class="qt-detect-controls">
           <input id="qt-detect-file" class="qt-detect-file" type="file" accept=".csv,.tsv,.txt,.xls,.xlsx,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv,text/tab-separated-values">
-          <button class="btn-out" id="qt-detect-import" type="button">Upload file</button>
           <button class="btn-primary" id="qt-detect-run" type="button">Check sites</button>
+          <button class="btn-out" id="qt-detect-import" type="button">Upload file</button>
           <button class="btn-out" id="qt-detect-clear" type="button">Clear</button>
+          <span class="qt-detect-status" id="qt-detect-status">Paste URLs to begin.</span>
+          <span class="qt-detect-spacer"></span>
           <select class="qt-detect-select" id="qt-detect-export-format" aria-label="Export format">
             <option value="csv">CSV</option>
             <option value="tsv">TSV</option>
             <option value="xlsx">Excel</option>
           </select>
           <button class="btn-out" id="qt-detect-export" type="button" disabled>Export</button>
-          <span class="qt-detect-status" id="qt-detect-status">Paste URLs to begin.</span>
         </div>
       </div>
       <div class="qt-detect-results" id="qt-detect-results"></div>
@@ -6864,6 +7081,9 @@ function showQtDetectView(){
   if(!currentUserIsAdmin()){showBoardView();return;}
   viewMode='qtDetect';setBoardChromeVisible(false);hidePrimaryViews();
   document.getElementById('qt-detect-view').style.display='block';
+  // Paints the empty state (or the previous run's results) rather than opening
+  // on a blank panel that reads as something having failed to load.
+  qtDetectRender();
   setSideNavActive('qtDetect');saveLastWorkspaceSession('qtDetect');
 }
 
@@ -6934,45 +7154,119 @@ function qtDetectExtractUrlsFromSpreadsheetText(text){
   return qtDetectParseUrls(candidates.filter(qtDetectLooksLikeUrl).join('\n'));
 }
 function qtDetectSetStatus(text){const el=document.getElementById('qt-detect-status');if(el)el.textContent=text;}
+/* Which outcome the results table is showing. A check of three hundred sites is
+   read by looking for the ones that went wrong, so the counts double as the
+   filter - clicking "12 failed" shows those twelve. Reset whenever a new run
+   starts, because a filter left over from the last list is a list that looks
+   mysteriously short. */
+let qtDetectFilter='all';
+
+function qtDetectOutcome(row){
+  if(row?.status!=='ok')return'err';
+  return row?.detected?'yes':'no';
+}
+
+function qtDetectEmptyHtml(title,detail){
+  return`<div class="qt-detect-empty">
+    <div class="qt-detect-empty-mark" aria-hidden="true">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="11" cy="11" r="6.5"></circle><path d="m16 16 4.5 4.5"></path>
+      </svg>
+    </div>
+    <strong>${esc(title)}</strong>
+    <span>${esc(detail)}</span>
+  </div>`;
+}
+
+function qtDetectStatHtml(kind,value,label,active,total){
+  // Nothing of that kind means nothing to filter to, so the tile is inert
+  // rather than a button that appears to do nothing.
+  const dead=!value&&kind!=='all';
+  return`<button type="button" class="qt-detect-stat ${kind}" data-qt-filter="${kind}"
+    aria-pressed="${active?'true':'false'}"${dead?' disabled':''}
+    title="${dead?`No sites in this group`:`Show only ${esc(label)}`}">
+    <span class="qt-detect-stat-value">${value}</span>
+    <span class="qt-detect-stat-label">${esc(label)}${kind!=='all'&&total?` &middot; ${Math.round((value/total)*100)}%`:''}</span>
+  </button>`;
+}
+
 function qtDetectRender(){
   const box=document.getElementById('qt-detect-results');
   if(!box)return;
-  if(!qtDetectRows.length){box.innerHTML='';document.getElementById('qt-detect-export').disabled=true;return;}
-  document.getElementById('qt-detect-export').disabled=false;
-  const yes=qtDetectRows.filter(r=>r.detected).length;
-  const err=qtDetectRows.filter(r=>r.status!=='ok').length;
-  const no=qtDetectRows.length-yes-err;
-  const rows=qtDetectRows.map(r=>{
-    const cls=r.status!=='ok'?'err':(r.detected?'yes':'no');
-    const label=r.status!=='ok'?'Error':(r.detected?'Installed':'Not found');
-    const detail=r.status!=='ok'
-      ? esc(r.error||r.status||'')
-      : (r.detected?`${esc(r.marker||'')} in ${esc(r.via||'')}`:'no active embed');
-    return `<tr>
+  const exportBtn=document.getElementById('qt-detect-export');
+  if(!qtDetectRows.length){
+    box.innerHTML=qtDetectEmptyHtml(
+      'No sites checked yet',
+      'Paste the site URLs above, or upload a CSV or Excel column, then press Check sites.'
+    );
+    if(exportBtn)exportBtn.disabled=true;
+    return;
+  }
+  if(exportBtn)exportBtn.disabled=false;
+
+  const total=qtDetectRows.length;
+  const yes=qtDetectRows.filter(r=>qtDetectOutcome(r)==='yes').length;
+  const err=qtDetectRows.filter(r=>qtDetectOutcome(r)==='err').length;
+  const no=total-yes-err;
+  const shown=qtDetectFilter==='all'?qtDetectRows:qtDetectRows.filter(r=>qtDetectOutcome(r)===qtDetectFilter);
+
+  const summary=`<div class="qt-detect-summary">
+    ${qtDetectStatHtml('all',total,'checked',qtDetectFilter==='all',0)}
+    ${qtDetectStatHtml('yes',yes,'installed',qtDetectFilter==='yes',total)}
+    ${qtDetectStatHtml('no',no,'not found',qtDetectFilter==='no',total)}
+    ${qtDetectStatHtml('err',err,'failed',qtDetectFilter==='err',total)}
+  </div>`;
+
+  if(!shown.length){
+    box.innerHTML=summary+qtDetectEmptyHtml('Nothing in this group','Every site checked landed somewhere else - pick another count above.');
+    qtDetectBindFilters(box);
+    return;
+  }
+
+  const rows=shown.map(r=>{
+    const cls=qtDetectOutcome(r);
+    const label=cls==='err'?'Error':(cls==='yes'?'Installed':'Not found');
+    const evidence=cls==='err'
+      ? esc(r.error||r.status||'Unreachable')
+      : (r.detected
+        ? `${esc(r.marker||'embed')} in ${esc(r.via||'page')}`
+        : 'No active embed');
+    return`<tr>
       <td><span class="qt-pill ${cls}">${label}</span></td>
-      <td style="max-width:320px;word-break:break-all;">${esc(r.input||'')}${r.finalUrl&&r.finalUrl!==r.url?`<div style="color:var(--muted);">&rarr; ${esc(r.finalUrl)}</div>`:''}</td>
-      <td style="max-width:280px;word-break:break-all;color:var(--muted);">${detail}${r.src?`<div style="color:var(--muted);">${esc(String(r.src).slice(0,90))}</div>`:''}</td>
-      <td style="white-space:nowrap;color:var(--muted);">${r.httpStatus||'-'}</td>
-      <td style="white-space:nowrap;color:var(--muted);">${r.ms!=null?r.ms+'ms':'-'}</td>
+      <td class="qt-detect-site">${esc(r.input||'')}${r.finalUrl&&r.finalUrl!==r.url?`<div class="qt-detect-redirect">&rarr; ${esc(r.finalUrl)}</div>`:''}</td>
+      <td class="qt-detect-evidence">${evidence}${r.src?`<div><code>${esc(String(r.src).slice(0,90))}</code></div>`:''}</td>
+      <td class="qt-detect-num">${r.httpStatus||'&mdash;'}</td>
+      <td class="qt-detect-num">${r.ms!=null?`${r.ms} ms`:'&mdash;'}</td>
     </tr>`;
   }).join('');
-  box.innerHTML=`<div class="qt-detect-summary">
-      <span class="qt-detect-stat yes">${yes} installed</span>
-      <span class="qt-detect-stat no">${no} not found</span>
-      <span class="qt-detect-stat err">${err} failed</span>
-      <span class="qt-detect-stat">${qtDetectRows.length} checked</span>
-    </div>
-    <div class="qt-detect-table-wrap"><table class="qt-detect-table">
-      <thead><tr><th>Result</th><th>Site</th><th>Evidence</th><th>HTTP</th><th>Time</th></tr></thead>
+
+  box.innerHTML=summary+`<div class="qt-detect-table-wrap"><table class="qt-detect-table">
+      <thead><tr><th>Result</th><th>Site</th><th>Evidence</th><th class="qt-detect-num">HTTP</th><th class="qt-detect-num">Time</th></tr></thead>
       <tbody>${rows}</tbody></table></div>`;
+  qtDetectBindFilters(box);
 }
+
+function qtDetectBindFilters(box){
+  box.querySelectorAll('[data-qt-filter]').forEach(btn=>{
+    btn.addEventListener('click',()=>{
+      const wanted=btn.dataset.qtFilter;
+      // Clicking the group you are already in goes back to everything, so the
+      // tiles work as a toggle and never trap you in a filtered view.
+      qtDetectFilter=(qtDetectFilter===wanted&&wanted!=='all')?'all':wanted;
+      qtDetectRender();
+    });
+  });
+}
+
 async function qtDetectRun(){
   if(qtDetectBusy)return;
   const urls=qtDetectParseUrls(document.getElementById('qt-detect-urls').value);
   if(!urls.length){qtDetectSetStatus('Add at least one URL.');return;}
   qtDetectBusy=true;
+  qtDetectFilter='all';
   const btn=document.getElementById('qt-detect-run');
   btn.disabled=true;
+  document.getElementById('qt-detect-status')?.classList.add('busy');
   qtDetectSetStatus(`Checking ${urls.length} site${urls.length>1?'s':''}...`);
   try{
     const res=await fetch('/api/qt-detect',{method:'POST',headers:{'Content-Type':'application/json'},
@@ -6989,6 +7283,7 @@ async function qtDetectRun(){
     qtDetectSetStatus('Check failed: '+String(e?.message||e));
   }finally{
     qtDetectBusy=false;btn.disabled=false;
+    document.getElementById('qt-detect-status')?.classList.remove('busy');
   }
 }
 function qtDetectExportRows(){
