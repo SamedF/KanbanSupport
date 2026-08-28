@@ -9830,6 +9830,18 @@ async function emLoadReplyCapability(force=false){
   return emReplyCapability;
 }
 
+/* Drop the cached answer to "can this board send" when a failure suggests it is
+   out of date. The usual sequence after a refusal is that somebody reconnects
+   Outlook or is granted Send As, and a cached capability would keep telling
+   them the old story - including naming the wrong connected account - until
+   they reloaded the page. */
+function emForgetReplyCapability(payload){
+  const code=String(payload?.error||'');
+  if(code.startsWith('m365_')||code==='reply_send_forbidden'||code==='reply_from_not_allowed'){
+    emReplyCapability=null;
+  }
+}
+
 function emReplyEls(){
   return {
     panel:document.getElementById('em-reply'),
@@ -9842,6 +9854,66 @@ function emReplyEls(){
     send:document.getElementById('em-reply-send'),
     open:document.getElementById('em-reply-open')
   };
+}
+
+function emReplyAddresses(cap){
+  const list=Array.isArray(cap?.addresses)?cap.addresses.filter(a=>a&&a.address):[];
+  if(list.length)return list;
+  const fallback=cap?.defaultAddress||SUPPORT_BOX;
+  return [{address:fallback,label:fallback,isDefault:true,isHelpdesk:true,threaded:true}];
+}
+
+function emReplyAddressInfo(cap,address){
+  const wanted=String(address||'').trim().toLowerCase();
+  return emReplyAddresses(cap).find(a=>a.address===wanted)||null;
+}
+
+/* The mailbox a new Outlook draft is created in.
+
+   The connected account first, because that is the one whose token the board
+   holds: creating a draft in anybody else's mailbox needs write access to it,
+   and the whole point of the draft is that the agent can open and edit it. Then
+   their own address, then the helpdesk. */
+function emPreferredDraftMailbox(cap){
+  const list=emReplyAddresses(cap);
+  const pick=list.find(a=>a.isConnected)||list.find(a=>a.isOwn)||list.find(a=>a.isHelpdesk)||list[0];
+  return pick?.address||cap?.defaultAddress||SUPPORT_BOX;
+}
+
+/* What is about to happen, in one line above the composer.
+
+   The From address changes the answer, which is the point of saying it here:
+   only a reply sent from the mailbox that holds the message keeps the thread's
+   own headers. Anything else is a new "Re:" mail that clients group by subject.
+   And an address the board is not connected as needs a Send As grant that only
+   Exchange can confirm, so that is flagged as a maybe rather than promised. */
+function emReplyNoteFor(cap,ticket,address){
+  if(!cap?.connected)return{text:'Outlook is not connected - reconnect it to send from here.',cls:'em-reply-note bad'};
+  if(!cap?.scopeConfigured)return{text:'This deployment has no mail-send permission configured.',cls:'em-reply-note bad'};
+  const info=emReplyAddressInfo(cap,address);
+  const hasThread=!ticket?.email?.isManual&&!!ticket?.email?.id;
+  const bits=[];
+  let cls='em-reply-note';
+  if(!hasThread){
+    bits.push('This ticket has no Outlook thread - the reply goes out as a new email.');
+  }else if(info?.threaded){
+    bits.push('Sent inside the existing thread, quoting the client message.');
+  }else{
+    bits.push('Sent from your mailbox as a new "Re:" mail - grouped by subject, not by the thread headers.');
+  }
+  if(info&&!info.isConnected){
+    bits.push(`Needs Send As on ${info.address}${cap.connectedAddress?` (Outlook is connected as ${cap.connectedAddress})`:''}.`);
+    cls='em-reply-note warn';
+  }
+  return{text:bits.join(' '),cls};
+}
+
+function emRenderReplyNote(){
+  const els=emReplyEls();
+  if(!els.note||!emReplyCapability)return;
+  const note=emReplyNoteFor(emReplyCapability,emCurrentTicket,els.from?.value);
+  els.note.textContent=note.text;
+  els.note.className=note.cls;
 }
 
 // Everyone who was on the original mail except the helpdesk mailbox itself and
@@ -9886,30 +9958,22 @@ async function emOpenReply(){
   }
   const id=ticket.id;
   const cap=await emLoadReplyCapability();
-  // Whatever the composer can and cannot do, said before anything is typed.
-  if(els.note){
-    if(!cap.connected){
-      els.note.textContent='Outlook is not connected - reconnect it to send from here.';
-      els.note.className='em-reply-note bad';
-    }else if(!cap.scopeConfigured){
-      els.note.textContent='This deployment has no mail-send permission configured.';
-      els.note.className='em-reply-note bad';
-    }else{
-      els.note.textContent=ticket.email?.isManual
-        ?'This ticket has no Outlook thread - the reply goes out as a new email.'
-        :'Sent as a reply in the existing thread, quoting the client message.';
-      els.note.className='em-reply-note';
-    }
-  }
   if(els.from){
-    const addresses=Array.isArray(cap.addresses)&&cap.addresses.length
-      ?cap.addresses
-      :[{address:cap.defaultAddress||SUPPORT_BOX,label:cap.defaultAddress||SUPPORT_BOX,isDefault:true}];
-    els.from.innerHTML=addresses.map(a=>`<option value="${esc(a.address)}"${a.isDefault?' selected':''}>${esc(a.label||a.address)}</option>`).join('');
+    const addresses=emReplyAddresses(cap);
+    // Keep whatever the agent last chose, for this ticket and the next one -
+    // somebody who answers as themselves does so all day and should not have to
+    // reselect it per ticket. Otherwise the helpdesk, which is the sender the
+    // client has been corresponding with.
+    const previous=String(els.from.value||'').trim().toLowerCase();
+    const keep=addresses.some(a=>a.address===previous)?previous:'';
+    els.from.innerHTML=addresses.map(a=>`<option value="${esc(a.address)}">${esc(a.label||a.address)}</option>`).join('');
+    els.from.value=keep||cap.defaultAddress||addresses[0].address;
     // One address is not a choice - keep it visible (it is what the client will
     // see as the sender) but do not present it as one.
     els.from.disabled=addresses.length<2;
   }
+  // Whatever the composer can and cannot do, said before anything is typed.
+  emRenderReplyNote();
   const client=ticketClientEmail[id]||getClientEmail(ticket.email)||ticket.email?.sender||'';
   // Only prefill what is empty, so reopening the panel after closing it does
   // not discard a half-written reply.
@@ -9926,12 +9990,19 @@ function emReplyErrorMessage(status,payload){
   const code=String(payload?.error||'');
   if(code==='m365_not_connected')return'Outlook is not connected - reconnect it and try again.';
   if(code==='m365_reauth_required')return'Outlook needs signing in again before it can send.';
-  if(code==='reply_send_forbidden')return'Outlook refused the send: reconnect it to grant mail-send permission, or that From address has no Send As right.';
+  if(code==='m365_client_secret_invalid')return'The Microsoft app secret on this deployment is invalid - Outlook cannot be reached at all until it is renewed.';
+  if(code==='reply_send_forbidden'){
+    // The two causes look identical from the outside, so name both and say
+    // which mailbox the board is actually holding a token for.
+    const from=payload?.from?` as ${payload.from}`:'';
+    const asWho=payload?.connectedAddress?` Outlook is connected as ${payload.connectedAddress}.`:'';
+    return`Outlook refused to send${from}.${asWho} Either that mailbox needs Send As for this address, or the connection predates the mail-send permission - reconnect Outlook (as that account, to send from it) and try again.`;
+  }
   if(code==='reply_from_not_allowed')return'That From address is not allowed on this board.';
   if(code==='reply_message_not_found')return'The original message is no longer in the mailbox - reply from Outlook instead.';
   if(code==='missing_recipients')return'Add at least one recipient.';
   if(code==='reply_too_long')return'That reply is too long to send.';
-  if(status===429)return'Too many replies sent just now - wait a moment and try again.';
+  if(status===429)return'Too many sends just now - wait a moment and try again.';
   return`Reply failed: ${payload?.detail||code||status}`;
 }
 
@@ -9972,6 +10043,7 @@ async function emSendReply(){
     });
     const out=await res.json().catch(()=>({}));
     if(!res.ok||!out?.ok){
+      emForgetReplyCapability(out);
       showToast(emReplyErrorMessage(res.status,out),'warn');
       return;
     }
@@ -9998,11 +10070,140 @@ async function emSendReply(){
   }
 }
 
+/* ================= Open in Outlook, including when there is none ==========
+
+   Replying on the board did not replace every reason to open the real thing -
+   forwarding it, seeing the whole thread, attaching a file - so this button
+   stays next to Reply rather than being replaced by it.
+
+   A ticket that came from the mailbox has a webLink and this just follows it. A
+   ticket raised on the board by hand has no message at all, and neither does
+   one Graph never returned a link for; the button used to vanish for those,
+   which is the wrong answer to "I want to deal with this in Outlook". So the
+   mail that is missing gets created - as a draft, with the ticket's subject,
+   client and description already in it - and the board opens that instead.
+   Nothing is sent: it is a draft in the agent's own Drafts, theirs to edit.
+
+   The blank tab is opened during the click and pointed at the draft afterwards.
+   Calling window.open() after the await instead would be a popup with no user
+   gesture behind it, which browsers block - and the agent would be told the
+   draft was created while nothing appeared. */
+// A manual ticket's sender is a placeholder ("manual@ticket") when nobody
+// recorded a client address, and offering to write to it would be nonsense.
+function emRealAddress(value){
+  const address=String(value||'').trim().toLowerCase();
+  return /^[^\s<>@,;]+@[^\s<>@,;]+\.[^\s<>@,;]+$/.test(address)?address:'';
+}
+function emTicketClientAddress(ticket){
+  const id=ticket?.id;
+  return emRealAddress(ticketClientEmail[id])
+    ||emRealAddress(getClientEmail(ticket?.email))
+    ||emRealAddress(ticket?.email?.sender);
+}
+
+async function emCreateOutlookDraft(ticket){
+  const id=ticket?.id;
+  if(!id)return null;
+  const cap=await emLoadReplyCapability();
+  if(!cap.connected){
+    showToast('Outlook is not connected - reconnect it to create the email','warn');
+    return null;
+  }
+  const mailbox=emPreferredDraftMailbox(cap);
+  const client=emTicketClientAddress(ticket);
+  const subject=String(ticket.email?.subject||'').trim()||`Support ticket ${ticketDisplayNumber(id)||''}`.trim();
+  const hasThread=!ticket.email?.isManual&&!!ticket.email?.id;
+  try{
+    const res=await fetch(`/api/tickets/${encodeURIComponent(id)}/outlook-draft`,{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      credentials:'include',
+      body:JSON.stringify({
+        // A manual ticket has no message to reply to, so the server composes a
+        // fresh draft; anything else drafts a reply on the real message.
+        messageId:hasThread?String(ticket.email.id):'',
+        from:mailbox,
+        subject,
+        to:client?[client]:[],
+        // Only a manual ticket's own description belongs in the draft. Seeding
+        // a reply draft with it would put the client's words in our answer as
+        // though we had written them - the quoted original is already there.
+        body:hasThread?'':String(ticket.email?.summary||'').trim()
+      })
+    });
+    const out=await res.json().catch(()=>({}));
+    if(!res.ok||!out?.ok){
+      emForgetReplyCapability(out);
+      showToast(emReplyErrorMessage(res.status,out),'warn');
+      return null;
+    }
+    /* Remember the link on the ticket. The draft is a real message now, so the
+       next Open in Outlook should go straight to it instead of asking to create
+       a second one - and every other agent's board gets the same link, which is
+       what stops three people drafting three mails for one ticket. */
+    if(ticket.email){
+      ticket.email.webLink=out.webLink;
+      if(emCurrentTicket===ticket)emSyncOutlookButton(ticket);
+      saveState('outlook_draft_created');
+    }
+    showToast(out.threaded?'Reply draft created in Outlook':`Draft created in ${out.mailbox}`,'ok');
+    return out;
+  }catch(err){
+    showToast(`Could not create the Outlook draft: ${String(err?.message||err)}`,'warn');
+    return null;
+  }
+}
+
+// The button's label and title, which depend on whether there is anything to
+// open yet. Kept in one place so the modal and a freshly created draft agree.
+function emSyncOutlookButton(ticket){
+  const btn=document.getElementById('em-outlook');
+  if(!btn)return;
+  const link=ticket?.email?.webLink||'';
+  btn.style.display='';
+  btn.textContent=link?'Open in Outlook':'Create in Outlook';
+  btn.title=link
+    ?'Open this message in Outlook on the web'
+    :'This ticket has no Outlook email yet - create a draft and open it';
+}
+
+async function emOpenInOutlook(){
+  const ticket=emCurrentTicket;
+  if(!ticket)return;
+  const link=ticket.email?.webLink||'';
+  if(link){
+    window.open(link,'_blank','noopener');
+    return;
+  }
+  const client=emTicketClientAddress(ticket);
+  const asked=confirm(
+    'This ticket has no email in Outlook yet.\n\n'
+    +'Create a draft'+(client?` to ${client}`:'')+' with the ticket\'s subject and description, and open it in Outlook?'
+  );
+  if(!asked)return;
+  // Opened now, while the click is still the reason for it.
+  const pending=window.open('','_blank');
+  const out=await emCreateOutlookDraft(ticket);
+  if(!out?.webLink){
+    try{pending?.close();}catch(_){}
+    return;
+  }
+  if(pending&&!pending.closed){
+    try{pending.opener=null;}catch(_){}
+    pending.location.href=out.webLink;
+  }else{
+    // The tab was blocked or closed - do not lose the draft, point at it.
+    window.open(out.webLink,'_blank','noopener');
+  }
+}
+
 document.getElementById('em-reply-open')?.addEventListener('click',()=>{
   const panel=document.getElementById('em-reply');
   if(panel&&!panel.hidden){emCloseReply();return;}
   emOpenReply();
 });
+document.getElementById('em-outlook')?.addEventListener('click',()=>emOpenInOutlook());
+document.getElementById('em-reply-from')?.addEventListener('change',()=>emRenderReplyNote());
 document.getElementById('em-reply-cancel')?.addEventListener('click',()=>emCloseReply());
 document.getElementById('em-reply-send')?.addEventListener('click',()=>emSendReply());
 // Ctrl/Cmd+Enter sends, as it does in every mail client. Plain Enter is a
@@ -10022,16 +10223,10 @@ async function openEmailModal(ticket){
   // Warm the picker's "cached" markers from whatever the team already has.
   trLoadCachedFor(id).then(()=>{if(emTrState.ticketId===id)trRenderEmailBar();});const hs=clientEmail?hsCache[clientEmail]:null;const isReply=isQuintaSender(email.sender)&&!!clientEmail;
   document.getElementById('em-title').textContent=email.subject||'(no subject)';
-  // Copying the message on open did not replace every reason to open the real
-  // thing - forwarding it, seeing the thread around it, or replying from the
-  // mailbox all still live in Outlook. Hidden rather than disabled when there
-  // is no webLink (manual tickets, and anything Graph did not return one for),
-  // because a dead button next to a working one reads as a bug.
-  const ol=document.getElementById('em-outlook');
-  if(ol){
-    ol.onclick=email.webLink?()=>window.open(email.webLink,'_blank','noopener'):null;
-    ol.style.display=email.webLink?'':'none';
-  }
+  // Always offered, and never a dead button: with a webLink it opens the
+  // message, without one it offers to create the mail that does not exist yet.
+  // See emOpenInOutlook.
+  emSyncOutlookButton(ticket);
   const csOwner=ticketCSOwner[id]||null;
   const csMeta=csOwner?`  CS: ${esc(csOwner)}`:'';
   let metaHtml=isReply?`<span><strong>Client:</strong> ${esc(clientEmail)}</span><span><strong>Replied by:</strong> ${esc(email.sender)}</span>`:`<span><strong>From:</strong> ${esc(email.sender||'')}</span>`;

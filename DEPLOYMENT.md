@@ -205,24 +205,67 @@ HUBSPOT_REDIRECT_URI=https://YOUR_DOMAIN/auth/hubspot/callback
 
 After production deploy, run `node seed-admin.js` once if your hosting platform does not run it automatically.
 
-## Replying to a ticket from the board says Outlook refused the send
+## Which address a reply is sent from, and why one is refused
 
-Symptom: the reply composer opens, but sending reports "Outlook refused the
-send: reconnect it to grant mail-send permission".
+The composer offers three kinds of From address:
 
-Replying needs two Graph scopes the board did not use before it could reply:
-`Mail.Send` and `Mail.Send.Shared`. `Mail.Send.Shared` is the one that matters -
-the reply is drafted on the message where it lives, in the helpdesk mailbox,
-which is not the connected identity's own.
+- **the signed-in agent's own mailbox** - `sfa@quinta.im` for SFA. Taken from
+  their Kanban account's email when it has one, otherwise derived from the
+  trigram. Full-name and `admin`/`owner` logins get nothing derived, since those
+  are not mailbox names; give those accounts an email in Users to offer one.
+- **the helpdesk mailbox** (`SUPPORT_MAILBOX`), which is the default. It is the
+  sender the client has been corresponding with, and the only one whose reply
+  keeps the thread's real headers - see below.
+- **anything in `REPLY_FROM_ADDRESSES`**, for shared aliases no account is named
+  after.
 
-Both are in the default `M365_SCOPES` now, but a connection made before they
-were added still holds a token without them. Reconnect Outlook (the Microsoft
-sign-in on the board) so consent is granted again, and if the tenant requires
-admin consent for the app, grant that first.
+Threading differs between them, and the composer says which applies before
+anything is typed. A reply **from the helpdesk mailbox** is drafted with Graph's
+`createReply` on the actual message, so it carries the conversation id,
+`In-Reply-To` and `References` and the client's mail app files it under the
+thread they started. A reply **from any other mailbox** cannot reproduce those -
+Graph will not let a draft in one mailbox claim another's conversation - so it
+goes out as a new `Re:` mail with the quoted original, which clients group by
+subject. That is exactly what replying from a personal mailbox in Outlook would
+do.
 
-The other cause of the same message is a From address that is not the helpdesk
-mailbox: sending as it needs Send As granted to the connected identity in
-Exchange, per address listed in `REPLY_FROM_ADDRESSES`.
+**Why a send is refused.** There is one Outlook connection for the whole board:
+every send is made by whichever identity last signed in to Microsoft here. That
+identity can send as its own mailbox and as any mailbox Exchange grants it
+Send As on - nothing else. So a refusal means one of:
+
+1. the connection predates the `Mail.Send` / `Mail.Send.Shared` scopes and holds
+   a token without them. Both are in the default `M365_SCOPES` now; reconnect
+   Outlook so consent is granted again, and grant tenant admin consent first if
+   the tenant requires it.
+2. the chosen From is a mailbox the connected identity has no Send As right on.
+   Either grant it in Exchange, or have that agent connect Outlook themselves -
+   the session's own tokens are preferred over the shared ones, so their own
+   mailbox then needs no grant at all.
+
+The composer marks the one address that is certain to work (the connected
+account) and names the connected identity in the error, so which of the two it
+is should be visible without reading logs.
+
+**One caveat worth knowing.** Signing in to Microsoft stores the tokens in that
+agent's session *and* overwrites the board's shared connection, so the last
+person to connect becomes the identity used by every session that has none of
+its own. That is long-standing behaviour, not new here, but it is what decides
+whose mailbox an unauthenticated-to-Graph session sends as.
+
+## A ticket has no email in Outlook
+
+Tickets raised on the board by hand have no Outlook message, and occasionally
+Graph returns no `webLink` for one that does. "Open in Outlook" used to
+disappear for those; it now reads **Create in Outlook** and offers to create the
+missing mail as a **draft** - subject, client and description filled in, nothing
+sent - then opens it. The draft is created in the connected account's mailbox
+(falling back to the agent's own address, then the helpdesk), because that is
+the mailbox the board can certainly write to and the agent can certainly open.
+
+The link is remembered on the ticket afterwards, so the button goes straight to
+that draft for everyone from then on rather than offering to create a second
+one.
 
 ## Tickets open with no formatting and no images
 

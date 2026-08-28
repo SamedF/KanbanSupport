@@ -82,12 +82,13 @@ if (M365_SECRET_LOOKS_LIKE_ID) {
 const M365_SCOPES = String(process.env.M365_SCOPES || 'offline_access openid profile email User.Read Mail.Read Mail.Read.Shared Mail.Send Mail.Send.Shared').trim();
 const M365_CAN_SEND_MAIL = /Mail\.Send/i.test(M365_SCOPES);
 const SUPPORT_MAILBOX = String(process.env.SUPPORT_MAILBOX || 'helpdesk@quinta.im').trim().toLowerCase();
-// Which addresses a reply may claim to be from. The helpdesk mailbox is always
-// allowed because that is where the thread already lives; anything else has to
-// be listed here AND have Send As granted to the connected identity in
-// Exchange, or Graph rejects the send. Configured rather than free-text so a
-// typo, or a deliberate attempt to reply as someone else, cannot leave the
-// board - the address is validated against this list server-side.
+// Extra addresses a reply may claim to be from, on top of the two the board
+// works out by itself: the helpdesk mailbox (always allowed - it is where the
+// thread lives) and the signed-in agent's own mailbox. Use this for shared
+// aliases nobody's account is named after. Every address here still needs Send
+// As granted to the connected identity in Exchange, or Graph rejects the send.
+// Configured rather than free-text so a typo, or a deliberate attempt to reply
+// as someone else, cannot leave the board.
 const REPLY_FROM_ADDRESSES = (() => {
   const configured = String(process.env.REPLY_FROM_ADDRESSES || '')
     .split(/[,;\s]+/)
@@ -5592,11 +5593,13 @@ app.get('/api/message-image/:attachmentId', requireAuth, async (req, res) => {
    not in the connected identity's own mailbox, which is what Mail.Send.Shared
    is for.
 
-   The From address is chosen by the agent but validated here against
-   REPLY_FROM_ADDRESSES. Exchange still has the final say: sending as an address
-   the connected identity has no Send As right on fails at Graph, and that error
-   is passed back rather than swallowed, because "it said it sent and the client
-   never got it" is the one outcome worth being loud about. */
+   The From address is the agent's own mailbox, the helpdesk, or anything in
+   REPLY_FROM_ADDRESSES, and is validated per request against that list - see
+   resolveReplyIdentity, which also explains why being on the list is not the
+   same as Exchange permitting it. Sending as an address the connected identity
+   has no Send As right on fails at Graph, and that error is passed back rather
+   than swallowed, because "it said it sent and the client never got it" is the
+   one outcome worth being loud about. */
 const REPLY_BODY_MAX_CHARS = Number(process.env.REPLY_BODY_MAX_CHARS || 100_000);
 const MAX_REPLY_RECIPIENTS = 25;
 // Sending mail is not a read: a loop, a double-click, or a bad retry here
@@ -5640,35 +5643,242 @@ function injectReplyIntoDraftHtml(draftHtml, replyHtml) {
   return replyHtml + draft;
 }
 
+/* Who this session may answer as.
+
+   Three sources, in the order the composer lists them:
+
+   - the agent's own mailbox. SFA signed in means sfa@quinta.im: read from their
+     Kanban account's email when it has one, and otherwise derived from the
+     trigram, which is what those mailboxes are named after. Only for trigram
+     logins - `admin`, `owner` and the full-name accounts are not mailboxes, and
+     guessing one would offer an address that does not exist.
+   - the helpdesk mailbox, which is where the thread already lives.
+   - anything in REPLY_FROM_ADDRESSES.
+
+   Being offered is not the same as being permitted, and this is the part worth
+   understanding. There is one Outlook connection for the whole board, so every
+   send is made by whichever identity last signed in to Microsoft here. That
+   identity can send as its own mailbox, and as any mailbox Exchange has granted
+   it Send As on - nothing else. So the connected identity is reported alongside
+   the list: the composer marks the address that is certain to work, and a
+   refusal can name the actual reason instead of a bare 403.
+
+   The way to make an agent's own address genuinely work is for that agent to
+   connect Outlook themselves - resolveStoredM365Tokens prefers the session's
+   own tokens, so their own mailbox then needs no grant at all. */
+function agentOwnMailboxes(user) {
+  const out = [];
+  const stored = normalizeEmailAddress(user?.email);
+  if (stored) out.push(stored);
+  const username = String(user?.username || '').trim().toLowerCase();
+  if (/^[a-z]{2,4}$/.test(username)) out.push(`${username}@${TEAMS_EMAIL_DOMAIN}`);
+  return [...new Set(out)];
+}
+
+async function resolveReplyIdentity(req) {
+  let connected = false;
+  let connectedAddress = '';
+  let connectedName = '';
+  let connectError = '';
+  try {
+    const token = await graphDelegatedToken(req);
+    // Whose mailbox the board is actually holding a token for. Cheap, and it is
+    // the difference between "pick any of these" and "this one will work".
+    const me = await graphGet('/me?$select=id,displayName,mail,userPrincipalName', token);
+    connectedAddress = normalizeEmailAddress(me?.mail) || normalizeEmailAddress(me?.userPrincipalName);
+    connectedName = String(me?.displayName || '');
+    connected = true;
+  } catch (error) {
+    connectError = String(error?.message || error).slice(0, 200);
+  }
+
+  let user = null;
+  if (req.session?.userId) {
+    user = await prisma.user
+      .findUnique({ where: { id: req.session.userId }, select: { username: true, email: true } })
+      .catch(() => null);
+  }
+  const own = agentOwnMailboxes(user || { username: req.session?.username });
+
+  const seen = new Set();
+  const addresses = [];
+  [...own, SUPPORT_MAILBOX, ...REPLY_FROM_ADDRESSES, connectedAddress].forEach((candidate) => {
+    const address = normalizeEmailAddress(candidate);
+    if (!address || seen.has(address)) return;
+    seen.add(address);
+    const isOwn = own.includes(address);
+    const isHelpdesk = address === SUPPORT_MAILBOX;
+    addresses.push({
+      address,
+      label: `${address}${isOwn ? ' (you)' : isHelpdesk ? ' (helpdesk)' : ''}`,
+      isOwn,
+      isHelpdesk,
+      isConnected: !!connectedAddress && address === connectedAddress,
+      // Only a reply drafted in the mailbox that holds the message keeps the
+      // thread's own headers - see sendTicketReply.
+      threaded: isHelpdesk
+    });
+  });
+
+  return { connected, connectedAddress, connectedName, connectError, addresses, own };
+}
+
+/* Sending the reply.
+
+   Two paths, because threading and the From address pull against each other.
+
+   From the helpdesk mailbox - the mailbox that holds the message - the reply is
+   drafted with Graph's createReply. That draft already carries the conversation
+   id, In-Reply-To and References and the quoted original, so the client's mail
+   app files the answer under the thread they started. This is the good path and
+   it is the default.
+
+   From any other mailbox, those headers cannot be reproduced: Graph will not
+   let a draft in one mailbox claim another mailbox's conversation, and
+   In-Reply-To is not a settable property. So createReply is still used, but
+   only to build the quoted body and work out who a reply goes to - then the
+   draft is thrown away and the mail is sent from the chosen mailbox with the
+   same "Re:" subject. Mail clients thread that on subject, which is weaker than
+   real references but is what a reply typed in Outlook from a personal mailbox
+   would do anyway. The composer says which of the two is about to happen.
+
+   Returns what was actually sent, so the caller never has to assume. */
+async function sendTicketReply({ req, token, from, messageId, to, cc, bodyText, subject, replyAll }) {
+  const mailbox = SUPPORT_MAILBOX;
+  const replyHtml = replyTextToHtml(bodyText);
+  const sendFromHelpdesk = from === mailbox;
+
+  if (messageId && sendFromHelpdesk) {
+    // createReplyAll only when the agent asked for it AND did not name the
+    // recipients themselves - an explicit To list is an instruction, and
+    // quietly adding everyone else back to it would be a data leak.
+    const useReplyAll = replyAll && !to.length;
+    const draft = await graphRequest(
+      `/users/${encodeURIComponent(mailbox)}/messages/${encodeURIComponent(messageId)}/${useReplyAll ? 'createReplyAll' : 'createReply'}`,
+      token,
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) }
+    );
+    const draftId = String(draft?.id || '');
+    if (!draftId) throw new Error('reply_draft_not_created');
+
+    const patch = { body: { contentType: 'HTML', content: injectReplyIntoDraftHtml(draft?.body?.content, replyHtml) } };
+    if (to.length) patch.toRecipients = to;
+    if (cc.length) patch.ccRecipients = cc;
+    if (subject) patch.subject = subject;
+
+    const patched = await graphRequest(`/users/${encodeURIComponent(mailbox)}/messages/${encodeURIComponent(draftId)}`, token, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch)
+    });
+    await graphRequest(`/users/${encodeURIComponent(mailbox)}/messages/${encodeURIComponent(draftId)}/send`, token, { method: 'POST' });
+    return {
+      threaded: true,
+      subject: String(patched?.subject || draft?.subject || subject || ''),
+      to: (patch.toRecipients || draft?.toRecipients || []).map(r => r?.emailAddress?.address).filter(Boolean),
+      cc: (patch.ccRecipients || draft?.ccRecipients || []).map(r => r?.emailAddress?.address).filter(Boolean)
+    };
+  }
+
+  let quotedHtml = '';
+  let resolvedSubject = subject;
+  let resolvedTo = to;
+  let resolvedCc = cc;
+
+  if (messageId) {
+    const draft = await graphRequest(
+      `/users/${encodeURIComponent(mailbox)}/messages/${encodeURIComponent(messageId)}/${replyAll && !to.length ? 'createReplyAll' : 'createReply'}`,
+      token,
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) }
+    );
+    quotedHtml = String(draft?.body?.content || '');
+    if (!resolvedSubject) resolvedSubject = String(draft?.subject || '');
+    if (!resolvedTo.length) resolvedTo = (draft?.toRecipients || []).filter(r => r?.emailAddress?.address);
+    if (!resolvedCc.length) resolvedCc = (draft?.ccRecipients || []).filter(r => r?.emailAddress?.address);
+    // The draft was only ever scaffolding. Leaving it behind would put a
+    // half-written reply in the helpdesk mailbox's Drafts for someone to find
+    // and wonder about, so it goes - and a failure to delete it must not fail
+    // a reply that is about to be sent perfectly well.
+    if (draft?.id) {
+      await graphRequest(`/users/${encodeURIComponent(mailbox)}/messages/${encodeURIComponent(draft.id)}`, token, { method: 'DELETE' })
+        .catch(error => console.warn('Scaffold reply draft not deleted:', String(error?.message || error).slice(0, 160)));
+    }
+  }
+
+  if (!resolvedTo.length) throw new Error('missing_recipients');
+  if (!resolvedSubject) resolvedSubject = 'Support ticket update';
+
+  await graphRequest(`/users/${encodeURIComponent(from)}/sendMail`, token, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      message: {
+        subject: resolvedSubject,
+        body: { contentType: 'HTML', content: quotedHtml ? injectReplyIntoDraftHtml(quotedHtml, replyHtml) : replyHtml },
+        toRecipients: resolvedTo,
+        ...(resolvedCc.length ? { ccRecipients: resolvedCc } : {})
+      },
+      saveToSentItems: true
+    })
+  });
+
+  return {
+    threaded: false,
+    subject: resolvedSubject,
+    to: resolvedTo.map(r => r?.emailAddress?.address).filter(Boolean),
+    cc: resolvedCc.map(r => r?.emailAddress?.address).filter(Boolean)
+  };
+}
+
+// Turns a Graph failure into something the composer can act on. 403 here is
+// almost always a missing grant rather than a bug, and which grant it is
+// depends on whose mailbox was being sent as.
+function replyErrorResponse(res, error, context = {}) {
+  const message = String(error?.message || error);
+  const status = graphErrorStatus(error);
+  if (message === 'missing_recipients') return res.status(400).json({ error: 'missing_recipients' });
+  if (message.startsWith('m365_not_connected')) return res.status(409).json({ error: 'm365_not_connected' });
+  if (message.startsWith('m365_reauth_required')) return res.status(409).json({ error: 'm365_reauth_required', detail: message });
+  if (message.startsWith('m365_client_secret_invalid')) return res.status(409).json({ error: 'm365_client_secret_invalid', detail: message });
+  if (status === 403) {
+    return res.status(403).json({
+      error: 'reply_send_forbidden',
+      from: context.from || null,
+      connectedAddress: context.connectedAddress || null,
+      detail: message.slice(0, 300)
+    });
+  }
+  if (status === 404) return res.status(404).json({ error: 'reply_message_not_found', detail: message.slice(0, 300) });
+  console.error('Ticket reply failed:', message.slice(0, 400));
+  return res.status(502).json({ error: 'reply_send_failed', detail: message.slice(0, 300) });
+}
+
 // Which addresses this board may reply from, and whether it can reply at all.
 // The client asks before showing the composer so it can say "reconnect Outlook"
 // up front instead of letting someone write a reply that cannot be sent.
 app.get('/api/reply/from-addresses', requireAuth, async (req, res) => {
-  let connected = false;
-  try {
-    await resolveStoredM365Tokens(req);
-    connected = true;
-  } catch (_) {
-    connected = false;
-  }
+  const identity = await resolveReplyIdentity(req);
   return res.json({
-    canSend: connected && M365_CAN_SEND_MAIL,
-    connected,
+    canSend: identity.connected && M365_CAN_SEND_MAIL,
+    connected: identity.connected,
     // False when the app's configured scopes never asked for Mail.Send. A
     // connection made before that scope was added is indistinguishable from
     // here (the token's own scopes are not inspected), so a send can still
     // fail with a Graph 403 telling the agent to reconnect.
     scopeConfigured: M365_CAN_SEND_MAIL,
+    // The helpdesk mailbox stays the default: it is the sender the client has
+    // been corresponding with, and the only one whose reply keeps the thread's
+    // real headers.
     defaultAddress: SUPPORT_MAILBOX,
-    addresses: REPLY_FROM_ADDRESSES.map(address => ({
-      address,
-      label: address === SUPPORT_MAILBOX ? `${address} (helpdesk)` : address,
-      isDefault: address === SUPPORT_MAILBOX
-    }))
+    helpdeskAddress: SUPPORT_MAILBOX,
+    connectedAddress: identity.connectedAddress || null,
+    connectedName: identity.connectedName || null,
+    connectError: identity.connectError || null,
+    addresses: identity.addresses.map(a => ({ ...a, isDefault: a.address === SUPPORT_MAILBOX }))
   });
 });
 
 app.post('/api/tickets/:externalId/reply', requireAuth, replyLimiter, async (req, res) => {
+  const identity = await resolveReplyIdentity(req);
+  const from = normalizeEmailAddress(req.body?.from) || SUPPORT_MAILBOX;
   try {
     const externalId = String(req.params.externalId || '').trim();
     const messageId = String(req.body?.messageId || '').trim();
@@ -5679,68 +5889,15 @@ app.post('/api/tickets/:externalId/reply', requireAuth, replyLimiter, async (req
     if (!bodyText) return res.status(400).json({ error: 'empty_reply' });
     if (bodyText.length > REPLY_BODY_MAX_CHARS) return res.status(413).json({ error: 'reply_too_long' });
 
-    const from = normalizeEmailAddress(req.body?.from) || SUPPORT_MAILBOX;
-    if (!REPLY_FROM_ADDRESSES.includes(from)) return res.status(403).json({ error: 'reply_from_not_allowed', allowed: REPLY_FROM_ADDRESSES });
+    const allowed = identity.addresses.map(a => a.address);
+    if (!allowed.includes(from)) return res.status(403).json({ error: 'reply_from_not_allowed', allowed });
 
     const to = toGraphRecipients(req.body?.to);
     const cc = toGraphRecipients(req.body?.cc);
     if (!messageId && !to.length) return res.status(400).json({ error: 'missing_recipients' });
 
     const token = await graphDelegatedToken(req);
-    const mailbox = SUPPORT_MAILBOX;
-    const replyHtml = replyTextToHtml(bodyText);
-    let sentSubject = subjectOverride;
-
-    if (messageId) {
-      // createReplyAll only when the agent asked for it AND did not name the
-      // recipients themselves - an explicit To list is an instruction, and
-      // quietly adding everyone else back to it would be a data leak.
-      const useReplyAll = replyAll && !to.length;
-      const draft = await graphRequest(
-        `/users/${encodeURIComponent(mailbox)}/messages/${encodeURIComponent(messageId)}/${useReplyAll ? 'createReplyAll' : 'createReply'}`,
-        token,
-        { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) }
-      );
-      const draftId = String(draft?.id || '');
-      if (!draftId) throw new Error('reply_draft_not_created');
-
-      const patch = {
-        body: {
-          contentType: 'HTML',
-          content: injectReplyIntoDraftHtml(draft?.body?.content, replyHtml)
-        }
-      };
-      if (to.length) patch.toRecipients = to;
-      if (cc.length) patch.ccRecipients = cc;
-      if (subjectOverride) patch.subject = subjectOverride;
-      // Only when it differs from the mailbox: setting `from` to the mailbox
-      // that owns the draft is a no-op that can still 403 on a tenant that
-      // treats it as a Send As.
-      if (from !== mailbox) patch.from = { emailAddress: { address: from } };
-
-      const patched = await graphRequest(`/users/${encodeURIComponent(mailbox)}/messages/${encodeURIComponent(draftId)}`, token, {
-        method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch)
-      });
-      sentSubject = String(patched?.subject || draft?.subject || sentSubject || '');
-      await graphRequest(`/users/${encodeURIComponent(mailbox)}/messages/${encodeURIComponent(draftId)}/send`, token, { method: 'POST' });
-    } else {
-      // A manual ticket, or one whose Outlook message we no longer have: there
-      // is no thread to reply into, so this is a fresh mail from the mailbox.
-      if (!sentSubject) sentSubject = 'Support ticket update';
-      await graphRequest(`/users/${encodeURIComponent(from)}/sendMail`, token, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          message: {
-            subject: sentSubject,
-            body: { contentType: 'HTML', content: replyHtml },
-            toRecipients: to,
-            ...(cc.length ? { ccRecipients: cc } : {})
-          },
-          saveToSentItems: true
-        })
-      });
-    }
+    const sent = await sendTicketReply({ req, token, from, messageId, to, cc, bodyText, subject: subjectOverride, replyAll });
 
     const actor = String(req.session.username || '').trim().toUpperCase() || null;
     const ticketRow = await prisma.ticket.findUnique({ where: { externalId }, select: { id: true } }).catch(() => null);
@@ -5753,8 +5910,9 @@ app.post('/api/tickets/:externalId/reply', requireAuth, replyLimiter, async (req
         metadata: {
           actor,
           from,
-          to: to.map(r => r.emailAddress.address),
-          cc: cc.map(r => r.emailAddress.address),
+          to: sent.to,
+          cc: sent.cc,
+          threaded: sent.threaded,
           replyAll: !!(messageId && replyAll && !to.length),
           messageId: messageId || null,
           chars: bodyText.length
@@ -5762,25 +5920,100 @@ app.post('/api/tickets/:externalId/reply', requireAuth, replyLimiter, async (req
       });
     }
 
-    return res.json({
-      ok: true,
-      from,
-      to: to.map(r => r.emailAddress.address),
-      cc: cc.map(r => r.emailAddress.address),
-      subject: sentSubject || null,
-      threaded: !!messageId
-    });
+    return res.json({ ok: true, from, to: sent.to, cc: sent.cc, subject: sent.subject || null, threaded: sent.threaded });
   } catch (error) {
-    const message = String(error?.message || error);
-    const status = graphErrorStatus(error);
-    if (message.startsWith('m365_not_connected')) return res.status(409).json({ error: 'm365_not_connected' });
-    if (message.startsWith('m365_reauth_required')) return res.status(409).json({ error: 'm365_reauth_required', detail: message });
-    // 403 here is almost always the missing piece rather than a bug: either the
-    // token predates the Mail.Send scopes, or the chosen From has no Send As.
-    if (status === 403) return res.status(403).json({ error: 'reply_send_forbidden', detail: message.slice(0, 300) });
-    if (status === 404) return res.status(404).json({ error: 'reply_message_not_found', detail: message.slice(0, 300) });
-    console.error('Ticket reply failed:', message.slice(0, 400));
-    return res.status(502).json({ error: 'reply_send_failed', detail: message.slice(0, 300) });
+    return replyErrorResponse(res, error, { from, connectedAddress: identity.connectedAddress });
+  }
+});
+
+/* Opening the ticket in Outlook when there is no Outlook mail to open.
+
+   Every ticket that came from the mailbox has a webLink and the button just
+   follows it. A ticket raised on the board by hand has no message at all, and
+   neither does one Graph never returned a link for - so the button used to
+   disappear, which is the wrong answer to "I want to deal with this in
+   Outlook". This creates the mail that is missing, as a draft, and hands back
+   its webLink for the board to open.
+
+   A draft rather than a sent mail on purpose: the agent asked to work in
+   Outlook, so what they get is an editable message with the ticket's subject,
+   client and description already in it, waiting in their Drafts. Nothing is
+   sent from here.
+
+   Where the draft is created is the From address the composer chose, which for
+   a manual ticket is usually the agent's own mailbox - and it has to be a
+   mailbox they can open, since the whole point is that the webLink lands
+   somewhere they can edit. A ticket that does have a message drafts a reply to
+   it in the helpdesk mailbox instead, so the thread is preserved. */
+app.post('/api/tickets/:externalId/outlook-draft', requireAuth, replyLimiter, async (req, res) => {
+  const identity = await resolveReplyIdentity(req);
+  const from = normalizeEmailAddress(req.body?.from) || SUPPORT_MAILBOX;
+  try {
+    const externalId = String(req.params.externalId || '').trim();
+    const messageId = String(req.body?.messageId || '').trim();
+    if (!externalId) return res.status(400).json({ error: 'missing_ticket' });
+
+    const allowed = identity.addresses.map(a => a.address);
+    if (!allowed.includes(from)) return res.status(403).json({ error: 'reply_from_not_allowed', allowed });
+
+    const token = await graphDelegatedToken(req);
+    const bodyText = String(req.body?.body || '').trim();
+    const draftHtml = bodyText ? replyTextToHtml(bodyText) : '';
+    let draft = null;
+    let mailbox = from;
+    let threaded = false;
+
+    if (messageId) {
+      // Reply to the real message, in the mailbox that holds it, so Outlook
+      // opens it as part of the client's thread.
+      mailbox = SUPPORT_MAILBOX;
+      threaded = true;
+      draft = await graphRequest(
+        `/users/${encodeURIComponent(mailbox)}/messages/${encodeURIComponent(messageId)}/createReply`,
+        token,
+        { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) }
+      );
+      if (draftHtml && draft?.id) {
+        draft = await graphRequest(`/users/${encodeURIComponent(mailbox)}/messages/${encodeURIComponent(draft.id)}`, token, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ body: { contentType: 'HTML', content: injectReplyIntoDraftHtml(draft?.body?.content, draftHtml) } })
+        });
+      }
+    } else {
+      const subject = String(req.body?.subject || '').trim() || 'Support ticket';
+      const to = toGraphRecipients(req.body?.to);
+      const cc = toGraphRecipients(req.body?.cc);
+      draft = await graphRequest(`/users/${encodeURIComponent(mailbox)}/messages`, token, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          subject,
+          body: { contentType: 'HTML', content: draftHtml || '<p></p>' },
+          ...(to.length ? { toRecipients: to } : {}),
+          ...(cc.length ? { ccRecipients: cc } : {})
+        })
+      });
+    }
+
+    const webLink = String(draft?.webLink || '');
+    if (!webLink) throw new Error('draft_without_weblink');
+
+    const actor = String(req.session.username || '').trim().toUpperCase() || null;
+    const ticketRow = await prisma.ticket.findUnique({ where: { externalId }, select: { id: true } }).catch(() => null);
+    if (ticketRow?.id) {
+      await createTicketAuditEvent({
+        ticketId: ticketRow.id,
+        userId: req.session.userId || null,
+        eventType: 'outlook_draft_created',
+        newValue: mailbox,
+        metadata: { actor, mailbox, threaded, messageId: messageId || null }
+      });
+    }
+
+    return res.json({ ok: true, webLink, draftId: String(draft?.id || ''), mailbox, threaded });
+  } catch (error) {
+    return replyErrorResponse(res, error, { from, connectedAddress: identity.connectedAddress });
   }
 });
 
