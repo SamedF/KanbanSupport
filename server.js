@@ -2164,11 +2164,77 @@ function cleanHighlightedText(s) {
   return stripHtml(String(s || '').replace(/<\/?span[^>]*>/gi, ''));
 }
 
+/* The projection, and why the property name is spelled the long way.
+
+   An attachments collection is typed as microsoft.graph.attachment, and the
+   base type carries id, name, contentType, size and isInline - but NOT
+   contentId, which belongs to the fileAttachment subtype. Asking for it
+   unqualified made Graph reject the entire request:
+
+     BadRequest: Parsing OData Select and Expand failed: Could not find a
+     property named 'contentId' on type 'microsoft.graph.attachment'.
+
+   which threw before a single image was listed, so every picture on every
+   message failed and the modal said the images could not be loaded. A derived
+   property has to be qualified with the type that declares it. */
+const ATTACHMENT_SELECT_BASE = '$select=id,name,contentType,size,isInline';
+const ATTACHMENT_SELECT = `${ATTACHMENT_SELECT_BASE},microsoft.graph.fileAttachment/contentId`;
+// Whether this tenant accepts that qualified projection. Set false the first
+// time it is refused, so one 400 is the whole cost rather than one per page of
+// one attachment listing of every ticket anybody opens.
+let attachmentSelectSupported = true;
+
+/* Lists one page of attachments, and never lets the projection be the reason a
+   message has no pictures.
+
+   The projection is worth having: without it Graph returns contentBytes for
+   every attachment, so a reply chain full of signatures is 10-20MB of base64
+   pulled into this process to be thrown away. But correctness comes first, so a
+   400 falls back to the unprojected listing - which is the representation known
+   to be complete - and remembers not to try the projection again. */
+// Drops $select from a Graph URL whatever form it is in. A literal string
+// replace would have worked on the URL built here and quietly failed on a
+// nextLink, where Graph echoes the query back percent-encoded (%24select) - and
+// a failed strip means retrying the request that just failed.
+function stripSelect(pathname) {
+  const [path, query = ''] = String(pathname || '').split('?');
+  const kept = query.split('&').filter(part => part && !/^(%24|\$)select=/i.test(part));
+  return kept.length ? `${path}?${kept.join('&')}` : path;
+}
+
+async function fetchAttachmentPage(pathname, req) {
+  const unprojected = stripSelect(pathname);
+  if (!attachmentSelectSupported) return graphGetResilient(unprojected, req);
+  try {
+    return await graphGetResilient(pathname, req);
+  } catch (error) {
+    if (graphErrorStatus(error) !== 400) throw error;
+    attachmentSelectSupported = false;
+    console.warn('[attachments] Graph refused the projected attachment listing, falling back to the full one:', String(error?.message || error).slice(0, 200));
+    return graphGetResilient(unprojected, req);
+  }
+}
+
 async function graphGetMessageWithAttachments(token, mailbox, msgId) {
   const msg = await graphGet(`/users/${encodeURIComponent(mailbox)}/messages/${encodeURIComponent(msgId)}?$select=id,subject,body,bodyPreview,from,toRecipients,ccRecipients,receivedDateTime,webLink,hasAttachments`, token);
   let attachments = [];
   if (msg?.hasAttachments) {
-    const at = await graphGet(`/users/${encodeURIComponent(mailbox)}/messages/${encodeURIComponent(msgId)}/attachments?$top=15&$select=id,name,contentType,size,isInline,contentBytes`, token);
+    // contentBytes, like contentId, is declared on fileAttachment rather than on
+    // the base attachment type this collection is typed as, so it has to be
+    // qualified - unqualified, Graph rejects the whole request with
+    // "Could not find a property named 'contentBytes' on type
+    // 'microsoft.graph.attachment'" and Debug Expert sees no attachments at
+    // all. Falling back to the unprojected listing keeps it working on a tenant
+    // that will not project it either; here that costs nothing extra, since
+    // this caller wants the bytes anyway.
+    const attachmentPath = `/users/${encodeURIComponent(mailbox)}/messages/${encodeURIComponent(msgId)}/attachments?$top=15`;
+    let at = null;
+    try {
+      at = await graphGet(`${attachmentPath}&${ATTACHMENT_SELECT_BASE},microsoft.graph.fileAttachment/contentBytes`, token);
+    } catch (error) {
+      if (graphErrorStatus(error) !== 400) throw error;
+      at = await graphGet(attachmentPath, token);
+    }
     attachments = Array.isArray(at?.value) ? at.value : [];
   }
   const attachmentFindings = [];
@@ -5498,18 +5564,25 @@ const MAX_IMAGE_ATTACHMENTS = 60;
 async function fetchMessageImageAttachments(mailbox, msgId, req) {
   const out = [];
   const base = `/users/${encodeURIComponent(mailbox)}/messages/${encodeURIComponent(msgId)}/attachments`;
-  const SELECT = '$select=id,name,contentType,size,isInline,contentId';
+  const SELECT = ATTACHMENT_SELECT;
   let next = `${base}?$top=50&${SELECT}`;
   for (let page = 0; page < 6 && next && out.length < MAX_IMAGE_ATTACHMENTS; page++) {
-    let data = await graphGetResilient(next, req);
+    let data = await fetchAttachmentPage(next, req);
     let items = Array.isArray(data?.value) ? data.value : [];
     // A projection that comes back with nothing to identify the attachments by
     // is useless for cid matching, and the unprojected representation is the one
     // that is known to be complete. Cheap insurance against a tenant or a
     // future Graph version that treats $select on attachments differently.
     if (items.length && items.every(a => !a?.contentId && !a?.name)) {
-      data = await graphGetResilient(next.replace(`&${SELECT}`, ''), req);
+      data = await graphGetResilient(stripSelect(next), req);
       items = Array.isArray(data?.value) ? data.value : [];
+    }
+    // A fileAttachment that came back without a contentId is not necessarily a
+    // real attachment without one: it can also be this projection quietly
+    // dropping it. Only worth saying once, and only when there is a cid to
+    // match - a genuine file attachment has no contentId and never needed one.
+    if (attachmentSelectSupported && items.some(a => a?.isInline && !a?.contentId)) {
+      console.warn('[attachments] an inline attachment came back with no contentId - cid matching will fall back to filename');
     }
     for (const a of items) {
       // itemAttachment (a forwarded mail) and referenceAttachment (a OneDrive
