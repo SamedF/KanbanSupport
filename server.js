@@ -6090,6 +6090,228 @@ app.post('/api/tickets/:externalId/outlook-draft', requireAuth, replyLimiter, as
   }
 });
 
+/* ===================== Feedback from the people using it =================
+
+   A small button in the header, a box to type in, and this - so a bug in the
+   board can be reported from the board instead of remembered until someone
+   happens to mention it.
+
+   Three things happen with one report, and they are deliberately independent:
+
+   - it is recorded, first, before any delivery is attempted. A report that was
+     emailed and lost is bad; a report that was never written down anywhere is
+     worse. This is what makes "the email failed" a nuisance rather than a lost
+     bug report.
+   - it is emailed to FEEDBACK_EMAIL, from the mailbox the board is connected to
+     Outlook as (/me/sendMail), so no Send As grant is needed for it to work.
+     Reply-To is the reporter, so answering the mail answers them.
+   - it is posted to FEEDBACK_WEBHOOK_URL if one is configured, which is how it
+     reaches Teams. Empty by default: no webhook, no Teams, no error.
+
+   The response says which of the three actually happened rather than a bare ok,
+   because "sent!" over a report that went nowhere is the one outcome worth
+   never printing. */
+const FEEDBACK_EMAIL = String(process.env.FEEDBACK_EMAIL || 'sfa@quinta.im').trim().toLowerCase();
+// A Teams incoming webhook, or a Power Automate "When an HTTP request is
+// received" URL. The payload carries both a MessageCard (which Teams renders on
+// its own) and the same fields flat at the top level (which a flow can read),
+// so either kind of endpoint works without a shape negotiation.
+const FEEDBACK_WEBHOOK_URL = String(process.env.FEEDBACK_WEBHOOK_URL || '').trim();
+const FEEDBACK_MAX_CHARS = Number(process.env.FEEDBACK_MAX_CHARS || 4000);
+// Feedback is typed by a person, so a handful per session is generous; this is
+// only here to stop a stuck retry loop mailing somebody a thousand times.
+const feedbackLimiter = rateLimit({ windowMs: 10 * 60 * 1000, max: 20, standardHeaders: true, legacyHeaders: false });
+
+const FEEDBACK_CATEGORIES = {
+  bug: { label: 'Bug', emoji: '\u{1F41B}', colour: 'b42318' },
+  idea: { label: 'Idea', emoji: '\u{1F4A1}', colour: '0f766e' },
+  question: { label: 'Question', emoji: '\u{2753}', colour: '2563eb' },
+  other: { label: 'Feedback', emoji: '\u{1F4AC}', colour: '4f46e5' }
+};
+
+// Only the fields the report is allowed to carry, each clamped. The client
+// collects this itself (which view, which build, which browser), and it is the
+// difference between "the board is broken" and a reproducible report - but it
+// arrives from a browser, so none of it is trusted to be sane.
+function sanitizeFeedbackContext(raw) {
+  const context = (raw && typeof raw === 'object') ? raw : {};
+  const str = (value, max) => String(value == null ? '' : value).trim().slice(0, max);
+  return {
+    view: str(context.view, 40),
+    ticketId: str(context.ticketId, 200),
+    build: str(context.build, 60),
+    url: str(context.url, 300),
+    theme: str(context.theme, 20),
+    viewport: str(context.viewport, 24),
+    userAgent: str(context.userAgent, 300)
+  };
+}
+
+function feedbackContextRows(context, actor) {
+  return [
+    ['From', actor.label],
+    ['View', context.view || 'board'],
+    ['Ticket', context.ticketId || '-'],
+    ['Build', context.build || 'unknown'],
+    ['Page', context.url || '-'],
+    ['Screen', `${context.viewport || '-'}${context.theme ? ` (${context.theme} theme)` : ''}`],
+    ['Browser', context.userAgent || '-']
+  ];
+}
+
+function buildFeedbackEmailHtml({ category, message, context, actor }) {
+  const meta = FEEDBACK_CATEGORIES[category] || FEEDBACK_CATEGORIES.other;
+  const rows = feedbackContextRows(context, actor)
+    .map(([key, value]) => `<tr><td style="padding:3px 12px 3px 0;color:#667085;font-size:12px;white-space:nowrap;vertical-align:top;">${escapeHtml(key)}</td><td style="padding:3px 0;font-size:12px;color:#0f172a;word-break:break-all;">${escapeHtml(value)}</td></tr>`)
+    .join('');
+  return [
+    '<div style="font-family:Segoe UI,Arial,sans-serif;color:#0f172a;line-height:1.5;max-width:640px;">',
+    `<div style="font-size:12px;font-weight:700;color:#${meta.colour};text-transform:uppercase;letter-spacing:.06em;">${meta.emoji} ${escapeHtml(meta.label)} &middot; Support Kanban</div>`,
+    // The message first and whole, because that is the part somebody wrote by
+    // hand and the part that has to be read.
+    `<div style="margin:10px 0 16px;padding:13px 15px;border-left:3px solid #${meta.colour};background:#f8fafc;border-radius:0 8px 8px 0;white-space:pre-wrap;font-size:14px;">${escapeHtml(message)}</div>`,
+    `<table style="border-collapse:collapse;">${rows}</table>`,
+    '<div style="margin-top:14px;font-size:11px;color:#98a2b3;">Sent by the Feedback button on the support board. Reply to this mail to answer the reporter.</div>',
+    '</div>'
+  ].join('');
+}
+
+function buildFeedbackWebhookPayload({ category, message, context, actor }) {
+  const meta = FEEDBACK_CATEGORIES[category] || FEEDBACK_CATEGORIES.other;
+  const title = `${meta.emoji} ${meta.label} from ${actor.label}`;
+  const facts = feedbackContextRows(context, actor).map(([name, value]) => ({ name, value }));
+  return {
+    // Read by a Power Automate flow, or by anything else pointed at this URL.
+    kind: 'support_kanban_feedback',
+    category,
+    categoryLabel: meta.label,
+    message,
+    reporter: actor.label,
+    reporterEmail: actor.email || '',
+    recipientEmail: FEEDBACK_EMAIL,
+    context,
+    // Rendered by a Teams incoming webhook without a flow in between.
+    '@type': 'MessageCard',
+    '@context': 'https://schema.org/extensions',
+    themeColor: meta.colour,
+    summary: title,
+    title,
+    text: message,
+    sections: [{ facts, markdown: false }]
+  };
+}
+
+app.post('/api/feedback', requireAuth, feedbackLimiter, async (req, res) => {
+  const message = String(req.body?.message || '').trim();
+  const rawCategory = String(req.body?.category || 'other').trim().toLowerCase();
+  const category = Object.prototype.hasOwnProperty.call(FEEDBACK_CATEGORIES, rawCategory) ? rawCategory : 'other';
+  if (!message) return res.status(400).json({ error: 'empty_feedback' });
+  if (message.length > FEEDBACK_MAX_CHARS) return res.status(413).json({ error: 'feedback_too_long', max: FEEDBACK_MAX_CHARS });
+
+  const context = sanitizeFeedbackContext(req.body?.context);
+  let user = null;
+  if (req.session?.userId) {
+    user = await prisma.user
+      .findUnique({ where: { id: req.session.userId }, select: { username: true, displayName: true, email: true, role: true } })
+      .catch(() => null);
+  }
+  const username = String(user?.username || req.session?.username || 'unknown');
+  const actor = {
+    username,
+    email: normalizeEmailAddress(user?.email) || agentOwnMailboxes({ username, email: user?.email })[0] || '',
+    label: `${user?.displayName || username.toUpperCase()}${user?.role ? ` (${user.role})` : ''}`
+  };
+
+  /* Recorded before anything is sent, and its id returned, so a report is never
+     only in an email that may not have gone out. SyncLog rather than a table of
+     its own: this needs no migration to start working, and a migration is a
+     deploy step that could leave the button 500ing on an environment that had
+     not run it. Query it with
+     `provider = 'feedback'` when you want the list. */
+  let logId = null;
+  try {
+    const row = await prisma.syncLog.create({
+      data: {
+        provider: 'feedback',
+        syncType: category,
+        status: 'received',
+        message: message.slice(0, FEEDBACK_MAX_CHARS),
+        metadata: { actor, context, receivedAt: new Date().toISOString() }
+      }
+    });
+    logId = row?.id || null;
+  } catch (error) {
+    console.error('Feedback could not be recorded:', String(error?.message || error).slice(0, 200));
+  }
+
+  const meta = FEEDBACK_CATEGORIES[category];
+  const subject = `[Kanban ${meta.label}] ${message.split(/\r?\n/)[0].slice(0, 90)}`;
+  let emailed = false;
+  let emailError = '';
+  try {
+    const token = await graphDelegatedToken(req);
+    // /me/sendMail, not the helpdesk mailbox: the connected identity can always
+    // send as itself, so this needs no Send As grant anywhere.
+    await graphRequest('/me/sendMail', token, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        message: {
+          subject,
+          body: { contentType: 'HTML', content: buildFeedbackEmailHtml({ category, message, context, actor }) },
+          toRecipients: [{ emailAddress: { address: FEEDBACK_EMAIL } }],
+          ...(actor.email ? { replyTo: [{ emailAddress: { address: actor.email } }] } : {})
+        },
+        saveToSentItems: false
+      })
+    });
+    emailed = true;
+  } catch (error) {
+    emailError = String(error?.message || error).slice(0, 200);
+    console.warn('Feedback email failed:', emailError);
+  }
+
+  let notified = false;
+  let webhookError = '';
+  if (FEEDBACK_WEBHOOK_URL) {
+    try {
+      await postJson(FEEDBACK_WEBHOOK_URL, buildFeedbackWebhookPayload({ category, message, context, actor }));
+      notified = true;
+    } catch (error) {
+      webhookError = String(error?.message || error).slice(0, 200);
+      console.warn('Feedback webhook failed:', webhookError);
+    }
+  }
+
+  if (logId) {
+    // What actually happened to it, on the record itself - so a report nobody
+    // ever saw is findable later rather than indistinguishable from one that
+    // was read and ignored.
+    await prisma.syncLog
+      .update({
+        where: { id: logId },
+        data: {
+          status: emailed || notified ? 'delivered' : 'stored_only',
+          metadata: { actor, context, emailed, notified, emailError: emailError || undefined, webhookError: webhookError || undefined }
+        }
+      })
+      .catch(() => null);
+  }
+
+  return res.json({
+    ok: true,
+    stored: !!logId,
+    emailed,
+    notified,
+    webhookConfigured: !!FEEDBACK_WEBHOOK_URL,
+    to: emailed ? FEEDBACK_EMAIL : null,
+    // Only when nothing was delivered, and only the reason - the client turns
+    // this into "recorded, but it could not be sent yet" rather than a silent
+    // success.
+    detail: (!emailed && !notified) ? (emailError || webhookError || 'no_delivery_configured') : undefined
+  });
+});
+
 app.post('/api/mcp-proxy', requireAuth, async (req, res) => {
   try {
     const { tool, args } = req.body || {};

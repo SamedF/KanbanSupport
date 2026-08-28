@@ -609,6 +609,129 @@ header {
   gap: 12px;
   box-shadow: 0 14px 40px rgba(var(--ink-rgb), 0.22);
 }
+/* The Feedback button. Deliberately the quietest thing in the header - it is
+   there for the rare moment something is wrong, and must not compete with the
+   controls people press all day. */
+.feedback-btn {
+  border-radius: 999px;
+  border: 1px solid rgba(var(--ink-text-rgb), 0.16);
+  background: transparent;
+  color: var(--ink-text);
+  cursor: pointer;
+  transition: all .16s ease;
+  font-size: 11.5px;
+  font-weight: 800;
+  padding: 6px 11px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+  opacity: .82;
+}
+
+.feedback-btn::before { content: "\1F4AC"; font-size: 12px; }
+
+.feedback-btn:hover {
+  opacity: 1;
+  background: rgba(var(--ink-text-rgb), 0.14);
+  transform: translateY(-1px);
+}
+
+/* ---- The report itself ---- */
+
+.fb-body {
+  padding: 15px 18px 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.fb-cats { display: flex; gap: 7px; flex-wrap: wrap; }
+
+.fb-cat {
+  border: 1px solid var(--border);
+  background: var(--white);
+  border-radius: 999px;
+  padding: 6px 13px;
+  font-size: 12px;
+  font-weight: 800;
+  color: var(--text-soft);
+  cursor: pointer;
+  transition: all .14s ease;
+}
+
+.fb-cat:hover { border-color: var(--border-strong); }
+
+.fb-cat[aria-pressed="true"] {
+  border-color: var(--primary);
+  background: var(--primary-soft);
+  color: var(--primary-dark);
+  box-shadow: 0 0 0 3px rgba(var(--indigo-600-rgb), .12);
+}
+
+.fb-textarea {
+  width: 100%;
+  min-height: 128px;
+  resize: vertical;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 11px 12px;
+  font: inherit;
+  font-size: 13.5px;
+  line-height: 1.55;
+  color: var(--text);
+  background: var(--white);
+}
+
+.fb-textarea:focus {
+  outline: none;
+  border-color: var(--primary);
+  box-shadow: 0 0 0 4px rgba(var(--indigo-600-rgb), .12);
+}
+
+.fb-count {
+  font-size: 11px;
+  color: var(--muted);
+  font-weight: 700;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.fb-count.over { color: var(--red-600); }
+
+/* What is attached, shown rather than described. Somebody about to send their
+   browser version and the page they are on should be able to see that that is
+   all it is. */
+.fb-context {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-soft);
+  padding: 9px 11px;
+  font-size: 11px;
+  color: var(--muted);
+  display: grid;
+  gap: 3px;
+}
+
+.fb-context strong {
+  display: block;
+  font-size: 10.5px;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-bottom: 2px;
+}
+
+.fb-context span { word-break: break-all; }
+
+.fb-note {
+  font-size: 11.5px;
+  color: var(--muted);
+  font-weight: 600;
+  /* The action bar is flex-end, so this has to claim the space to stay left. */
+  margin-right: auto;
+}
+
 .audit-board-btn {
   border-radius: 999px;
   border: 1px solid rgba(var(--ink-text-rgb), 0.18);
@@ -4328,6 +4451,7 @@ th {
 <a class="audit-board-btn" href="/audit/tickets" title="Which tickets each Support agent and each CS updated, and what they changed">
   Audit Log
 </a>
+<button class="feedback-btn" id="feedback-btn" type="button" title="Report a problem with the board, or suggest something">Feedback</button>
     <div class="account-menu">
       <button class="account-btn" id="account-btn">Account </button>
      <div class="account-panel" id="account-panel">
@@ -4766,6 +4890,37 @@ th {
     <div class="modal-actions">
       <button class="btn-out" data-close="coowner-map-modal">Close</button>
       <button class="btn-primary" id="coowner-map-apply">Apply and Reassign</button>
+    </div>
+  </div>
+</div>
+<!-- Feedback modal -->
+<div class="modal-bg" id="feedback-modal">
+  <div class="modal" style="max-width:520px;">
+    <div class="modal-head">
+      <div>
+        <h2>Send feedback</h2>
+        <div style="font-size:11px;color:var(--slate-400);margin-top:3px;">Something broken, missing, or worth changing on the board</div>
+      </div>
+      <button class="modal-close-x" data-close="feedback-modal"></button>
+    </div>
+    <div class="fb-body">
+      <div class="fb-cats" id="fb-cats" role="group" aria-label="What kind of feedback">
+        <button class="fb-cat" type="button" data-fb-cat="bug" aria-pressed="true">Bug</button>
+        <button class="fb-cat" type="button" data-fb-cat="idea" aria-pressed="false">Idea</button>
+        <button class="fb-cat" type="button" data-fb-cat="question" aria-pressed="false">Question</button>
+        <button class="fb-cat" type="button" data-fb-cat="other" aria-pressed="false">Other</button>
+      </div>
+      <div>
+        <textarea class="fb-textarea" id="fb-message" spellcheck="true"
+          placeholder="What happened, and what did you expect instead? If it was on one ticket, its number helps."></textarea>
+        <div class="fb-count" id="fb-count"></div>
+      </div>
+      <div class="fb-context" id="fb-context"></div>
+    </div>
+    <div class="modal-actions">
+      <span class="fb-note" id="fb-note"></span>
+      <button class="btn-out" data-close="feedback-modal">Cancel</button>
+      <button class="btn-primary" id="fb-send">Send feedback</button>
     </div>
   </div>
 </div>
@@ -10364,6 +10519,134 @@ async function emSendReply(){
     if(els.send){els.send.disabled=false;els.send.textContent='Send reply';}
   }
 }
+
+/* ====================== Feedback, from wherever you are ==================
+
+   The button is in the header and the report goes to /api/feedback, which
+   records it, emails it, and posts it to Teams if a webhook is configured.
+
+   The context block is the part that makes a report useful: which view, which
+   build, which browser, and the ticket that was open. Collected here because
+   this is the only place that knows it, shown in the modal rather than
+   described, so nobody has to take on trust what is being attached. */
+const FB_MAX = 4000;
+let fbCategory = 'bug';
+let fbSending = false;
+
+function fbContext(){
+  return {
+    view: viewMode || 'board',
+    // The ticket whose modal is open, if any - by far the most likely subject
+    // of a bug report, and the thing a reporter is least likely to think to
+    // mention.
+    ticketId: (document.getElementById('email-modal')?.classList.contains('open') && emCurrentTicket?.id)
+      || (comTicketId || ''),
+    build: appBuildVersion || 'unknown',
+    url: location.pathname + location.search,
+    theme: document.documentElement.getAttribute('data-theme') || 'system',
+    viewport: `${window.innerWidth}x${window.innerHeight}`,
+    userAgent: navigator.userAgent
+  };
+}
+
+function fbRenderContext(){
+  const box = document.getElementById('fb-context');
+  if(!box) return;
+  const c = fbContext();
+  const ticketLine = c.ticketId ? `<span>Ticket: ${esc(ticketDisplayNumber(c.ticketId)||c.ticketId)}</span>` : '';
+  box.innerHTML = `<strong>Attached automatically</strong>
+    <span>You: ${esc(currentUser())} &middot; View: ${esc(c.view)} &middot; Build: ${esc(c.build)}</span>
+    ${ticketLine}
+    <span>Screen: ${esc(c.viewport)} &middot; Theme: ${esc(c.theme)}</span>`;
+}
+
+function fbRenderCount(){
+  const el = document.getElementById('fb-count');
+  const value = String(document.getElementById('fb-message')?.value || '');
+  if(!el) return;
+  // Only worth showing once it is close to mattering - a character counter over
+  // an empty box is noise.
+  const left = FB_MAX - value.length;
+  el.textContent = value.length > FB_MAX - 500 ? `${left} characters left` : '';
+  el.classList.toggle('over', left < 0);
+}
+
+function fbSetCategory(category){
+  fbCategory = category;
+  document.querySelectorAll('[data-fb-cat]').forEach(btn=>{
+    btn.setAttribute('aria-pressed', btn.dataset.fbCat === category ? 'true' : 'false');
+  });
+}
+
+function openFeedbackModal(){
+  fbSetCategory('bug');
+  const box = document.getElementById('fb-message');
+  if(box) box.value = '';
+  const note = document.getElementById('fb-note');
+  // Says where it goes before it is written, not after. Not the address itself:
+  // that is the server's configuration to know, and the success toast names it.
+  if(note) note.textContent = 'Emailed to the platform team';
+  fbRenderCount();
+  fbRenderContext();
+  document.getElementById('feedback-modal')?.classList.add('open');
+  setTimeout(()=>box?.focus(), 60);
+}
+
+async function sendFeedback(){
+  if(fbSending) return;
+  const box = document.getElementById('fb-message');
+  const message = String(box?.value || '').trim();
+  if(!message){ showToast('Write what happened first','warn'); box?.focus(); return; }
+  if(message.length > FB_MAX){ showToast(`That is ${message.length - FB_MAX} characters too long`,'warn'); return; }
+
+  const btn = document.getElementById('fb-send');
+  fbSending = true;
+  if(btn){ btn.disabled = true; btn.textContent = 'Sending...'; }
+  try{
+    const res = await fetch('/api/feedback',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      credentials:'include',
+      body: JSON.stringify({ category: fbCategory, message, context: fbContext() })
+    });
+    const out = await res.json().catch(()=>({}));
+    if(!res.ok || !out?.ok){
+      const code = String(out?.error || '');
+      if(code === 'feedback_too_long') showToast('That report is too long to send','warn');
+      else if(res.status === 429) showToast('A few reports have just gone out - give it a minute','warn');
+      else showToast(`Could not send that: ${out?.detail || code || res.status}`,'warn');
+      return;
+    }
+    document.getElementById('feedback-modal')?.classList.remove('open');
+    if(box) box.value = '';
+    /* Three honest outcomes rather than one cheerful one. A report that was
+       written down but not delivered is not a failure - somebody will still see
+       it - but saying "sent" over it would be a lie. */
+    if(out.emailed || out.notified){
+      showToast(`Thanks - sent to ${out.to || 'the team'}`,'ok');
+    }else if(out.stored){
+      showToast('Recorded, but it could not be emailed yet - it is saved and will be seen','warn');
+    }else{
+      showToast('That could not be sent or saved. Please tell someone directly.','warn');
+    }
+  }catch(err){
+    showToast(`Could not send that: ${String(err?.message||err)}`,'warn');
+  }finally{
+    fbSending = false;
+    if(btn){ btn.disabled = false; btn.textContent = 'Send feedback'; }
+  }
+}
+
+document.getElementById('feedback-btn')?.addEventListener('click', openFeedbackModal);
+document.getElementById('fb-send')?.addEventListener('click', sendFeedback);
+document.getElementById('fb-message')?.addEventListener('input', fbRenderCount);
+document.querySelectorAll('[data-fb-cat]').forEach(btn=>{
+  btn.addEventListener('click', ()=>fbSetCategory(btn.dataset.fbCat));
+});
+// Ctrl/Cmd+Enter sends, as it does in the reply composer.
+document.getElementById('fb-message')?.addEventListener('keydown', ev=>{
+  if((ev.ctrlKey||ev.metaKey) && ev.key === 'Enter'){ ev.preventDefault(); sendFeedback(); }
+});
 
 /* ================= Open in Outlook, including when there is none ==========
 

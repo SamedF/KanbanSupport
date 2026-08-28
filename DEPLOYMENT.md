@@ -197,6 +197,11 @@ SUPPORT_MAILBOX=helpdesk@quinta.im
 # SUPPORT_MAILBOX which is always offered. Each one also needs Send As granted
 # to the connected Outlook identity in Exchange, or Graph refuses the send.
 REPLY_FROM_ADDRESSES=
+# Where the header's Feedback button sends reports. Defaults to sfa@quinta.im.
+FEEDBACK_EMAIL=sfa@quinta.im
+# Optional. A Teams incoming webhook, or a Power Automate "When an HTTP request
+# is received" URL, to also post each report into Teams. Empty means email only.
+FEEDBACK_WEBHOOK_URL=
 
 HUBSPOT_CLIENT_ID=
 HUBSPOT_CLIENT_SECRET=
@@ -252,6 +257,43 @@ agent's session *and* overwrites the board's shared connection, so the last
 person to connect becomes the identity used by every session that has none of
 its own. That is long-standing behaviour, not new here, but it is what decides
 whose mailbox an unauthenticated-to-Graph session sends as.
+
+## Where feedback from the Feedback button goes
+
+Three things happen to one report, independently, so that no single failure
+loses it:
+
+1. **It is recorded first**, before any delivery is attempted, in the `SyncLog`
+   table with `provider = 'feedback'`. List them with
+   `SELECT "createdAt", "syncType", status, message FROM "SyncLog" WHERE provider = 'feedback' ORDER BY "createdAt" DESC;`
+   or in `npm run db:studio`. The row's `status` ends up `delivered` or
+   `stored_only`, and its metadata records which channel worked - so a report
+   nobody ever received is findable rather than indistinguishable from one that
+   was read and ignored.
+2. **It is emailed** to `FEEDBACK_EMAIL` (default `sfa@quinta.im`) from the
+   mailbox the board is connected to Outlook as, via `/me/sendMail` - so it
+   needs no Send As grant anywhere, only the `Mail.Send` scope the reply
+   composer already needs. Reply-To is the reporter, so answering the mail
+   answers them.
+3. **It is posted to `FEEDBACK_WEBHOOK_URL`** if one is set, which is how it
+   reaches Teams. The payload is both a MessageCard (a Teams incoming webhook
+   renders it with no flow in between) and the same fields flat at the top level
+   (a Power Automate flow can read `category`, `message`, `reporter`,
+   `context`), so either kind of URL works. Empty by default: no webhook, no
+   Teams, and no error.
+
+The reporter is told which of the three happened. A report that was recorded but
+not emailed says so ("recorded, but it could not be emailed yet") rather than
+showing a success it did not earn.
+
+Each report carries the view, build, browser, screen size, theme and the open
+ticket, collected in the browser and clamped server-side. That context is shown
+in the modal before sending, so nobody has to take on trust what is attached.
+
+Feedback is deliberately not a Prisma model of its own: a new table is a
+migration, and a migration is a deploy step that can leave the button returning
+500 on an environment that has not run it. If a feedback inbox in the UI is
+wanted later, that is the point to add the table.
 
 ## A ticket has no email in Outlook
 
