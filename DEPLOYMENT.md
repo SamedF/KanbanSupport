@@ -258,6 +258,63 @@ person to connect becomes the identity used by every session that has none of
 its own. That is long-standing behaviour, not new here, but it is what decides
 whose mailbox an unauthenticated-to-Graph session sends as.
 
+## Turning the Feedback button's notifications on
+
+Two settings and one consent, and a button that proves whether they worked.
+
+**1. Outlook (email).** Nothing to set unless the address changes -
+`FEEDBACK_EMAIL` defaults to `sfa@quinta.im`. What it needs is the `Mail.Send`
+consent: the report is sent through `/me/sendMail`, so the identity the board is
+connected to Outlook as must hold a token carrying that scope. A connection made
+before the reply composer shipped does not. **Sign in to Microsoft again on the
+board** (the same reconnect the reply composer needs - one covers both), and if
+the tenant requires admin consent for the app, grant that first.
+
+Check the boot log before anything else. If it says
+
+```
+[m365] M365_CLIENT_SECRET is a GUID, which means it is the client secret ID
+```
+
+then no token can be issued at all on that environment and nothing Graph-backed
+works - ticket bodies included. Renew the secret in Azure (App registrations >
+Certificates & secrets > New client secret > copy the **Value** column, not the
+ID) before reconnecting.
+
+**2. Teams.** Set `FEEDBACK_WEBHOOK_URL`. The supported way to get one:
+
+- In Teams, open the channel you want the reports in.
+- **... > Workflows > "Post to a channel when a webhook request is received"**.
+- Complete the template; it hands you an HTTP POST URL.
+- Put that URL in `FEEDBACK_WEBHOOK_URL` and restart.
+
+Use Workflows rather than the old **Connectors > Incoming Webhook**: Microsoft
+has retired Office 365 connectors in Teams. The payload still carries the
+MessageCard shape an old connector consumed, so an existing one keeps working
+until it is switched off, but new ones cannot be created.
+
+Nothing else needs configuring for either kind of endpoint. One request body
+carries an Adaptive Card in `attachments` (which the Workflows template posts),
+a MessageCard at the top level (which a connector renders), and the same fields
+flat - `category`, `message`, `reporter`, `reporterEmail`, `context` - for a flow
+of your own to read.
+
+**3. Prove it.** Open the Feedback modal as an admin and press **Test delivery**.
+It sends one canned report and reports each leg separately, for example:
+
+```
+email to sfa@quinta.im sent - Teams webhook posted
+email failed (graph_error_403:...) - no Teams webhook configured
+```
+
+The full Graph or webhook error also goes to the browser console, which is the
+part worth pasting into a ticket. Nothing is stored for a test and no report is
+invented - it is a real send of an obviously-labelled test message.
+
+If a leg fails: a 403 on the email means the consent above is missing or the
+chosen mailbox is refused; a webhook error means the URL is wrong, the flow is
+off, or the flow rejected the body.
+
 ## Where feedback from the Feedback button goes
 
 Three things happen to one report, independently, so that no single failure

@@ -609,31 +609,35 @@ header {
   gap: 12px;
   box-shadow: 0 14px 40px rgba(var(--ink-rgb), 0.22);
 }
-/* The Feedback button. Deliberately the quietest thing in the header - it is
-   there for the rare moment something is wrong, and must not compete with the
-   controls people press all day. */
+/* The Feedback button.
+
+   Small, but no longer transparent. The first version was styled as the quietest
+   thing in the header - transparent and dimmed - on the theory that a control
+   for the rare moment something breaks should not compete with the ones people
+   press all day. Sat between two filled pills in a header of nine controls,
+   that made it genuinely hard to find, which is the worse fault: a feedback
+   button nobody spots collects nothing. It now carries the same fill as the
+   Audit Log button beside it, at a slightly smaller size. */
 .feedback-btn {
   border-radius: 999px;
-  border: 1px solid rgba(var(--ink-text-rgb), 0.16);
-  background: transparent;
+  border: 1px solid rgba(var(--ink-text-rgb), 0.20);
+  background: rgba(var(--ink-text-rgb), 0.10);
   color: var(--ink-text);
   cursor: pointer;
   transition: all .16s ease;
   font-size: 11.5px;
   font-weight: 800;
-  padding: 6px 11px;
+  padding: 7px 12px;
   display: inline-flex;
   align-items: center;
   gap: 5px;
   white-space: nowrap;
-  opacity: .82;
 }
 
 .feedback-btn::before { content: "\1F4AC"; font-size: 12px; }
 
 .feedback-btn:hover {
-  opacity: 1;
-  background: rgba(var(--ink-text-rgb), 0.14);
+  background: rgba(var(--ink-text-rgb), 0.20);
   transform: translateY(-1px);
 }
 
@@ -728,8 +732,12 @@ header {
   font-size: 11.5px;
   color: var(--muted);
   font-weight: 600;
-  /* The action bar is flex-end, so this has to claim the space to stay left. */
+  /* The action bar is flex-end, so this has to claim the space to stay left -
+     and shrink rather than push the buttons onto a second row, which is what
+     three buttons plus a sentence did at this modal's width. */
   margin-right: auto;
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 .audit-board-btn {
@@ -4895,7 +4903,9 @@ th {
 </div>
 <!-- Feedback modal -->
 <div class="modal-bg" id="feedback-modal">
-  <div class="modal" style="max-width:520px;">
+  <!-- 580 rather than 520: the admin Test delivery button alongside Cancel and
+       Send pushed the row onto two lines at the narrower width. -->
+  <div class="modal" style="max-width:580px;">
     <div class="modal-head">
       <div>
         <h2>Send feedback</h2>
@@ -4919,6 +4929,10 @@ th {
     </div>
     <div class="modal-actions">
       <span class="fb-note" id="fb-note"></span>
+      <!-- Admin only, and hidden otherwise: it sends a real mail, and it exists
+           so whoever set FEEDBACK_EMAIL and FEEDBACK_WEBHOOK_URL can prove both
+           legs work without waiting for somebody to report something. -->
+      <button class="btn-out admin-only" id="fb-test" type="button" title="Send a test report to check that email and Teams delivery work">Test delivery</button>
       <button class="btn-out" data-close="feedback-modal">Cancel</button>
       <button class="btn-primary" id="fb-send">Send feedback</button>
     </div>
@@ -10585,7 +10599,7 @@ function openFeedbackModal(){
   const note = document.getElementById('fb-note');
   // Says where it goes before it is written, not after. Not the address itself:
   // that is the server's configuration to know, and the success toast names it.
-  if(note) note.textContent = 'Emailed to the platform team';
+  if(note) note.textContent = 'Goes to the platform team';
   fbRenderCount();
   fbRenderContext();
   document.getElementById('feedback-modal')?.classList.add('open');
@@ -10637,7 +10651,42 @@ async function sendFeedback(){
   }
 }
 
+/* Proving the two delivery legs work, from the UI.
+
+   Setting this up is two environment variables and an Outlook consent, and each
+   of them fails invisibly from the outside: a webhook URL with a typo, a token
+   that predates Mail.Send, a flow somebody switched off. Without this the only
+   way to find out is to file a real report and wait to see if anything arrives -
+   and when nothing does, there is nothing to say which leg was at fault. This
+   sends one canned report and reports each leg separately. */
+async function sendFeedbackTest(){
+  const btn = document.getElementById('fb-test');
+  if(!btn || btn.disabled) return;
+  btn.disabled = true;
+  const label = btn.textContent;
+  btn.textContent = 'Testing...';
+  try{
+    const res = await fetch('/api/feedback/test',{ method:'POST', credentials:'include' });
+    const out = await res.json().catch(()=>({}));
+    if(res.status === 403){ showToast('Only admins can send a delivery test','warn'); return; }
+    const bits = [];
+    bits.push(out.emailed ? `email to ${out.emailTo} sent` : `email failed (${out.emailError||'unknown'})`);
+    if(out.webhookConfigured) bits.push(out.notified ? 'Teams webhook posted' : `Teams failed (${out.webhookError||'unknown'})`);
+    else bits.push('no Teams webhook configured');
+    showToast(bits.join(' - '), out.emailed || out.notified ? 'ok' : 'warn');
+    // The full reason goes to the console as well: a Graph error is longer than
+    // a toast and is the thing worth pasting into a ticket.
+    if(out.emailError || out.webhookError) console.warn('[feedback test]', out);
+  }catch(err){
+    showToast(`Delivery test failed: ${String(err?.message||err)}`,'warn');
+  }finally{
+    btn.disabled = false;
+    btn.textContent = label;
+  }
+}
+
 document.getElementById('feedback-btn')?.addEventListener('click', openFeedbackModal);
+document.getElementById('fb-test')?.addEventListener('click', sendFeedbackTest);
 document.getElementById('fb-send')?.addEventListener('click', sendFeedback);
 document.getElementById('fb-message')?.addEventListener('input', fbRenderCount);
 document.querySelectorAll('[data-fb-cat]').forEach(btn=>{

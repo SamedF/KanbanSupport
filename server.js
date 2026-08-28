@@ -80,7 +80,7 @@ if (M365_SECRET_LOOKS_LIKE_ID) {
 // carry them, so /api/reply/from-addresses reports the gap and the composer
 // says to reconnect Outlook rather than failing at send time.
 const M365_SCOPES = String(process.env.M365_SCOPES || 'offline_access openid profile email User.Read Mail.Read Mail.Read.Shared Mail.Send Mail.Send.Shared').trim();
-const M365_CAN_SEND_MAIL = /Mail\.Send/i.test(M365_SCOPES);
+const M365_CAN_SEND_MAIL = /\bMail\.Send\b/i.test(M365_SCOPES);
 const SUPPORT_MAILBOX = String(process.env.SUPPORT_MAILBOX || 'helpdesk@quinta.im').trim().toLowerCase();
 // Extra addresses a reply may claim to be from, on top of the two the board
 // works out by itself: the helpdesk mailbox (always allowed - it is where the
@@ -6197,9 +6197,137 @@ function buildFeedbackWebhookPayload({ category, message, context, actor }) {
     summary: title,
     title,
     text: message,
-    sections: [{ facts, markdown: false }]
+    sections: [{ facts, markdown: false }],
+    /* And the Adaptive Card, for Teams Workflows.
+
+       Microsoft retired the Office 365 connector that consumed the MessageCard
+       above; the supported route is now a Power Automate workflow, and the
+       "Post to a channel when a webhook request is received" template forwards
+       whatever it finds in `attachments`. Carrying all three shapes in one body
+       is a few hundred bytes and means the same URL works whether it points at
+       an old connector, a Workflows webhook, or somebody's own flow reading the
+       flat fields - rather than the setup depending on which one was chosen. */
+    attachments: [{
+      contentType: 'application/vnd.microsoft.card.adaptive',
+      content: {
+        type: 'AdaptiveCard',
+        $schema: 'http://adaptivecards.io/schemas/adaptive-card.json',
+        version: '1.4',
+        msteams: { width: 'Full' },
+        body: [
+          { type: 'TextBlock', text: title, weight: 'Bolder', size: 'Medium', wrap: true },
+          { type: 'TextBlock', text: message, wrap: true, spacing: 'Small' },
+          { type: 'FactSet', facts: facts.map(f => ({ title: f.name, value: f.value })), spacing: 'Medium' }
+        ],
+        actions: actor.email
+          ? [{ type: 'Action.OpenUrl', title: `Email ${actor.username || 'the reporter'}`, url: `mailto:${actor.email}` }]
+          : []
+      }
+    }]
   };
 }
+
+/* Sending one report through both channels, on demand.
+
+   Configuring this is two settings and a consent, and every one of them fails
+   silently from the outside: a wrong webhook URL, a token without Mail.Send, a
+   flow that is switched off. Without this, the only way to find out is to type
+   a real report and wait to see whether anything arrives - and if nothing does,
+   there is nothing to say which leg was at fault.
+
+   Admin-only, because it sends mail. */
+// The subject line is the report's first line. Kept as a function because a
+// report pasted out of Outlook arrives with CRLF endings, and a stray carriage
+// return on the end of a mail subject is what renders as a box in somebody's
+// inbox.
+function feedbackFirstLine(message) {
+  return String(message || '').split(/\r?\n/)[0].trim().slice(0, 90) || 'New feedback';
+}
+
+async function deliverFeedback({ req, category, message, context, actor }) {
+  const meta = FEEDBACK_CATEGORIES[category] || FEEDBACK_CATEGORIES.other;
+  const subject = `[Kanban ${meta.label}] ${feedbackFirstLine(message)}`;
+  const result = { emailed: false, notified: false, emailError: '', webhookError: '' };
+
+  try {
+    const token = await graphDelegatedToken(req);
+    // /me/sendMail, not the helpdesk mailbox: the connected identity can always
+    // send as itself, so this needs no Send As grant anywhere.
+    await graphRequest('/me/sendMail', token, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        message: {
+          subject,
+          body: { contentType: 'HTML', content: buildFeedbackEmailHtml({ category, message, context, actor }) },
+          toRecipients: [{ emailAddress: { address: FEEDBACK_EMAIL } }],
+          ...(actor.email ? { replyTo: [{ emailAddress: { address: actor.email } }] } : {})
+        },
+        saveToSentItems: false
+      })
+    });
+    result.emailed = true;
+  } catch (error) {
+    result.emailError = String(error?.message || error).slice(0, 300);
+    console.warn('Feedback email failed:', result.emailError);
+  }
+
+  if (FEEDBACK_WEBHOOK_URL) {
+    try {
+      await postJson(FEEDBACK_WEBHOOK_URL, buildFeedbackWebhookPayload({ category, message, context, actor }));
+      result.notified = true;
+    } catch (error) {
+      result.webhookError = String(error?.message || error).slice(0, 300);
+      console.warn('Feedback webhook failed:', result.webhookError);
+    }
+  }
+  return result;
+}
+
+async function feedbackActorFor(req) {
+  let user = null;
+  if (req.session?.userId) {
+    user = await prisma.user
+      .findUnique({ where: { id: req.session.userId }, select: { username: true, displayName: true, email: true, role: true } })
+      .catch(() => null);
+  }
+  const username = String(user?.username || req.session?.username || 'unknown');
+  return {
+    username,
+    email: normalizeEmailAddress(user?.email) || agentOwnMailboxes({ username, email: user?.email })[0] || '',
+    label: `${user?.displayName || username.toUpperCase()}${user?.role ? ` (${user.role})` : ''}`
+  };
+}
+
+app.post('/api/feedback/test', requireAdmin, feedbackLimiter, async (req, res) => {
+  const actor = await feedbackActorFor(req);
+  const context = sanitizeFeedbackContext({
+    view: 'delivery test',
+    build: APP_BUILD,
+    url: '/api/feedback/test',
+    theme: '-',
+    viewport: '-',
+    userAgent: String(req.headers['user-agent'] || '')
+  });
+  const message = [
+    `This is a delivery test for the Feedback button on the support board.`,
+    ``,
+    `If this reached Outlook, the email leg works. If it also appeared in Teams, the webhook leg works.`,
+    `Nothing is broken and nobody reported anything - the board sent this on purpose.`
+  ].join('\n');
+
+  const result = await deliverFeedback({ req, category: 'other', message, context, actor });
+  return res.json({
+    ok: result.emailed || result.notified,
+    emailed: result.emailed,
+    notified: result.notified,
+    emailTo: FEEDBACK_EMAIL,
+    webhookConfigured: !!FEEDBACK_WEBHOOK_URL,
+    // The reasons, in full, because this endpoint exists to be diagnosed by.
+    emailError: result.emailError || undefined,
+    webhookError: result.webhookError || undefined
+  });
+});
 
 app.post('/api/feedback', requireAuth, feedbackLimiter, async (req, res) => {
   const message = String(req.body?.message || '').trim();
