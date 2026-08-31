@@ -10287,9 +10287,9 @@ async function emLoadReplyCapability(force=false){
     const res=await fetch('/api/reply/from-addresses',{credentials:'include'});
     emReplyCapability=res.ok
       ?await res.json()
-      :{canSend:false,connected:false,scopeConfigured:false,addresses:[]};
+      :{canSend:false,connected:false,scopeConfigured:false,sendVia:'graph',addresses:[]};
   }catch(_){
-    emReplyCapability={canSend:false,connected:false,scopeConfigured:false,addresses:[]};
+    emReplyCapability={canSend:false,connected:false,scopeConfigured:false,sendVia:'graph',addresses:[]};
   }
   return emReplyCapability;
 }
@@ -10352,8 +10352,13 @@ function emPreferredDraftMailbox(cap){
    And an address the board is not connected as needs a Send As grant that only
    Exchange can confirm, so that is flagged as a maybe rather than promised. */
 function emReplyNoteFor(cap,ticket,address){
-  if(!cap?.connected)return{text:'Outlook is not connected - reconnect it to send from here.',cls:'em-reply-note bad'};
-  if(!cap?.scopeConfigured)return{text:'This deployment has no mail-send permission configured.',cls:'em-reply-note bad'};
+  /* When a Power Automate flow is doing the sending, neither of the two
+     warnings below is true or useful: the board holds no send credential by
+     design, and telling somebody to reconnect Outlook would send them after a
+     permission that is deliberately not there. */
+  const viaFlow = cap?.sendVia === 'flow';
+  if(!viaFlow && !cap?.connected)return{text:'Outlook is not connected - reconnect it to send from here.',cls:'em-reply-note bad'};
+  if(!viaFlow && !cap?.scopeConfigured)return{text:'This deployment has no mail-send permission configured.',cls:'em-reply-note bad'};
   const info=emReplyAddressInfo(cap,address);
   const hasThread=!ticket?.email?.isManual&&!!ticket?.email?.id;
   const bits=[];
@@ -10462,6 +10467,10 @@ function emReplyErrorMessage(status,payload){
     const asWho=payload?.connectedAddress?` Outlook is connected as ${payload.connectedAddress}.`:'';
     return`Outlook refused to send${from}.${asWho} Either that mailbox needs Send As for this address, or the connection predates the mail-send permission - reconnect Outlook (as that account, to send from it) and try again.`;
   }
+  // A flow failure is not a permission problem, and saying "reconnect Outlook"
+  // at it sends somebody to the wrong place entirely.
+  if(/^mail_flow_error_/.test(code)||/^mail_flow_error_/.test(String(payload?.detail||'')))return'The mail flow refused that send - check the Power Automate flow run history.';
+  if(code==='mail_webhook_not_configured')return'No mail flow is configured on this deployment.';
   if(code==='reply_from_not_allowed')return'That From address is not allowed on this board.';
   if(code==='reply_message_not_found')return'The original message is no longer in the mailbox - reply from Outlook instead.';
   if(code==='missing_recipients')return'Add at least one recipient.';
@@ -10497,6 +10506,11 @@ async function emSendReply(){
         // reply into, and the server sends a fresh mail instead.
         messageId:ticket.email?.isManual?'':String(ticket.email?.id||''),
         subject:ticket.email?.isManual?`Re: ${String(ticket.email?.subject||'').trim()}`.trim():'',
+        /* Not an override - a fallback. The server prefers the subject it reads
+           off the original message; this is what it uses when it cannot read
+           one, which is the normal state on a deployment that sends through a
+           flow rather than through Graph. */
+        subjectHint:(()=>{const s=String(ticket.email?.subject||'').trim();return s?(/^re:/i.test(s)?s:`Re: ${s}`):'';})(),
         from,
         to,
         cc:String(els.cc?.value||'').split(/[,;]/).map(v=>v.trim()).filter(Boolean),
@@ -10637,7 +10651,11 @@ async function sendFeedback(){
        written down but not delivered is not a failure - somebody will still see
        it - but saying "sent" over it would be a lie. */
     if(out.emailed || out.notified){
-      showToast(`Thanks - sent to ${out.to || 'the team'}`,'ok');
+      // `to` is a list now, and three addresses in a toast is noise - name the
+      // one recipient when there is one, and the count when there are more.
+      const to = Array.isArray(out.to) ? out.to : (out.to ? [out.to] : []);
+      const who = to.length === 1 ? to[0] : (to.length ? `${to.length} people on the platform team` : 'the team');
+      showToast(`Thanks - sent to ${who}`,'ok');
     }else if(out.stored){
       showToast('Recorded, but it could not be emailed yet - it is saved and will be seen','warn');
     }else{
@@ -10670,7 +10688,8 @@ async function sendFeedbackTest(){
     const out = await res.json().catch(()=>({}));
     if(res.status === 403){ showToast('Only admins can send a delivery test','warn'); return; }
     const bits = [];
-    bits.push(out.emailed ? `email to ${out.emailTo} sent` : `email failed (${out.emailError||'unknown'})`);
+    const emailTo = Array.isArray(out.emailTo) ? out.emailTo.join(', ') : (out.emailTo || 'nobody');
+    bits.push(out.emailed ? `email to ${emailTo} sent` : `email failed (${out.emailError||'unknown'})`);
     if(out.webhookConfigured) bits.push(out.notified ? 'Teams webhook posted' : `Teams failed (${out.webhookError||'unknown'})`);
     else bits.push('no Teams webhook configured');
     showToast(bits.join(' - '), out.emailed || out.notified ? 'ok' : 'warn');

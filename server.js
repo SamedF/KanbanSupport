@@ -81,6 +81,74 @@ if (M365_SECRET_LOOKS_LIKE_ID) {
 // says to reconnect Outlook rather than failing at send time.
 const M365_SCOPES = String(process.env.M365_SCOPES || 'offline_access openid profile email User.Read Mail.Read Mail.Read.Shared Mail.Send Mail.Send.Shared').trim();
 const M365_CAN_SEND_MAIL = /\bMail\.Send\b/i.test(M365_SCOPES);
+/* Sending mail without holding a credential that can send mail.
+
+   MAIL_WEBHOOK_URL is a Power Automate "When an HTTP request is received"
+   trigger whose flow does the actual Outlook send on its own connection. When
+   it is set, the board never asks Graph to send anything: it POSTs what should
+   go out and the flow sends it.
+
+   Why that is worth a second code path. A delegated Mail.Send token in this
+   process can send as the connected identity and as every mailbox Exchange
+   grants it Send As on - so whatever leaks with it is "mail as us", and the
+   board also inherits the "last person to connect owns the sending identity"
+   problem. The flow URL leaks as "post one JSON body into one flow": it cannot
+   read a mailbox, cannot change the From the flow is built with, and is revoked
+   by regenerating the trigger rather than by a tenant-wide consent change. The
+   trade is that the flow is the authority on the From address, and that its
+   failures arrive as an HTTP status rather than a Graph error.
+
+   Graph is still used for reading - bodies, attachments, the quoted original.
+   This replaces the send leg only, and only when configured. Unset, everything
+   behaves exactly as it did. */
+const MAIL_WEBHOOK_URL = String(process.env.MAIL_WEBHOOK_URL || process.env.REPLY_WEBHOOK_URL || '').trim();
+const CAN_SEND_MAIL = M365_CAN_SEND_MAIL || !!MAIL_WEBHOOK_URL;
+if (MAIL_WEBHOOK_URL) console.log('[mail] MAIL_WEBHOOK_URL is set - replies and feedback mail are sent by that flow, not by Graph.');
+
+/* One body shape for every kind of mail the board sends through the flow.
+
+   `kind` is what the flow switches on, and `mailbox`/`messageId` are what let
+   it thread a reply: a Power Automate "Reply to email (V3)" on that message id
+   keeps the conversation's real headers, which is the one thing a plain
+   "Send an email (V2)" cannot reproduce. A flow that only implements sending
+   still works - it just answers in a new thread. */
+async function sendMailViaFlow({ kind, from, mailbox, messageId, to, cc, subject, bodyHtml, replyTo, ticketId, actor }) {
+  if (!MAIL_WEBHOOK_URL) throw new Error('mail_webhook_not_configured');
+  const addresses = list => (Array.isArray(list) ? list : [])
+    .map(r => (typeof r === 'string' ? r : r?.emailAddress?.address))
+    .map(normalizeEmailAddress)
+    .filter(Boolean);
+  const to_ = addresses(to);
+  const cc_ = addresses(cc);
+  const payload = {
+    kind: kind || 'support_kanban_mail',
+    from: from || '',
+    mailbox: mailbox || '',
+    messageId: messageId || '',
+    ticketId: ticketId || '',
+    subject: subject || '',
+    bodyHtml: bodyHtml || '',
+    to: to_,
+    cc: cc_,
+    replyTo: addresses(replyTo),
+    // The same recipients as semicolon-separated strings, because that is what
+    // the Outlook actions in Power Automate take - otherwise every flow needs
+    // a join() expression somebody has to get right in the designer.
+    toLine: to_.join(';'),
+    ccLine: cc_.join(';'),
+    reporter: actor?.label || '',
+    sentBy: actor?.email || ''
+  };
+  if (!to_.length) throw new Error('missing_recipients');
+  try {
+    await postJson(MAIL_WEBHOOK_URL, payload);
+  } catch (error) {
+    // postJson reports webhook_error_<status>; renamed so the composer's error
+    // map can tell a mail-flow failure from a Teams webhook failure.
+    throw new Error(String(error?.message || error).replace(/^webhook_error_/, 'mail_flow_error_'));
+  }
+  return { to: to_, cc: cc_, subject: payload.subject };
+}
 const SUPPORT_MAILBOX = String(process.env.SUPPORT_MAILBOX || 'helpdesk@quinta.im').trim().toLowerCase();
 // Extra addresses a reply may claim to be from, on top of the two the board
 // works out by itself: the helpdesk mailbox (always allowed - it is where the
@@ -5816,10 +5884,115 @@ async function resolveReplyIdentity(req) {
    would do anyway. The composer says which of the two is about to happen.
 
    Returns what was actually sent, so the caller never has to assume. */
-async function sendTicketReply({ req, token, from, messageId, to, cc, bodyText, subject, replyAll }) {
+/* The pieces of a reply, read from the original message rather than drafted.
+
+   The Graph path below gets these for free from createReply. The flow path
+   cannot: createReply writes a draft into the helpdesk mailbox, and the whole
+   point of sending through a flow is that this process holds no mailbox write
+   right. So the same three things - the Re: subject, who the answer goes to,
+   and the quoted original - are worked out here from a plain read of the
+   message, which is the Mail.Read.Shared the board already has for showing
+   ticket bodies.
+
+   Reply-all is To: whoever wrote it, Cc: everyone else who was on it, minus our
+   own mailboxes - putting the helpdesk back on its own reply is how a support
+   inbox ends up answering itself. */
+async function buildReplyContextFromMessage(token, mailbox, messageId, { replyAll }) {
+  const select = 'subject,body,from,sender,replyTo,toRecipients,ccRecipients,sentDateTime';
+  const original = await graphGet(
+    `/users/${encodeURIComponent(mailbox)}/messages/${encodeURIComponent(messageId)}?$select=${select}`,
+    token
+  );
+  const addr = r => normalizeEmailAddress(r?.emailAddress?.address);
+  const ours = new Set([mailbox, ...REPLY_FROM_ADDRESSES]);
+  const author = (original?.replyTo || []).map(addr).filter(Boolean);
+  const from = addr(original?.from) || addr(original?.sender);
+  const to = [...new Set(author.length ? author : (from ? [from] : []))];
+  const cc = replyAll
+    ? [...new Set([...(original?.toRecipients || []), ...(original?.ccRecipients || [])].map(addr).filter(Boolean))]
+        .filter(address => !ours.has(address) && !to.includes(address))
+    : [];
+
+  const subject = String(original?.subject || '').trim();
+  const sentAt = original?.sentDateTime ? new Date(original.sentDateTime).toUTCString() : '';
+  const originalHtml = String(original?.body?.content || '');
+  // The same visual convention Outlook uses, because the client is about to
+  // read this in Outlook: a rule, who wrote it and when, then their message.
+  const quotedHtml = originalHtml
+    ? [
+        '<div style="border-top:1px solid #d0d5dd;margin:18px 0 10px;padding-top:10px;font-family:Segoe UI,Arial,sans-serif;font-size:12px;color:#667085;">',
+        from ? `<div><strong>From:</strong> ${escapeHtml(from)}</div>` : '',
+        sentAt ? `<div><strong>Sent:</strong> ${escapeHtml(sentAt)}</div>` : '',
+        subject ? `<div><strong>Subject:</strong> ${escapeHtml(subject)}</div>` : '',
+        '</div>',
+        original?.body?.contentType === 'text'
+          ? `<div style="white-space:pre-wrap;font-family:Segoe UI,Arial,sans-serif;font-size:13px;">${escapeHtml(originalHtml)}</div>`
+          : originalHtml
+      ].join('')
+    : '';
+
+  return {
+    subject: subject ? (/^re:/i.test(subject) ? subject : `Re: ${subject}`) : '',
+    to: to.map(address => ({ emailAddress: { address } })),
+    cc: cc.map(address => ({ emailAddress: { address } })),
+    quotedHtml
+  };
+}
+
+async function sendTicketReply({ req, token, from, messageId, to, cc, bodyText, subject, subjectHint, replyAll, ticketId }) {
   const mailbox = SUPPORT_MAILBOX;
   const replyHtml = replyTextToHtml(bodyText);
   const sendFromHelpdesk = from === mailbox;
+
+  /* The flow path. No draft, no Graph send: the body is built here and the flow
+     puts it on the wire from its own Outlook connection.
+
+     `messageId` is passed on rather than used, because threading is the flow's
+     job here - a "Reply to email (V3)" on that id carries the conversation's
+     real headers, which nothing this process can do without a mailbox write
+     right. If the read below fails (no consent, message deleted) the reply
+     still goes: an unquoted answer that reaches the client beats a 502. */
+  if (MAIL_WEBHOOK_URL) {
+    let context = { subject: '', to: [], cc: [], quotedHtml: '' };
+    if (messageId && token) {
+      try {
+        context = await buildReplyContextFromMessage(token, mailbox, messageId, { replyAll: replyAll && !to.length });
+      } catch (error) {
+        console.warn('Reply context not read, sending unquoted:', String(error?.message || error).slice(0, 200));
+      }
+    }
+    const resolvedTo = to.length ? to : context.to;
+    const resolvedCc = cc.length ? cc : context.cc;
+    /* subjectHint is the board's own "Re: <ticket subject>", used only when the
+       mailbox read above could not supply the real one - which is exactly the
+       case a flow-only deployment is in. It is never allowed to override a
+       subject read from the message itself. */
+    const resolvedSubject = subject || context.subject || subjectHint || 'Support ticket update';
+    if (!resolvedTo.length) throw new Error('missing_recipients');
+    const sent = await sendMailViaFlow({
+      kind: 'support_kanban_reply',
+      from,
+      mailbox,
+      messageId: sendFromHelpdesk ? (messageId || '') : '',
+      // Passed so the flow's run history says which ticket a send belongs to;
+      // finding one send among hundreds is otherwise guesswork.
+      ticketId: ticketId || '',
+      to: resolvedTo,
+      cc: resolvedCc,
+      subject: resolvedSubject,
+      bodyHtml: context.quotedHtml ? injectReplyIntoDraftHtml(context.quotedHtml, replyHtml) : replyHtml
+    });
+    return {
+      // Only the flow can thread, and only on the mailbox that holds the
+      // message - claiming otherwise would put a promise in the composer that
+      // the client's mail app then breaks.
+      threaded: !!(messageId && sendFromHelpdesk),
+      via: 'flow',
+      subject: sent.subject,
+      to: sent.to,
+      cc: sent.cc
+    };
+  }
 
   if (messageId && sendFromHelpdesk) {
     // createReplyAll only when the agent asked for it AND did not name the
@@ -5930,13 +6103,18 @@ function replyErrorResponse(res, error, context = {}) {
 app.get('/api/reply/from-addresses', requireAuth, async (req, res) => {
   const identity = await resolveReplyIdentity(req);
   return res.json({
-    canSend: identity.connected && M365_CAN_SEND_MAIL,
+    // A configured flow can send whether or not this board holds an Outlook
+    // token, which is the whole point of it.
+    canSend: MAIL_WEBHOOK_URL ? true : (identity.connected && M365_CAN_SEND_MAIL),
     connected: identity.connected,
+    // Which leg actually puts the mail on the wire, so the composer can say
+    // "reconnect Outlook" only when reconnecting Outlook would help.
+    sendVia: MAIL_WEBHOOK_URL ? 'flow' : 'graph',
     // False when the app's configured scopes never asked for Mail.Send. A
     // connection made before that scope was added is indistinguishable from
     // here (the token's own scopes are not inspected), so a send can still
     // fail with a Graph 403 telling the agent to reconnect.
-    scopeConfigured: M365_CAN_SEND_MAIL,
+    scopeConfigured: CAN_SEND_MAIL,
     // The helpdesk mailbox stays the default: it is the sender the client has
     // been corresponding with, and the only one whose reply keeps the thread's
     // real headers.
@@ -5958,6 +6136,7 @@ app.post('/api/tickets/:externalId/reply', requireAuth, replyLimiter, async (req
     const bodyText = String(req.body?.body || '').trim();
     const replyAll = req.body?.replyAll !== false;
     const subjectOverride = String(req.body?.subject || '').trim();
+    const subjectHint = String(req.body?.subjectHint || '').trim().slice(0, 300);
     if (!externalId) return res.status(400).json({ error: 'missing_ticket' });
     if (!bodyText) return res.status(400).json({ error: 'empty_reply' });
     if (bodyText.length > REPLY_BODY_MAX_CHARS) return res.status(413).json({ error: 'reply_too_long' });
@@ -5969,8 +6148,14 @@ app.post('/api/tickets/:externalId/reply', requireAuth, replyLimiter, async (req
     const cc = toGraphRecipients(req.body?.cc);
     if (!messageId && !to.length) return res.status(400).json({ error: 'missing_recipients' });
 
-    const token = await graphDelegatedToken(req);
-    const sent = await sendTicketReply({ req, token, from, messageId, to, cc, bodyText, subject: subjectOverride, replyAll });
+    /* With a flow configured the send itself needs no Graph token, so a missing
+       or expired Outlook connection must not block a reply. One is still asked
+       for, because reading the original message is what quotes it - and that
+       read failing only costs the quote. */
+    const token = MAIL_WEBHOOK_URL
+      ? await graphDelegatedToken(req).catch(() => null)
+      : await graphDelegatedToken(req);
+    const sent = await sendTicketReply({ req, token, from, messageId, to, cc, bodyText, subject: subjectOverride, subjectHint, replyAll, ticketId: externalId });
 
     const actor = String(req.session.username || '').trim().toUpperCase() || null;
     const ticketRow = await prisma.ticket.findUnique({ where: { externalId }, select: { id: true } }).catch(() => null);
@@ -5986,6 +6171,7 @@ app.post('/api/tickets/:externalId/reply', requireAuth, replyLimiter, async (req
           to: sent.to,
           cc: sent.cc,
           threaded: sent.threaded,
+          via: sent.via || 'graph',
           replyAll: !!(messageId && replyAll && !to.length),
           messageId: messageId || null,
           chars: bodyText.length
@@ -6102,7 +6288,8 @@ app.post('/api/tickets/:externalId/outlook-draft', requireAuth, replyLimiter, as
      emailed and lost is bad; a report that was never written down anywhere is
      worse. This is what makes "the email failed" a nuisance rather than a lost
      bug report.
-   - it is emailed to FEEDBACK_EMAIL, from the mailbox the board is connected to
+   - it is emailed to everyone in FEEDBACK_EMAIL, from the mailbox the board is
+     connected to
      Outlook as (/me/sendMail), so no Send As grant is needed for it to work.
      Reply-To is the reporter, so answering the mail answers them.
    - it is posted to FEEDBACK_WEBHOOK_URL if one is configured, which is how it
@@ -6111,7 +6298,21 @@ app.post('/api/tickets/:externalId/outlook-draft', requireAuth, replyLimiter, as
    The response says which of the three actually happened rather than a bare ok,
    because "sent!" over a report that went nowhere is the one outcome worth
    never printing. */
-const FEEDBACK_EMAIL = String(process.env.FEEDBACK_EMAIL || 'sfa@quinta.im').trim().toLowerCase();
+/* Who the report is emailed to. Comma, semicolon or space separated, because
+   feedback about the board is read by the people who maintain it and there is
+   more than one of them - a single address means one person's holiday is a
+   fortnight of unread bug reports. Deduplicated, and anything without an @ is
+   dropped so a stray separator cannot make Graph reject the whole send. */
+const FEEDBACK_EMAILS = (() => {
+  const configured = String(process.env.FEEDBACK_EMAIL || '')
+    .split(/[,;\s]+/)
+    .map(value => value.trim().toLowerCase())
+    .filter(value => value.includes('@'));
+  return configured.length ? [...new Set(configured)] : ['sfa@quinta.im', 'sgu@quinta.im', 'ahk@quinta.im'];
+})();
+// The first one, for the places that show a single address or that a flow
+// reads as one - the list is what actually gets mailed.
+const FEEDBACK_EMAIL = FEEDBACK_EMAILS[0];
 // A Teams incoming webhook, or a Power Automate "When an HTTP request is
 // received" URL. The payload carries both a MessageCard (which Teams renders on
 // its own) and the same fields flat at the top level (which a flow can read),
@@ -6189,6 +6390,7 @@ function buildFeedbackWebhookPayload({ category, message, context, actor }) {
     reporter: actor.label,
     reporterEmail: actor.email || '',
     recipientEmail: FEEDBACK_EMAIL,
+    recipientEmails: FEEDBACK_EMAILS,
     context,
     // Rendered by a Teams incoming webhook without a flow in between.
     '@type': 'MessageCard',
@@ -6244,28 +6446,49 @@ function feedbackFirstLine(message) {
   return String(message || '').split(/\r?\n/)[0].trim().slice(0, 90) || 'New feedback';
 }
 
+/* Mailing one report, by whichever leg this deployment actually has.
+
+   The flow first when there is one: it needs no Mail.Send consent and no
+   Outlook connection, which is exactly the state a deployment is in when the
+   Feedback button is most needed. Otherwise /me/sendMail, which sends as the
+   connected identity and so needs no Send As grant either way. */
+async function sendFeedbackEmail({ req, subject, html, actor }) {
+  if (MAIL_WEBHOOK_URL) {
+    await sendMailViaFlow({
+      kind: 'support_kanban_feedback',
+      from: '',
+      to: FEEDBACK_EMAILS,
+      subject,
+      bodyHtml: html,
+      replyTo: actor.email ? [actor.email] : [],
+      actor
+    });
+    return 'flow';
+  }
+  const token = await graphDelegatedToken(req);
+  await graphRequest('/me/sendMail', token, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      message: {
+        subject,
+        body: { contentType: 'HTML', content: html },
+        toRecipients: FEEDBACK_EMAILS.map(address => ({ emailAddress: { address } })),
+        ...(actor.email ? { replyTo: [{ emailAddress: { address: actor.email } }] } : {})
+      },
+      saveToSentItems: false
+    })
+  });
+  return 'graph';
+}
+
 async function deliverFeedback({ req, category, message, context, actor }) {
   const meta = FEEDBACK_CATEGORIES[category] || FEEDBACK_CATEGORIES.other;
   const subject = `[Kanban ${meta.label}] ${feedbackFirstLine(message)}`;
-  const result = { emailed: false, notified: false, emailError: '', webhookError: '' };
+  const result = { emailed: false, notified: false, emailError: '', webhookError: '', emailVia: '' };
 
   try {
-    const token = await graphDelegatedToken(req);
-    // /me/sendMail, not the helpdesk mailbox: the connected identity can always
-    // send as itself, so this needs no Send As grant anywhere.
-    await graphRequest('/me/sendMail', token, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        message: {
-          subject,
-          body: { contentType: 'HTML', content: buildFeedbackEmailHtml({ category, message, context, actor }) },
-          toRecipients: [{ emailAddress: { address: FEEDBACK_EMAIL } }],
-          ...(actor.email ? { replyTo: [{ emailAddress: { address: actor.email } }] } : {})
-        },
-        saveToSentItems: false
-      })
-    });
+    result.emailVia = await sendFeedbackEmail({ req, subject, html: buildFeedbackEmailHtml({ category, message, context, actor }), actor });
     result.emailed = true;
   } catch (error) {
     result.emailError = String(error?.message || error).slice(0, 300);
@@ -6299,11 +6522,17 @@ async function feedbackActorFor(req) {
   };
 }
 
+/* Wrapped, because this endpoint's whole job is to be run when delivery is
+   broken - and an async throw out of an Express handler is an unhandled
+   rejection, which on current Node ends the process. A diagnostic that takes
+   the board down when the thing it diagnoses is misconfigured is worse than no
+   diagnostic. */
 app.post('/api/feedback/test', requireAdmin, feedbackLimiter, async (req, res) => {
+ try {
   const actor = await feedbackActorFor(req);
   const context = sanitizeFeedbackContext({
     view: 'delivery test',
-    build: APP_BUILD,
+    build: APP_BUILD_VERSION,
     url: '/api/feedback/test',
     theme: '-',
     viewport: '-',
@@ -6321,12 +6550,18 @@ app.post('/api/feedback/test', requireAdmin, feedbackLimiter, async (req, res) =
     ok: result.emailed || result.notified,
     emailed: result.emailed,
     notified: result.notified,
-    emailTo: FEEDBACK_EMAIL,
+    emailTo: FEEDBACK_EMAILS,
+    emailVia: result.emailVia || undefined,
     webhookConfigured: !!FEEDBACK_WEBHOOK_URL,
     // The reasons, in full, because this endpoint exists to be diagnosed by.
     emailError: result.emailError || undefined,
     webhookError: result.webhookError || undefined
   });
+ } catch (error) {
+  const detail = String(error?.message || error).slice(0, 300);
+  console.error('Feedback delivery test failed:', detail);
+  return res.status(500).json({ ok: false, emailed: false, notified: false, emailError: detail });
+ }
 });
 
 app.post('/api/feedback', requireAuth, feedbackLimiter, async (req, res) => {
@@ -6376,23 +6611,9 @@ app.post('/api/feedback', requireAuth, feedbackLimiter, async (req, res) => {
   const subject = `[Kanban ${meta.label}] ${message.split(/\r?\n/)[0].slice(0, 90)}`;
   let emailed = false;
   let emailError = '';
+  let emailVia = '';
   try {
-    const token = await graphDelegatedToken(req);
-    // /me/sendMail, not the helpdesk mailbox: the connected identity can always
-    // send as itself, so this needs no Send As grant anywhere.
-    await graphRequest('/me/sendMail', token, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        message: {
-          subject,
-          body: { contentType: 'HTML', content: buildFeedbackEmailHtml({ category, message, context, actor }) },
-          toRecipients: [{ emailAddress: { address: FEEDBACK_EMAIL } }],
-          ...(actor.email ? { replyTo: [{ emailAddress: { address: actor.email } }] } : {})
-        },
-        saveToSentItems: false
-      })
-    });
+    emailVia = await sendFeedbackEmail({ req, subject, html: buildFeedbackEmailHtml({ category, message, context, actor }), actor });
     emailed = true;
   } catch (error) {
     emailError = String(error?.message || error).slice(0, 200);
@@ -6420,7 +6641,7 @@ app.post('/api/feedback', requireAuth, feedbackLimiter, async (req, res) => {
         where: { id: logId },
         data: {
           status: emailed || notified ? 'delivered' : 'stored_only',
-          metadata: { actor, context, emailed, notified, emailError: emailError || undefined, webhookError: webhookError || undefined }
+          metadata: { actor, context, emailed, notified, emailVia: emailVia || undefined, emailError: emailError || undefined, webhookError: webhookError || undefined }
         }
       })
       .catch(() => null);
@@ -6432,7 +6653,7 @@ app.post('/api/feedback', requireAuth, feedbackLimiter, async (req, res) => {
     emailed,
     notified,
     webhookConfigured: !!FEEDBACK_WEBHOOK_URL,
-    to: emailed ? FEEDBACK_EMAIL : null,
+    to: emailed ? FEEDBACK_EMAILS : null,
     // Only when nothing was delivered, and only the reason - the client turns
     // this into "recorded, but it could not be sent yet" rather than a silent
     // success.

@@ -197,8 +197,14 @@ SUPPORT_MAILBOX=helpdesk@quinta.im
 # SUPPORT_MAILBOX which is always offered. Each one also needs Send As granted
 # to the connected Outlook identity in Exchange, or Graph refuses the send.
 REPLY_FROM_ADDRESSES=
-# Where the header's Feedback button sends reports. Defaults to sfa@quinta.im.
-FEEDBACK_EMAIL=sfa@quinta.im
+# Optional, and the alternative to the Mail.Send consent: a Power Automate
+# "When an HTTP request is received" URL. Set it and the board sends replies and
+# Feedback mail by POSTing to that flow instead of through Graph, so this
+# deployment holds no credential that can send mail. See the section on it below.
+MAIL_WEBHOOK_URL=
+# Who the header's Feedback button mails reports to. Comma separated; every
+# address listed gets the same mail. Defaults to the three below when unset.
+FEEDBACK_EMAIL=sfa@quinta.im,sgu@quinta.im,ahk@quinta.im
 # Optional. A Teams incoming webhook, or a Power Automate "When an HTTP request
 # is received" URL, to also post each report into Teams. Empty means email only.
 FEEDBACK_WEBHOOK_URL=
@@ -209,6 +215,75 @@ HUBSPOT_REDIRECT_URI=https://YOUR_DOMAIN/auth/hubspot/callback
 ```
 
 After production deploy, run `node seed-admin.js` once if your hosting platform does not run it automatically.
+
+## Sending mail without giving the board a credential that can send mail
+
+`MAIL_WEBHOOK_URL` is the alternative to the `Mail.Send` consent below. Set it to
+a Power Automate **"When an HTTP request is received"** trigger URL and the board
+stops asking Graph to send anything - replies and Feedback mail are POSTed to
+that flow, and the flow sends them on its own Outlook connection. Unset, nothing
+changes and the Graph path described further down is used.
+
+**Why this is the safer shape.** A delegated `Mail.Send` token in this process
+can send as the connected identity and as every mailbox Exchange grants it Send
+As on, so anything that leaks it can send mail as us until the consent is pulled.
+The flow URL leaks as "post one JSON body into one flow": it cannot read a
+mailbox, cannot change the From address the flow was built with, and is revoked
+by regenerating the trigger. It is still a secret - the signature is in the URL -
+so it belongs in the platform's env store, not in a committed file.
+
+**What it costs.** The flow owns the From address, so `REPLY_FROM_ADDRESSES` and
+the per-agent From are only honoured as far as the flow chooses to honour them;
+and a failed send comes back as an HTTP status rather than a Graph error, so the
+flow's run history becomes the place failures are diagnosed.
+
+**The body the board POSTs.** One shape for every mail, with `kind` to switch on:
+
+```json
+{
+  "kind": "support_kanban_reply",
+  "from": "helpdesk@quinta.im",
+  "mailbox": "helpdesk@quinta.im",
+  "messageId": "AAMkAD...",
+  "ticketId": "",
+  "subject": "Re: Booking not syncing",
+  "bodyHtml": "<div>the agent's reply, above the quoted original</div>",
+  "to": ["client@example.com"],
+  "cc": [],
+  "replyTo": [],
+  "toLine": "client@example.com",
+  "ccLine": "",
+  "reporter": "",
+  "sentBy": ""
+}
+```
+
+`kind` is `support_kanban_reply` for a ticket reply and `support_kanban_feedback`
+for a Feedback report. `toLine`/`ccLine` are the same recipients semicolon-
+separated, because that is the shape the Outlook actions take.
+
+**The flow, in three actions.**
+
+1. **When an HTTP request is received** - paste the JSON above as the sample
+   payload so the designer generates the fields.
+2. **Condition** on `messageId` being non-empty.
+   - **true** > Outlook **"Reply to email (V3)"**, Message Id = `messageId`,
+     Body = `bodyHtml`, Is HTML on, Reply All off, To = `toLine`, Cc = `ccLine`.
+     This is the branch that keeps the thread's real headers - the same
+     `In-Reply-To`/`References` the Graph path gets from `createReply`.
+   - **false** > Outlook **"Send an email (V2)"**, To = `toLine`, Cc = `ccLine`,
+     Subject = `subject`, Body = `bodyHtml`, Is HTML on.
+3. **Response** with status 200. Without it the trigger answers 202 and the board
+   only learns that the flow accepted the request, not that the mail went.
+
+Build the flow with the connection you want mail sent from - the helpdesk
+mailbox. The board sends `messageId` only when the From is `SUPPORT_MAILBOX`,
+because a reply from any other mailbox cannot claim that conversation anyway.
+
+**What the board still needs Graph for.** Reading: ticket bodies, attachments,
+and the quoted original that goes underneath a reply. That is `Mail.Read` /
+`Mail.Read.Shared`, which is already consented. If that read fails the reply is
+still sent, without the quote, rather than failing.
 
 ## Which address a reply is sent from, and why one is refused
 
@@ -233,6 +308,10 @@ Graph will not let a draft in one mailbox claim another's conversation - so it
 goes out as a new `Re:` mail with the quoted original, which clients group by
 subject. That is exactly what replying from a personal mailbox in Outlook would
 do.
+
+**None of this applies when `MAIL_WEBHOOK_URL` is set** - the flow owns the From
+address and the Send As question goes away with it. The rest of this section is
+about the Graph path.
 
 **Why a send is refused.** There is one Outlook connection for the whole board:
 every send is made by whichever identity last signed in to Microsoft here. That
@@ -262,8 +341,15 @@ whose mailbox an unauthenticated-to-Graph session sends as.
 
 Two settings and one consent, and a button that proves whether they worked.
 
+**0. Or skip the consent entirely.** If `MAIL_WEBHOOK_URL` is set (see the
+section above), the report's email leg goes through that flow and none of the
+Outlook consent below applies - the Feedback button works on a deployment whose
+Outlook connection is broken, which is the deployment most likely to need it.
+Everything below is for the Graph path.
+
 **1. Outlook (email).** Nothing to set unless the address changes -
-`FEEDBACK_EMAIL` defaults to `sfa@quinta.im`. What it needs is the `Mail.Send`
+`FEEDBACK_EMAIL` defaults to `sfa@quinta.im,sgu@quinta.im,ahk@quinta.im`, and
+takes any comma-separated list. What it needs is the `Mail.Send`
 consent: the report is sent through `/me/sendMail`, so the identity the board is
 connected to Outlook as must hold a token carrying that scope. A connection made
 before the reply composer shipped does not. **Sign in to Microsoft again on the
@@ -287,6 +373,11 @@ ID) before reconnecting.
 - **... > Workflows > "Post to a channel when a webhook request is received"**.
 - Complete the template; it hands you an HTTP POST URL.
 - Put that URL in `FEEDBACK_WEBHOOK_URL` and restart.
+
+To notify SFA, SGU and AHK specifically rather than just the channel, add an
+**@mention** action for each of the three in that same flow before the post
+step, and put the mention tokens in the message - the webhook payload carries
+their report, but who gets pinged is the flow's decision, not the board's.
 
 Use Workflows rather than the old **Connectors > Incoming Webhook**: Microsoft
 has retired Office 365 connectors in Teams. The payload still carries the
@@ -327,7 +418,9 @@ loses it:
    `stored_only`, and its metadata records which channel worked - so a report
    nobody ever received is findable rather than indistinguishable from one that
    was read and ignored.
-2. **It is emailed** to `FEEDBACK_EMAIL` (default `sfa@quinta.im`) from the
+2. **It is emailed** to every address in `FEEDBACK_EMAIL` (default
+   `sfa@quinta.im,sgu@quinta.im,ahk@quinta.im`) - one mail with all of them on
+   it, so a reply is visible to the others - from the
    mailbox the board is connected to Outlook as, via `/me/sendMail` - so it
    needs no Send As grant anywhere, only the `Mail.Send` scope the reply
    composer already needs. Reply-To is the reporter, so answering the mail
