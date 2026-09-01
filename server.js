@@ -3950,6 +3950,7 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
     const resolvedInRange = scopedTickets.filter(t => normalizeDbStatusForBoard(t.status) === 'res');
     const resolveShiftHours = [];
     const resolveWallHours = [];
+    const breachedRows = [];
     let slaMet = 0;
     let slaBreached = 0;
     let slaUnmeasured = 0;
@@ -3958,7 +3959,21 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
       const owner = String(ticket.assignedAgent || '').trim().toUpperCase() || 'Unassigned';
       if (!agentRows[owner]) agentRows[owner] = emptyAgentRow(owner);
       if (snapshot.state === 'met') { slaMet++; agentRows[owner].slaMet++; }
-      else if (snapshot.state === 'breached') { slaBreached++; agentRows[owner].slaBreached++; }
+      else if (snapshot.state === 'breached') {
+        slaBreached++; agentRows[owner].slaBreached++;
+        breachedRows.push({
+          ticketNumber: ticket.displayNumber ? `#${String(ticket.displayNumber).padStart(4, '0')}` : null,
+          externalId: ticket.externalId,
+          subject: ticket.subject || '(no subject)',
+          company: ticket.companyName || 'Unknown',
+          agent: ticket.assignedAgent || 'Unassigned',
+          priority: ticket.priority || 'Normal',
+          status: normalizeDbStatusForBoard(ticket.status),
+          targetHours: snapshot.targetHours,
+          overdueHours: hoursFromMs(snapshot.overdueMs),
+          jira: ticket.jiraTicketKey || null
+        });
+      }
       else slaUnmeasured++;
       if (snapshot.state === 'met' || snapshot.state === 'breached') {
         resolveShiftHours.push(hoursFromMs(snapshot.shiftMs));
@@ -3966,6 +3981,7 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
       }
       resolveWallHours.push(hoursFromMs(snapshot.wallMs));
     }
+    breachedRows.sort((a, b) => b.overdueHours - a.overdueHours);
     const slaMeasured = slaMet + slaBreached;
 
     // A ticket that went back out of Resolved is work that was called done and
@@ -4036,6 +4052,7 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
         backlogOpen: openWorkTickets.length
       },
       overdueRows: overdueRows.slice(0, 25),
+      breachedRows: breachedRows.slice(0, 25),
       duplicateRows: duplicatesInRange.slice(0, 25).map(t => ({
         ticketNumber: t.displayNumber ? `#${String(t.displayNumber).padStart(4, '0')}` : null,
         externalId: t.externalId,

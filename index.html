@@ -4009,6 +4009,31 @@ textarea:focus {
   grid-template-columns: repeat(auto-fit, minmax(min(160px, 100%), 1fr)) !important;
 }
 
+[data-kpi-drilldown]:hover {
+  box-shadow: 0 4px 12px rgba(var(--shadow-rgb), 0.14);
+  transform: translateY(-1px);
+}
+[data-kpi-drilldown]:focus-visible {
+  outline: 2px solid var(--red-300);
+  outline-offset: 1px;
+}
+
+.kpi-ticket-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+}
+.kpi-ticket-row:hover {
+  background: var(--surface-soft);
+}
+.kpi-ticket-row:last-child {
+  border-bottom: none;
+}
+
 /* =========================
    Generic controls / tables / scrollbars
    ========================= */
@@ -4975,6 +5000,8 @@ th {
 </div>
 <!-- Intern com modal -->
 <div class="modal-bg" id="com-modal"><div class="modal" style="max-width:560px;"><div class="modal-head"><div style="flex:1;min-width:0;"><h2 id="com-title"></h2><div style="font-size:11px;color:var(--slate-400);margin-top:3px;" id="com-subtitle"></div></div><button class="modal-close-x" data-close="com-modal"></button></div><div class="tr-bar" id="com-tr-bar"></div><div class="com-thread" id="com-thread"></div><div class="compose-area"><div class="compose-label">Add internal comment</div><textarea class="compose-textarea" id="com-input" placeholder="e.g. Client needs to provide API credentials before we can proceed."></textarea><div class="compose-footer"><div class="tag-section"><label>Tag people:</label><div class="tag-grid" id="tag-grid"></div></div><div style="display:flex;gap:8px;align-self:flex-end;"><button class="btn-out" id="com-debug-expert">Debug Expert</button><button class="btn-primary" id="com-post">Post</button></div></div></div></div></div>
+<!-- KPI drilldown: the tickets behind a red ("bad" tone) KPI card -->
+<div class="modal-bg" id="kpi-tickets-modal"><div class="modal" style="max-width:640px;"><div class="modal-head"><h2 id="kpi-tickets-title"></h2><button class="modal-close-x" data-close="kpi-tickets-modal"></button></div><div class="modal-body-scroll" id="kpi-tickets-list"></div><div class="modal-actions"><button class="btn-out" data-close="kpi-tickets-modal">Close</button></div></div></div>
 <!-- Mentions modal -->
 <div class="modal-bg" id="mentions-modal"><div class="modal" style="max-width:600px;"><div class="modal-head"><h2 id="mentions-title"> My Alerts</h2><div style="display:flex;align-items:center;gap:8px;"><button class="btn-out" id="mark-all-read" style="font-size:11px;padding:4px 10px;">Mark all read</button><button class="modal-close-x" data-close="mentions-modal"></button></div></div><div style="font-size:12px;color:var(--slate-500);padding:8px 18px 0;" id="mentions-info"></div><div style="display:flex;flex-direction:column;padding:14px 18px;overflow-y:auto;flex:1;" id="mentions-list"></div></div></div>
 <!-- Company custom property modal -->
@@ -7699,16 +7726,67 @@ function fmtHours(h){
   if(n<48)return`${Math.round(n*10)/10}h`;
   return`${Math.round(n/24*10)/10}d`;
 }
-function kpiCard(label,value,{tone='',hint=''}={}){
+// Cards drawing attention to a problem (tone 'bad', highlighted red) carry the
+// tickets behind that number so clicking one opens them, rather than leaving
+// the agent to go hunt through a filter to find what's driving it.
+let kpiDrilldownSeq=0;
+let kpiDrilldownStore={};
+// The KPI view re-renders on a timer and on every filter change - without
+// this, every past render's row snapshots would stay reachable from this
+// module-global store for as long as the tab is open.
+function resetKpiDrilldownStore(){kpiDrilldownStore={};kpiDrilldownSeq=0;}
+function kpiCard(label,value,{tone='',hint='',rows=null}={}){
   const toneStyle=tone==='bad'?'border-color:var(--red-300);background:var(--red-50);'
     :tone==='warn'?'border-color:var(--amber-300);background:var(--amber-50);'
     :tone==='good'?'border-color:var(--green-200);background:var(--green-50);':'';
-  return`<div style="background:var(--white);border:1px solid var(--legacy-d7d7d7);border-radius:12px;padding:12px;${toneStyle}">
+  const clickable=tone==='bad'&&Array.isArray(rows);
+  let dataAttr='';
+  if(clickable){
+    const key='kd'+(kpiDrilldownSeq++);
+    kpiDrilldownStore[key]={title:label,rows};
+    dataAttr=` data-kpi-drilldown="${key}" role="button" tabindex="0"`;
+  }
+  return`<div${dataAttr} style="background:var(--white);border:1px solid var(--legacy-d7d7d7);border-radius:12px;padding:12px;${toneStyle}${clickable?'cursor:pointer;':''}">
     <div style="font-size:12px;color:var(--legacy-666);">${esc(label)}</div>
     <div style="font-family:Caladea,serif;font-size:30px;">${esc(String(value))}</div>
     ${hint?`<div style="font-size:10px;color:var(--legacy-666);margin-top:2px;">${esc(hint)}</div>`:''}
   </div>`;
 }
+function showKpiTicketsPopup(title,rows){
+  document.getElementById('kpi-tickets-title').textContent=`${title} (${rows.length})`;
+  const list=document.getElementById('kpi-tickets-list');
+  list.innerHTML=rows.length?rows.map(r=>`<div class="kpi-ticket-row" data-kpi-ticket="${esc(r.id||'')}">
+      <div style="min-width:0;">
+        <div style="font-weight:700;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${r.ticketNumber?esc(r.ticketNumber)+' ':''}${esc(r.subject||'(no subject)')}</div>
+        <div style="font-size:11px;color:var(--muted);margin-top:2px;">${esc(r.company||'')}${r.agent?'  '+esc(r.agent):''}${r.statusLabel?'  '+esc(r.statusLabel):''}</div>
+      </div>
+      <div style="font-size:11px;color:var(--red-600);font-weight:700;white-space:nowrap;">${esc(r.detail||'')}</div>
+    </div>`).join(''):'<div style="padding:20px 0;color:var(--muted);font-size:13px;">No tickets to show.</div>';
+  document.getElementById('kpi-tickets-modal').classList.add('open');
+}
+document.getElementById('kpi-tickets-list').addEventListener('click',e=>{
+  const row=e.target.closest('[data-kpi-ticket]');
+  if(!row||!row.dataset.kpiTicket)return;
+  const ticket=allTickets.find(t=>t.id===row.dataset.kpiTicket);
+  if(!ticket){showToast("Ticket isn't loaded on the board right now - it may be outside the board's current fetch window.");return;}
+  document.getElementById('kpi-tickets-modal').classList.remove('open');
+  openEmailModal(ticket);
+});
+function openKpiDrilldown(key){
+  const entry=kpiDrilldownStore[key];
+  if(entry)showKpiTicketsPopup(entry.title,entry.rows);
+}
+document.getElementById('kpi-sla-cards').addEventListener('click',e=>{
+  const card=e.target.closest('[data-kpi-drilldown]');
+  if(card)openKpiDrilldown(card.dataset.kpiDrilldown);
+});
+document.getElementById('kpi-sla-cards').addEventListener('keydown',e=>{
+  if(e.key!=='Enter'&&e.key!==' ')return;
+  const card=e.target.closest('[data-kpi-drilldown]');
+  if(!card)return;
+  e.preventDefault();
+  openKpiDrilldown(card.dataset.kpiDrilldown);
+});
 async function renderKpiView(){
   if(!currentUserCanViewAllTickets()){
     const role=currentUserRole();
@@ -7767,12 +7845,15 @@ async function renderKpiView(){
       <div style="background:var(--white);border:1px solid var(--legacy-d7d7d7);border-radius:12px;padding:12px;"><div style="font-size:12px;color:var(--legacy-666);">Tickets with CS</div><div style="font-family:Caladea,serif;font-size:30px;">${totals.ticketsWithCs||0}</div></div>
       <div style="background:var(--white);border:1px solid var(--legacy-d7d7d7);border-radius:12px;padding:12px;"><div style="font-size:12px;color:var(--legacy-666);">Jira Linked</div><div style="font-family:Caladea,serif;font-size:30px;">${totals.jiraLinked||0}</div></div>`;
     const compliance=sla.compliancePct;
+    const overdueDrilldownRows=(data.overdueRows||[]).map(r=>({id:r.externalId,ticketNumber:r.ticketNumber,subject:r.subject,company:r.company,agent:r.agent,priority:r.priority,statusLabel:COL_NAMES[r.status]||r.status,detail:fmtHours(r.overdueHours)+' overdue'}));
+    const breachedDrilldownRows=(data.breachedRows||[]).map(r=>({id:r.externalId,ticketNumber:r.ticketNumber,subject:r.subject,company:r.company,agent:r.agent,priority:r.priority,statusLabel:COL_NAMES[r.status]||r.status,detail:'Missed by '+fmtHours(r.overdueHours)}));
+    resetKpiDrilldownStore();
     document.getElementById('kpi-sla-cards').innerHTML=[
-      kpiCard('Overdue now',sla.overdue||0,{tone:(sla.overdue||0)>0?'bad':'good',hint:'Open, past SLA target'}),
+      kpiCard('Overdue now',sla.overdue||0,{tone:(sla.overdue||0)>0?'bad':'good',hint:'Open, past SLA target',rows:overdueDrilldownRows}),
       kpiCard('At risk',sla.atRisk||0,{tone:(sla.atRisk||0)>0?'warn':'',hint:'Under 25% of target left'}),
       kpiCard('SLA met',compliance===null||compliance===undefined?'-':`${compliance}%`,{
         tone:compliance===null||compliance===undefined?'':(compliance>=90?'good':compliance>=75?'warn':'bad'),
-        hint:`${sla.met||0} of ${(sla.met||0)+(sla.breached||0)} resolved in range`}),
+        hint:`${sla.met||0} of ${(sla.met||0)+(sla.breached||0)} resolved in range`,rows:breachedDrilldownRows}),
       kpiCard('Avg resolve',fmtHours(sla.avgResolveShiftHours),{hint:`Median ${fmtHours(sla.medianResolveShiftHours)} - shift time`}),
       kpiCard('Oldest open',fmtHours(sla.oldestOpenHours),{hint:'Wall clock since arrival'}),
       kpiCard('Created',flow.created||0,{hint:'In this range'}),
@@ -7906,8 +7987,10 @@ function renderKpiViewLocal(){
   const localSla=openLocal.map(t=>({t,status:getSLAStatus(t.id)})).filter(x=>x.status);
   const localOverdue=localSla.filter(x=>x.status.overdue);
   const localAtRisk=localSla.filter(x=>!x.status.overdue&&x.status.cls==='sla-urgent');
+  const localOverdueDrilldownRows=localOverdue.map(({t,status})=>({id:t.id,ticketNumber:ticketDisplayNumber(t.id),subject:t.email?.subject||'(no subject)',company:companyForTicket(t)||'Unknown',agent:ticketAssignee[t.id]||'Unassigned',priority:ticketPriority[t.id]||t.priority||'Normal',statusLabel:COL_NAMES[normalizeTicketStage(ticketState[t.id]||'new')]||'',detail:status.text}));
+  resetKpiDrilldownStore();
   document.getElementById('kpi-sla-cards').innerHTML=[
-    kpiCard('Overdue now',localOverdue.length,{tone:localOverdue.length?'bad':'good',hint:'Open, past SLA target'}),
+    kpiCard('Overdue now',localOverdue.length,{tone:localOverdue.length?'bad':'good',hint:'Open, past SLA target',rows:localOverdueDrilldownRows}),
     kpiCard('At risk',localAtRisk.length,{tone:localAtRisk.length?'warn':'',hint:'Under 25% of target left'}),
     kpiCard('Open tickets',openLocal.length,{hint:'Excluding duplicates'}),
     kpiCard('Duplicates',duplicatesInView.length,{hint:'Excluded from every figure'})
