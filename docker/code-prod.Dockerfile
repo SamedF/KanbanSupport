@@ -60,6 +60,7 @@ COPY package.json package-lock.json prisma.config.ts prismaClient.js seed-admin.
 COPY translate-local.js translate-local-worker.js ./
 COPY prisma ./prisma
 COPY public ./public
+COPY views ./views
 COPY index.html ./
 
 # nodejs (uid 1001) must own /app: it reads prisma.config.ts and Prisma's
