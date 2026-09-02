@@ -150,6 +150,27 @@ async function sendMailViaFlow({ kind, from, mailbox, messageId, to, cc, subject
   return { to: to_, cc: cc_, subject: payload.subject };
 }
 const SUPPORT_MAILBOX = String(process.env.SUPPORT_MAILBOX || 'helpdesk@quinta.im').trim().toLowerCase();
+/* The mailbox the board sends its own mail from.
+
+   Two kinds of mail leave this board and they do not belong in the same
+   mailbox. A reply to a client must come from SUPPORT_MAILBOX: it is the
+   address they have been corresponding with, and the only one whose reply keeps
+   the thread's real headers. But a password reset and a feedback report are the
+   board talking to its own team - putting those in the helpdesk mailbox's Sent
+   Items mixes internal plumbing into a client-facing correspondence record, and
+   sending them as "whichever agent last connected Outlook" means the From
+   address on a password reset changes depending on who signed in last week.
+
+   Set this to a mailbox of the board's own - kanban@quinta.im - and that stops
+   being true. Unset, transactional mail sends as the connected identity exactly
+   as it did.
+
+   On the Graph path this mailbox needs Send As granted to the connected
+   identity, unless the board is connected as that mailbox itself, in which case
+   it needs nothing. On the flow path the flow's own connection decides, and
+   this is passed as `from` for it to honour. */
+const KANBAN_MAILBOX = normalizeEmailForDb(process.env.KANBAN_MAILBOX || '') || '';
+if (KANBAN_MAILBOX) console.log(`[mail] board-owned mail (password resets, feedback) sends from ${KANBAN_MAILBOX}`);
 // Extra addresses a reply may claim to be from, on top of the two the board
 // works out by itself: the helpdesk mailbox (always allowed - it is where the
 // thread lives) and the signed-in agent's own mailbox. Use this for shared
@@ -1858,6 +1879,16 @@ async function graphGetResilient(pathname, req) {
    through /me/sendMail on the stored Outlook connection, so a broken client
    secret or a token without Mail.Send took password recovery down with
    everything else Graph-backed. The flow needs neither. */
+/* Whose sendMail endpoint board-owned mail goes through.
+
+   /me is the connected identity, which can always send as itself and so needs
+   no grant at all - the safe default, and what this did before KANBAN_MAILBOX
+   existed. Naming a mailbox instead needs Send As on it, or the board to be
+   connected as it. */
+function boardSendMailPath() {
+  return KANBAN_MAILBOX ? `/users/${encodeURIComponent(KANBAN_MAILBOX)}/sendMail` : '/me/sendMail';
+}
+
 async function sendPasswordResetEmail(recipientEmail, resetUrl) {
   const subject = 'Reset your Support Kanban password';
   const html = [
@@ -1873,11 +1904,11 @@ async function sendPasswordResetEmail(recipientEmail, resetUrl) {
   ].join('');
 
   if (MAIL_WEBHOOK_URL) {
-    await sendMailViaFlow({ kind: 'support_kanban_password_reset', to: [recipientEmail], subject, bodyHtml: html });
+    await sendMailViaFlow({ kind: 'support_kanban_password_reset', from: KANBAN_MAILBOX, to: [recipientEmail], subject, bodyHtml: html });
     return 'flow';
   }
   const token = await graphDelegatedTokenFromStore();
-  await graphRequest('/me/sendMail', token, {
+  await graphRequest(boardSendMailPath(), token, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -6498,7 +6529,7 @@ async function sendFeedbackEmail({ req, subject, html, actor }) {
   if (MAIL_WEBHOOK_URL) {
     await sendMailViaFlow({
       kind: 'support_kanban_feedback',
-      from: '',
+      from: KANBAN_MAILBOX,
       to: FEEDBACK_EMAILS,
       subject,
       bodyHtml: html,
@@ -6508,7 +6539,7 @@ async function sendFeedbackEmail({ req, subject, html, actor }) {
     return 'flow';
   }
   const token = await graphDelegatedToken(req);
-  await graphRequest('/me/sendMail', token, {
+  await graphRequest(boardSendMailPath(), token, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({

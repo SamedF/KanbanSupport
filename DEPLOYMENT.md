@@ -202,6 +202,10 @@ REPLY_FROM_ADDRESSES=
 # Feedback mail by POSTing to that flow instead of through Graph, so this
 # deployment holds no credential that can send mail. See the section on it below.
 MAIL_WEBHOOK_URL=
+# Optional. The mailbox the board sends its OWN mail from - password resets and
+# feedback reports, never client replies. Unset, those send as whichever
+# identity last connected Outlook. See the section on it below.
+KANBAN_MAILBOX=
 # Who the header's Feedback button mails reports to. Comma separated; every
 # address listed gets the same mail. Defaults to the three below when unset.
 FEEDBACK_EMAIL=sfa@quinta.im,sgu@quinta.im,ahk@quinta.im
@@ -284,6 +288,44 @@ because a reply from any other mailbox cannot claim that conversation anyway.
 and the quoted original that goes underneath a reply. That is `Mail.Read` /
 `Mail.Read.Shared`, which is already consented. If that read fails the reply is
 still sent, without the quote, rather than failing.
+
+## Giving the board a mailbox of its own
+
+`KANBAN_MAILBOX` is the address the board sends *its own* mail from - password
+resets and feedback reports. It does not affect replies to clients.
+
+That split is the point. A reply must come from `SUPPORT_MAILBOX`: it is the
+address the client has been corresponding with, and the only one whose reply
+keeps the thread's real headers. A password reset is the opposite kind of mail -
+the board talking to its own team - and it does not belong in a client-facing
+mailbox's Sent Items. Unset, that mail sends as whichever identity last
+connected Outlook, which means the From address on a password reset changes
+depending on who signed in last week.
+
+```
+KANBAN_MAILBOX=kanban@quinta.im
+```
+
+**Which kind of mailbox to create.** It depends on which send path you use:
+
+- **With `MAIL_WEBHOOK_URL` (the flow):** a **shared mailbox** is enough, and
+  shared mailboxes need no licence. Build the flow with a licensed account that
+  has Send As on it, and set the "From (Send as)" field in "Send an email (V2)"
+  to the shared mailbox. Nothing signs in as the board.
+- **On the Graph path:** the mailbox must either have Send As granted to the
+  connected identity, or the board must be connected to Outlook *as* that
+  mailbox - which needs a licensed account, because a shared mailbox cannot sign
+  in interactively.
+
+Connecting the board as its own account is also what fixes the "last person to
+connect owns the sending identity" problem described below: nobody's personal
+sign-in overwrites it, because it is not a person.
+
+**What it does not do.** It does not remove the need for a permission. A mailbox
+is an address, not an authorisation - it still needs either the `Mail.Send`
+consent or the flow. And do not grant this mailbox Send As on the helpdesk
+mailbox: that hands back exactly the blast radius that keeping them separate was
+meant to remove.
 
 ## Which address a reply is sent from, and why one is refused
 
