@@ -7726,24 +7726,27 @@ function fmtHours(h){
   if(n<48)return`${Math.round(n*10)/10}h`;
   return`${Math.round(n/24*10)/10}d`;
 }
-// Cards drawing attention to a problem (tone 'bad', highlighted red) carry the
-// tickets behind that number so clicking one opens them, rather than leaving
-// the agent to go hunt through a filter to find what's driving it.
+// Every card carries the tickets behind its number so clicking one opens
+// them, rather than leaving the agent to go hunt through a filter to find
+// what's driving it. `category` cards fetch on demand from the server
+// (matching the currently active KPI filters); `rows` cards get their list
+// pre-supplied (used by the offline/local fallback view, which has no
+// server to ask).
 let kpiDrilldownSeq=0;
 let kpiDrilldownStore={};
 // The KPI view re-renders on a timer and on every filter change - without
 // this, every past render's row snapshots would stay reachable from this
 // module-global store for as long as the tab is open.
 function resetKpiDrilldownStore(){kpiDrilldownStore={};kpiDrilldownSeq=0;}
-function kpiCard(label,value,{tone='',hint='',rows=null}={}){
+function kpiCard(label,value,{tone='',hint='',rows=null,category=null}={}){
   const toneStyle=tone==='bad'?'border-color:var(--red-300);background:var(--red-50);'
     :tone==='warn'?'border-color:var(--amber-300);background:var(--amber-50);'
     :tone==='good'?'border-color:var(--green-200);background:var(--green-50);':'';
-  const clickable=tone==='bad'&&Array.isArray(rows);
+  const clickable=Array.isArray(rows)||!!category;
   let dataAttr='';
   if(clickable){
     const key='kd'+(kpiDrilldownSeq++);
-    kpiDrilldownStore[key]={title:label,rows};
+    kpiDrilldownStore[key]={title:label,rows,category};
     dataAttr=` data-kpi-drilldown="${key}" role="button" tabindex="0"`;
   }
   return`<div${dataAttr} style="background:var(--white);border:1px solid var(--legacy-d7d7d7);border-radius:12px;padding:12px;${toneStyle}${clickable?'cursor:pointer;':''}">
@@ -7752,9 +7755,22 @@ function kpiCard(label,value,{tone='',hint='',rows=null}={}){
     ${hint?`<div style="font-size:10px;color:var(--legacy-666);margin-top:2px;">${esc(hint)}</div>`:''}
   </div>`;
 }
-function showKpiTicketsPopup(title,rows){
-  document.getElementById('kpi-tickets-title').textContent=`${title} (${rows.length})`;
+function showKpiTicketsPopup(title,rows,{loading=false,error=null,total=null}={}){
+  document.getElementById('kpi-tickets-modal').classList.add('open');
   const list=document.getElementById('kpi-tickets-list');
+  if(loading){
+    document.getElementById('kpi-tickets-title').textContent=`${title}`;
+    list.innerHTML='<div style="padding:20px 0;color:var(--muted);font-size:13px;">Loading...</div>';
+    return;
+  }
+  if(error){
+    document.getElementById('kpi-tickets-title').textContent=`${title}`;
+    list.innerHTML=`<div style="padding:20px 0;color:var(--red-600);font-size:13px;">Failed to load: ${esc(error)}</div>`;
+    return;
+  }
+  const count=total!==null?total:rows.length;
+  const truncated=total!==null&&total>rows.length;
+  document.getElementById('kpi-tickets-title').textContent=`${title} (${count}${truncated?`, showing ${rows.length}`:''})`;
   list.innerHTML=rows.length?rows.map(r=>`<div class="kpi-ticket-row" data-kpi-ticket="${esc(r.id||'')}">
       <div style="min-width:0;">
         <div style="font-weight:700;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${r.ticketNumber?esc(r.ticketNumber)+' ':''}${esc(r.subject||'(no subject)')}</div>
@@ -7762,7 +7778,6 @@ function showKpiTicketsPopup(title,rows){
       </div>
       <div style="font-size:11px;color:var(--red-600);font-weight:700;white-space:nowrap;">${esc(r.detail||'')}</div>
     </div>`).join(''):'<div style="padding:20px 0;color:var(--muted);font-size:13px;">No tickets to show.</div>';
-  document.getElementById('kpi-tickets-modal').classList.add('open');
 }
 document.getElementById('kpi-tickets-list').addEventListener('click',e=>{
   const row=e.target.closest('[data-kpi-ticket]');
@@ -7772,15 +7787,50 @@ document.getElementById('kpi-tickets-list').addEventListener('click',e=>{
   document.getElementById('kpi-tickets-modal').classList.remove('open');
   openEmailModal(ticket);
 });
-function openKpiDrilldown(key){
+// A rapid second click (a different card, or the same one again) must win
+// over a still-in-flight earlier fetch - otherwise a slower first response
+// can land after a faster second one and silently overwrite that popup with
+// the wrong card's tickets.
+let kpiDrilldownRequestSeq=0;
+async function openKpiDrilldown(key){
   const entry=kpiDrilldownStore[key];
-  if(entry)showKpiTicketsPopup(entry.title,entry.rows);
+  if(!entry)return;
+  if(Array.isArray(entry.rows)){
+    kpiDrilldownRequestSeq++;
+    showKpiTicketsPopup(entry.title,entry.rows);
+    return;
+  }
+  const requestId=++kpiDrilldownRequestSeq;
+  showKpiTicketsPopup(entry.title,[],{loading:true});
+  try{
+    const params=new URLSearchParams({category:entry.category,range:kpiTimeFilter,team:kpiTeamFilter,agent:kpiAgentFilter,company:activeCompany||'all',jiraOnly:activeJira?'true':'false'});
+    const res=await fetch('/api/tickets/kpis/drilldown?'+params.toString(),{credentials:'include'});
+    const data=await res.json().catch(()=>({}));
+    if(!res.ok)throw new Error(data?.error||'drilldown_fetch_failed');
+    if(requestId!==kpiDrilldownRequestSeq)return;
+    const rows=(data.rows||[]).map(r=>({id:r.externalId,ticketNumber:r.ticketNumber,subject:r.subject,company:r.company,agent:r.agent,priority:r.priority,statusLabel:COL_NAMES[r.status]||r.status,detail:r.detail||''}));
+    showKpiTicketsPopup(entry.title,rows,{total:data.total});
+  }catch(error){
+    if(requestId!==kpiDrilldownRequestSeq)return;
+    showKpiTicketsPopup(entry.title,[],{error:String(error?.message||error)});
+  }
 }
 document.getElementById('kpi-sla-cards').addEventListener('click',e=>{
   const card=e.target.closest('[data-kpi-drilldown]');
   if(card)openKpiDrilldown(card.dataset.kpiDrilldown);
 });
 document.getElementById('kpi-sla-cards').addEventListener('keydown',e=>{
+  if(e.key!=='Enter'&&e.key!==' ')return;
+  const card=e.target.closest('[data-kpi-drilldown]');
+  if(!card)return;
+  e.preventDefault();
+  openKpiDrilldown(card.dataset.kpiDrilldown);
+});
+document.getElementById('kpi-status-cards').addEventListener('click',e=>{
+  const card=e.target.closest('[data-kpi-drilldown]');
+  if(card)openKpiDrilldown(card.dataset.kpiDrilldown);
+});
+document.getElementById('kpi-status-cards').addEventListener('keydown',e=>{
   if(e.key!=='Enter'&&e.key!==' ')return;
   const card=e.target.closest('[data-kpi-drilldown]');
   if(!card)return;
@@ -7835,31 +7885,31 @@ async function renderKpiView(){
     document.getElementById('kpi-range-label').textContent=`Live DB tickets: ${totals.tickets||0} current (range: ${totals.rangeTickets||0})${dupNote}  ${data.range?.label||'Range'}  ${start} to ${end}  ${teamLabel}  ${agentLabel}`;
     kpiLastLoadedAt=Date.now();
     updateKpiFreshnessLabel();
-    document.getElementById('kpi-status-cards').innerHTML=`
-      <div style="background:var(--white);border:1px solid var(--legacy-d7d7d7);border-radius:12px;padding:12px;"><div style="font-size:12px;color:var(--legacy-666);">New</div><div style="font-family:Caladea,serif;font-size:30px;">${s.new||0}</div></div>
-      <div style="background:var(--white);border:1px solid var(--legacy-d7d7d7);border-radius:12px;padding:12px;"><div style="font-size:12px;color:var(--legacy-666);">In Progress</div><div style="font-family:Caladea,serif;font-size:30px;">${s.inp||0}</div></div>
-      <div style="background:var(--white);border:1px solid var(--legacy-d7d7d7);border-radius:12px;padding:12px;"><div style="font-size:12px;color:var(--legacy-666);">Waiting On Us</div><div style="font-family:Caladea,serif;font-size:30px;">${s.wus||0}</div></div>
-      <div style="background:var(--white);border:1px solid var(--legacy-d7d7d7);border-radius:12px;padding:12px;"><div style="font-size:12px;color:var(--legacy-666);">Due for test</div><div style="font-family:Caladea,serif;font-size:30px;">${s.dft||0}</div></div>
-      <div style="background:var(--white);border:1px solid var(--legacy-d7d7d7);border-radius:12px;padding:12px;"><div style="font-size:12px;color:var(--legacy-666);">Waiting On Contact</div><div style="font-family:Caladea,serif;font-size:30px;">${s.wct||0}</div></div>
-      <div style="background:var(--white);border:1px solid var(--legacy-d7d7d7);border-radius:12px;padding:12px;"><div style="font-size:12px;color:var(--legacy-666);">Resolved</div><div style="font-family:Caladea,serif;font-size:30px;">${s.res||0}</div></div>
-      <div style="background:var(--white);border:1px solid var(--legacy-d7d7d7);border-radius:12px;padding:12px;"><div style="font-size:12px;color:var(--legacy-666);">Tickets with CS</div><div style="font-family:Caladea,serif;font-size:30px;">${totals.ticketsWithCs||0}</div></div>
-      <div style="background:var(--white);border:1px solid var(--legacy-d7d7d7);border-radius:12px;padding:12px;"><div style="font-size:12px;color:var(--legacy-666);">Jira Linked</div><div style="font-family:Caladea,serif;font-size:30px;">${totals.jiraLinked||0}</div></div>`;
     const compliance=sla.compliancePct;
     const overdueDrilldownRows=(data.overdueRows||[]).map(r=>({id:r.externalId,ticketNumber:r.ticketNumber,subject:r.subject,company:r.company,agent:r.agent,priority:r.priority,statusLabel:COL_NAMES[r.status]||r.status,detail:fmtHours(r.overdueHours)+' overdue'}));
-    const breachedDrilldownRows=(data.breachedRows||[]).map(r=>({id:r.externalId,ticketNumber:r.ticketNumber,subject:r.subject,company:r.company,agent:r.agent,priority:r.priority,statusLabel:COL_NAMES[r.status]||r.status,detail:'Missed by '+fmtHours(r.overdueHours)}));
     resetKpiDrilldownStore();
+    document.getElementById('kpi-status-cards').innerHTML=[
+      kpiCard('New',s.new||0,{category:'new'}),
+      kpiCard('In Progress',s.inp||0,{category:'inp'}),
+      kpiCard('Waiting On Us',s.wus||0,{category:'wus'}),
+      kpiCard('Due for test',s.dft||0,{category:'dft'}),
+      kpiCard('Waiting On Contact',s.wct||0,{category:'wct'}),
+      kpiCard('Resolved',s.res||0,{category:'res'}),
+      kpiCard('Tickets with CS',totals.ticketsWithCs||0,{category:'ticketsWithCs'}),
+      kpiCard('Jira Linked',totals.jiraLinked||0,{category:'jiraLinked'})
+    ].join('');
     document.getElementById('kpi-sla-cards').innerHTML=[
       kpiCard('Overdue now',sla.overdue||0,{tone:(sla.overdue||0)>0?'bad':'good',hint:'Open, past SLA target',rows:overdueDrilldownRows}),
-      kpiCard('At risk',sla.atRisk||0,{tone:(sla.atRisk||0)>0?'warn':'',hint:'Under 25% of target left'}),
+      kpiCard('At risk',sla.atRisk||0,{tone:(sla.atRisk||0)>0?'warn':'',hint:'Under 25% of target left',category:'atRisk'}),
       kpiCard('SLA met',compliance===null||compliance===undefined?'-':`${compliance}%`,{
         tone:compliance===null||compliance===undefined?'':(compliance>=90?'good':compliance>=75?'warn':'bad'),
-        hint:`${sla.met||0} of ${(sla.met||0)+(sla.breached||0)} resolved in range`,rows:breachedDrilldownRows}),
-      kpiCard('Avg resolve',fmtHours(sla.avgResolveShiftHours),{hint:`Median ${fmtHours(sla.medianResolveShiftHours)} - shift time`}),
-      kpiCard('Oldest open',fmtHours(sla.oldestOpenHours),{hint:'Wall clock since arrival'}),
-      kpiCard('Created',flow.created||0,{hint:'In this range'}),
-      kpiCard('Resolved',flow.resolved||0,{hint:`Net ${(flow.net||0)>0?'+':''}${flow.net||0} vs created`,tone:(flow.net||0)>0?'warn':''}),
-      kpiCard('Reopened',flow.reopened||0,{tone:(flow.reopened||0)>0?'warn':'',hint:'Left Resolved again'}),
-      kpiCard('Duplicates',totals.duplicates||0,{hint:`${totals.duplicatesResolvedInRange||0} resolved in range, not counted`})
+        hint:`${sla.met||0} of ${(sla.met||0)+(sla.breached||0)} resolved in range`,category:'slaMeasured'}),
+      kpiCard('Avg resolve',fmtHours(sla.avgResolveShiftHours),{hint:`Median ${fmtHours(sla.medianResolveShiftHours)} - shift time`,category:'slaMeasured'}),
+      kpiCard('Oldest open',fmtHours(sla.oldestOpenHours),{hint:'Wall clock since arrival',category:'oldestOpen'}),
+      kpiCard('Created',flow.created||0,{hint:'In this range',category:'created'}),
+      kpiCard('Resolved',flow.resolved||0,{hint:`Net ${(flow.net||0)>0?'+':''}${flow.net||0} vs created`,tone:(flow.net||0)>0?'warn':'',category:'resolved'}),
+      kpiCard('Reopened',flow.reopened||0,{tone:(flow.reopened||0)>0?'warn':'',hint:'Left Resolved again',category:'reopened'}),
+      kpiCard('Duplicates',totals.duplicates||0,{hint:`${totals.duplicatesResolvedInRange||0} resolved in range, not counted`,category:'duplicates'})
     ].join('');
     document.getElementById('kpi-overdue-rows').innerHTML=(data.overdueRows||[]).length
       ?data.overdueRows.map(r=>`<tr style="border-bottom:1px solid var(--legacy-f0f0f0);">
@@ -7987,13 +8037,14 @@ function renderKpiViewLocal(){
   const localSla=openLocal.map(t=>({t,status:getSLAStatus(t.id)})).filter(x=>x.status);
   const localOverdue=localSla.filter(x=>x.status.overdue);
   const localAtRisk=localSla.filter(x=>!x.status.overdue&&x.status.cls==='sla-urgent');
-  const localOverdueDrilldownRows=localOverdue.map(({t,status})=>({id:t.id,ticketNumber:ticketDisplayNumber(t.id),subject:t.email?.subject||'(no subject)',company:companyForTicket(t)||'Unknown',agent:ticketAssignee[t.id]||'Unassigned',priority:ticketPriority[t.id]||t.priority||'Normal',statusLabel:COL_NAMES[normalizeTicketStage(ticketState[t.id]||'new')]||'',detail:status.text}));
+  const localTicketRow=(t,detail)=>({id:t.id,ticketNumber:ticketDisplayNumber(t.id),subject:t.email?.subject||'(no subject)',company:companyForTicket(t)||'Unknown',agent:ticketAssignee[t.id]||'Unassigned',priority:ticketPriority[t.id]||t.priority||'Normal',statusLabel:COL_NAMES[normalizeTicketStage(ticketState[t.id]||'new')]||'',detail:detail||''});
+  const localOverdueDrilldownRows=localOverdue.map(({t,status})=>localTicketRow(t,status.text));
   resetKpiDrilldownStore();
   document.getElementById('kpi-sla-cards').innerHTML=[
     kpiCard('Overdue now',localOverdue.length,{tone:localOverdue.length?'bad':'good',hint:'Open, past SLA target',rows:localOverdueDrilldownRows}),
-    kpiCard('At risk',localAtRisk.length,{tone:localAtRisk.length?'warn':'',hint:'Under 25% of target left'}),
-    kpiCard('Open tickets',openLocal.length,{hint:'Excluding duplicates'}),
-    kpiCard('Duplicates',duplicatesInView.length,{hint:'Excluded from every figure'})
+    kpiCard('At risk',localAtRisk.length,{tone:localAtRisk.length?'warn':'',hint:'Under 25% of target left',rows:localAtRisk.map(({t,status})=>localTicketRow(t,status.text))}),
+    kpiCard('Open tickets',openLocal.length,{hint:'Excluding duplicates',rows:openLocal.map(t=>localTicketRow(t))}),
+    kpiCard('Duplicates',duplicatesInView.length,{hint:'Excluded from every figure',rows:duplicatesInView.map(t=>localTicketRow(t,'Duplicate'))})
   ].join('');
   document.getElementById('kpi-overdue-rows').innerHTML=localOverdue.length
     ?localOverdue.sort((a,b)=>(b.status.shiftMs||0)-(a.status.shiftMs||0)).slice(0,25).map(({t,status})=>`<tr style="border-bottom:1px solid var(--legacy-f0f0f0);">
@@ -8015,15 +8066,17 @@ function renderKpiViewLocal(){
         <td style="padding:8px 10px;">${esc(ticketDisplayNumber(duplicateMasterId(t.id)))}</td>
       </tr>`).join('')
     :'<tr><td colspan="5" style="padding:12px 10px;color:var(--legacy-666);">No duplicates marked.</td></tr>';
-  document.getElementById('kpi-status-cards').innerHTML=`
-    <div style="background:var(--white);border:1px solid var(--legacy-d7d7d7);border-radius:12px;padding:12px;"><div style="font-size:12px;color:var(--legacy-666);">New</div><div style="font-family:Caladea,serif;font-size:30px;">${statusCounts.new}</div></div>
-    <div style="background:var(--white);border:1px solid var(--legacy-d7d7d7);border-radius:12px;padding:12px;"><div style="font-size:12px;color:var(--legacy-666);">In Progress</div><div style="font-family:Caladea,serif;font-size:30px;">${statusCounts.inp}</div></div>
-    <div style="background:var(--white);border:1px solid var(--legacy-d7d7d7);border-radius:12px;padding:12px;"><div style="font-size:12px;color:var(--legacy-666);">Waiting On Us</div><div style="font-family:Caladea,serif;font-size:30px;">${statusCounts.wus}</div></div>
-    <div style="background:var(--white);border:1px solid var(--legacy-d7d7d7);border-radius:12px;padding:12px;"><div style="font-size:12px;color:var(--legacy-666);">Due for test</div><div style="font-family:Caladea,serif;font-size:30px;">${statusCounts.dft}</div></div>
-    <div style="background:var(--white);border:1px solid var(--legacy-d7d7d7);border-radius:12px;padding:12px;"><div style="font-size:12px;color:var(--legacy-666);">Waiting On Contact</div><div style="font-family:Caladea,serif;font-size:30px;">${statusCounts.wct}</div></div>
-    <div style="background:var(--white);border:1px solid var(--legacy-d7d7d7);border-radius:12px;padding:12px;"><div style="font-size:12px;color:var(--legacy-666);">Resolved</div><div style="font-family:Caladea,serif;font-size:30px;">${statusCounts.res}</div></div>
-    <div style="background:var(--white);border:1px solid var(--legacy-d7d7d7);border-radius:12px;padding:12px;"><div style="font-size:12px;color:var(--legacy-666);">Tickets with CS</div><div style="font-family:Caladea,serif;font-size:30px;">${ticketsWithCs}</div></div>
-    <div style="background:var(--white);border:1px solid var(--legacy-d7d7d7);border-radius:12px;padding:12px;"><div style="font-size:12px;color:var(--legacy-666);">Unique CS</div><div style="font-family:Caladea,serif;font-size:30px;">${uniqueCsCount}</div></div>`;
+  const inRangeByStage=stage=>inRange.filter(t=>normalizeTicketStage(ticketState[t.id]||'new')===stage).map(t=>localTicketRow(t));
+  document.getElementById('kpi-status-cards').innerHTML=[
+    kpiCard('New',statusCounts.new,{rows:inRangeByStage('new')}),
+    kpiCard('In Progress',statusCounts.inp,{rows:inRangeByStage('inp')}),
+    kpiCard('Waiting On Us',statusCounts.wus,{rows:inRangeByStage('wus')}),
+    kpiCard('Due for test',statusCounts.dft,{rows:inRangeByStage('dft')}),
+    kpiCard('Waiting On Contact',statusCounts.wct,{rows:inRangeByStage('wct')}),
+    kpiCard('Resolved',statusCounts.res,{rows:inRangeByStage('res')}),
+    kpiCard('Tickets with CS',ticketsWithCs,{rows:inRange.filter(t=>ticketFilterAgentValues(t).csOwner).map(t=>localTicketRow(t,ticketFilterAgentValues(t).csOwner))}),
+    kpiCard('Unique CS',uniqueCsCount,{})
+  ].join('');
   const rows=Object.values(agentRows).sort((a,b)=>b.total-a.total||a.agent.localeCompare(b.agent));
   const maxStatus=Math.max(1,statusCounts.new,statusCounts.inp,statusCounts.wus,statusCounts.dft,statusCounts.wct,statusCounts.res);
   document.getElementById('kpi-status-chart').innerHTML=`
