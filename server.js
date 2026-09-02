@@ -3832,82 +3832,105 @@ app.put('/api/tickets/:externalId/body', requireAuth, async (req, res) => {
     return res.status(500).json({ error: String(error.message || error) });
   }
 });
+// Shared by /api/tickets/kpis and /api/tickets/kpis/drilldown so the two
+// endpoints can never quietly drift apart on who is allowed to see what -
+// accessWhere carries the CS/support/admin scoping, and a drilldown built
+// from a second, hand-copied version of that logic would be one edit away
+// from leaking tickets outside a user's permitted scope.
+const KPI_TICKET_SELECT = {
+  id: true,
+  externalId: true,
+  displayNumber: true,
+  subject: true,
+  status: true,
+  priority: true,
+  category: true,
+  assignedAgent: true,
+  csAgent: true,
+  companyName: true,
+  senderEmail: true,
+  jiraTicketKey: true,
+  duplicateOfExternalId: true,
+  createdAt: true,
+  updatedAt: true,
+  resolvedAt: true
+};
+async function loadKpiWorkingSet(req) {
+  const bounds = kpiDateBounds(req.query.range);
+  const role = normalizeRole(req.session.role) || 'support';
+  const username = String(req.session.username || '').trim().toUpperCase();
+  const team = String(req.query.team || 'all').trim().toLowerCase();
+  const agent = String(req.query.agent || 'all').trim().toUpperCase();
+  const company = String(req.query.company || 'all').trim();
+  const jiraOnly = String(req.query.jiraOnly || '').toLowerCase() === 'true';
+
+  const baseWhere = {
+    NOT: [{ category: { equals: 'Spam', mode: 'insensitive' } }]
+  };
+  if (company && company !== 'all') baseWhere.companyName = company;
+  if (jiraOnly) baseWhere.jiraTicketKey = { not: null };
+
+  const accessWhere = {};
+  if (role === 'cs') accessWhere.csAgent = username;
+  else if (role === 'support') accessWhere.assignedAgent = username;
+  else if (agent && agent !== 'ALL') {
+    if (CS_AGENT_CODES.has(agent)) accessWhere.csAgent = agent;
+    else if (SUPPORT_AGENT_CODES.has(agent)) accessWhere.assignedAgent = agent;
+    else accessWhere.OR = [{ csAgent: agent }, { assignedAgent: agent }];
+  } else if (team === 'cs') {
+    accessWhere.csAgent = { in: Array.from(CS_AGENT_CODES) };
+  } else if (team === 'support') {
+    accessWhere.assignedAgent = { in: Array.from(SUPPORT_AGENT_CODES) };
+  }
+  const rangeWhere = {
+    OR: [
+      { createdAt: { gte: bounds.start, lte: bounds.end } },
+      { updatedAt: { gte: bounds.start, lte: bounds.end } },
+      { resolvedAt: { gte: bounds.start, lte: bounds.end } }
+    ]
+  };
+  const statusWhere = { AND: [baseWhere, accessWhere] };
+  const where = { AND: [baseWhere, accessWhere, rangeWhere] };
+
+  const tickets = await prisma.ticket.findMany({
+    where,
+    select: KPI_TICKET_SELECT,
+    orderBy: [{ createdAt: 'desc' }]
+  });
+  const statusTickets = await prisma.ticket.findMany({
+    where: statusWhere,
+    select: KPI_TICKET_SELECT
+  });
+  const scopedTicketsAll = tickets.filter(ticket => kpiTicketInRange(ticket, bounds));
+
+  // Duplicates are held back from every figure that counts work. They are
+  // still real tickets sitting on the board, so they are reported on their
+  // own rather than quietly dropped: "12 resolved, 3 of them duplicates" is
+  // the honest version of what used to read as "15 resolved".
+  const isDuplicate = t => !!t.duplicateOfExternalId;
+  const duplicatesOpen = statusTickets.filter(isDuplicate);
+  const duplicatesInRange = scopedTicketsAll.filter(isDuplicate);
+  const scopedTickets = scopedTicketsAll.filter(t => !isDuplicate(t));
+  const workTickets = statusTickets.filter(t => !isDuplicate(t));
+
+  return { bounds, team, agent, company, jiraOnly, baseWhere, accessWhere, scopedTickets, workTickets, duplicatesOpen, duplicatesInRange };
+}
+function kpiDrilldownRow(t, detail) {
+  return {
+    ticketNumber: t.displayNumber ? `#${String(t.displayNumber).padStart(4, '0')}` : null,
+    externalId: t.externalId,
+    subject: t.subject || '(no subject)',
+    company: t.companyName || 'Unknown',
+    agent: t.assignedAgent || 'Unassigned',
+    priority: t.priority || 'Normal',
+    status: normalizeDbStatusForBoard(t.status),
+    jira: t.jiraTicketKey || null,
+    detail: detail || null
+  };
+}
 app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
   try {
-    const bounds = kpiDateBounds(req.query.range);
-    const role = normalizeRole(req.session.role) || 'support';
-    const username = String(req.session.username || '').trim().toUpperCase();
-    const team = String(req.query.team || 'all').trim().toLowerCase();
-    const agent = String(req.query.agent || 'all').trim().toUpperCase();
-    const company = String(req.query.company || 'all').trim();
-    const jiraOnly = String(req.query.jiraOnly || '').toLowerCase() === 'true';
-
-    const baseWhere = {
-      NOT: [{ category: { equals: 'Spam', mode: 'insensitive' } }]
-    };
-    if (company && company !== 'all') baseWhere.companyName = company;
-    if (jiraOnly) baseWhere.jiraTicketKey = { not: null };
-
-    const accessWhere = {};
-    if (role === 'cs') accessWhere.csAgent = username;
-    else if (role === 'support') accessWhere.assignedAgent = username;
-    else if (agent && agent !== 'ALL') {
-      if (CS_AGENT_CODES.has(agent)) accessWhere.csAgent = agent;
-      else if (SUPPORT_AGENT_CODES.has(agent)) accessWhere.assignedAgent = agent;
-      else accessWhere.OR = [{ csAgent: agent }, { assignedAgent: agent }];
-    } else if (team === 'cs') {
-      accessWhere.csAgent = { in: Array.from(CS_AGENT_CODES) };
-    } else if (team === 'support') {
-      accessWhere.assignedAgent = { in: Array.from(SUPPORT_AGENT_CODES) };
-    }
-    const rangeWhere = {
-      OR: [
-        { createdAt: { gte: bounds.start, lte: bounds.end } },
-        { updatedAt: { gte: bounds.start, lte: bounds.end } },
-        { resolvedAt: { gte: bounds.start, lte: bounds.end } }
-      ]
-    };
-    const statusWhere = { AND: [baseWhere, accessWhere] };
-    const where = { AND: [baseWhere, accessWhere, rangeWhere] };
-
-    const kpiSelect = {
-      id: true,
-      externalId: true,
-      displayNumber: true,
-      subject: true,
-      status: true,
-      priority: true,
-      category: true,
-      assignedAgent: true,
-      csAgent: true,
-      companyName: true,
-      senderEmail: true,
-      jiraTicketKey: true,
-      duplicateOfExternalId: true,
-      createdAt: true,
-      updatedAt: true,
-      resolvedAt: true
-    };
-    const tickets = await prisma.ticket.findMany({
-      where,
-      select: kpiSelect,
-      orderBy: [{ createdAt: 'desc' }]
-    });
-    const statusTickets = await prisma.ticket.findMany({
-      where: statusWhere,
-      select: kpiSelect
-    });
-    const scopedTicketsAll = tickets.filter(ticket => kpiTicketInRange(ticket, bounds));
-
-    // Duplicates are held back from every figure that counts work. They are
-    // still real tickets sitting on the board, so they are reported on their
-    // own rather than quietly dropped: "12 resolved, 3 of them duplicates" is
-    // the honest version of what used to read as "15 resolved".
-    const isDuplicate = t => !!t.duplicateOfExternalId;
-    const duplicatesOpen = statusTickets.filter(isDuplicate);
-    const duplicatesInRange = scopedTicketsAll.filter(isDuplicate);
-    const scopedTickets = scopedTicketsAll.filter(t => !isDuplicate(t));
-    const workTickets = statusTickets.filter(t => !isDuplicate(t));
+    const { bounds, team, agent, company, jiraOnly, baseWhere, accessWhere, scopedTickets, workTickets, duplicatesOpen, duplicatesInRange } = await loadKpiWorkingSet(req);
 
     const statusKeys = ['new', 'inp', 'wus', 'dft', 'wct', 'res'];
     const statusCounts = Object.fromEntries(statusKeys.map(k => [k, 0]));
@@ -4144,6 +4167,85 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
   } catch (error) {
     console.error('Read ticket KPIs failed:', error);
     return res.status(500).json({ error: 'read_ticket_kpis_failed' });
+  }
+});
+// Every number on the KPI dashboard can be clicked to see the tickets behind
+// it. Fetched on demand rather than folded into /api/tickets/kpis, which is
+// polled every 60s - a card nobody clicks (most of them, most of the time)
+// should not cost a full ticket list on every poll.
+const KPI_STATUS_CATEGORIES = new Set(['new', 'inp', 'wus', 'dft', 'wct', 'res']);
+app.get('/api/tickets/kpis/drilldown', requireAuth, async (req, res) => {
+  try {
+    const category = String(req.query.category || '').trim();
+    const { bounds, baseWhere, accessWhere, scopedTickets, workTickets, duplicatesOpen } = await loadKpiWorkingSet(req);
+    const now = Date.now();
+    let rows;
+
+    if (KPI_STATUS_CATEGORIES.has(category)) {
+      rows = workTickets
+        .filter(t => normalizeDbStatusForBoard(t.status) === category)
+        .map(t => kpiDrilldownRow(t));
+    } else if (category === 'ticketsWithCs') {
+      rows = scopedTickets
+        .filter(t => String(t.csAgent || '').trim())
+        .map(t => kpiDrilldownRow(t, t.csAgent));
+    } else if (category === 'jiraLinked') {
+      rows = workTickets.filter(t => t.jiraTicketKey).map(t => kpiDrilldownRow(t, t.jiraTicketKey));
+    } else if (category === 'duplicates') {
+      rows = duplicatesOpen.map(t => kpiDrilldownRow(t, 'Duplicate'));
+    } else if (category === 'created') {
+      rows = scopedTickets.filter(t => isDateInBounds(t.createdAt, bounds)).map(t => kpiDrilldownRow(t));
+    } else if (category === 'resolved') {
+      rows = scopedTickets.filter(t => normalizeDbStatusForBoard(t.status) === 'res').map(t => kpiDrilldownRow(t));
+    } else if (category === 'overdue' || category === 'atRisk' || category === 'oldestOpen') {
+      const openSnapshots = workTickets
+        .filter(t => normalizeDbStatusForBoard(t.status) !== 'res')
+        .map(t => ({ t, snapshot: ticketSlaSnapshot(t, now) }));
+      if (category === 'overdue') {
+        rows = openSnapshots.filter(x => x.snapshot.state === 'overdue')
+          .sort((a, b) => b.snapshot.overdueMs - a.snapshot.overdueMs)
+          .map(({ t, snapshot }) => kpiDrilldownRow(t, hoursFromMs(snapshot.overdueMs) + 'h overdue'));
+      } else if (category === 'atRisk') {
+        rows = openSnapshots.filter(x => x.snapshot.state === 'at_risk')
+          .sort((a, b) => b.snapshot.shiftMs - a.snapshot.shiftMs)
+          .map(({ t, snapshot }) => kpiDrilldownRow(t, hoursFromMs(snapshot.wallMs) + 'h open'));
+      } else {
+        rows = openSnapshots.sort((a, b) => b.snapshot.wallMs - a.snapshot.wallMs)
+          .map(({ t, snapshot }) => kpiDrilldownRow(t, hoursFromMs(snapshot.wallMs) + 'h open'));
+      }
+    } else if (category === 'slaMet' || category === 'slaBreached' || category === 'slaMeasured') {
+      // 'slaMeasured' is both cards that describe the met+breached set from a
+      // different angle - the "SLA met" percentage and the average resolve
+      // time are each computed over the exact same tickets, so their
+      // drilldown should show that same combined set, not just one half of it.
+      const resolvedSnapshots = scopedTickets
+        .filter(t => normalizeDbStatusForBoard(t.status) === 'res')
+        .map(t => ({ t, snapshot: ticketSlaSnapshot(t, now) }));
+      const wantStates = category === 'slaMet' ? ['met'] : category === 'slaBreached' ? ['breached'] : ['met', 'breached'];
+      rows = resolvedSnapshots.filter(x => wantStates.includes(x.snapshot.state))
+        .sort((a, b) => b.snapshot.overdueMs - a.snapshot.overdueMs)
+        .map(({ t, snapshot }) => kpiDrilldownRow(t, snapshot.state === 'met' ? 'Met SLA' : `Missed by ${hoursFromMs(snapshot.overdueMs)}h`));
+    } else if (category === 'reopened') {
+      const events = await prisma.ticketEvent.findMany({
+        where: {
+          eventType: 'ticket_status_changed',
+          oldValue: 'Resolved',
+          NOT: [{ newValue: 'Resolved' }],
+          createdAt: { gte: bounds.start, lte: bounds.end },
+          ticket: { AND: [baseWhere, accessWhere, { duplicateOfExternalId: null }] }
+        },
+        select: { ticket: { select: KPI_TICKET_SELECT } },
+        orderBy: [{ createdAt: 'desc' }]
+      }).catch(() => []);
+      rows = events.filter(e => e.ticket).map(e => kpiDrilldownRow(e.ticket, 'Reopened'));
+    } else {
+      return res.status(400).json({ error: 'unknown_drilldown_category' });
+    }
+
+    return res.json({ category, total: rows.length, rows: rows.slice(0, 200) });
+  } catch (error) {
+    console.error('Read KPI drilldown failed:', error);
+    return res.status(500).json({ error: 'read_kpi_drilldown_failed' });
   }
 });
 app.get('/api/tickets/:id/audit', requireAdmin, async (req, res) => {
