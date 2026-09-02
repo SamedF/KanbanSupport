@@ -1851,28 +1851,45 @@ async function graphGetResilient(pathname, req) {
   }
 }
 
-async function graphSendPasswordResetEmail(recipientEmail, resetUrl) {
-  const token = await graphDelegatedTokenFromStore();
+/* The reset mail, by whichever leg this deployment has.
+
+   This is the one mail nobody can work around when it fails: an agent locked
+   out of the board cannot ask the board to let them in. It used to go only
+   through /me/sendMail on the stored Outlook connection, so a broken client
+   secret or a token without Mail.Send took password recovery down with
+   everything else Graph-backed. The flow needs neither. */
+async function sendPasswordResetEmail(recipientEmail, resetUrl) {
+  const subject = 'Reset your Support Kanban password';
   const html = [
     '<div style="font-family:Segoe UI,Arial,sans-serif;color:#0f172a;line-height:1.5;">',
     '<h2 style="margin:0 0 12px;">Reset your Support Kanban password</h2>',
     '<p>We received a request to reset your password.</p>',
     `<p><a href="${escapeHtml(resetUrl)}" style="display:inline-block;background:#4f46e5;color:#ffffff;text-decoration:none;padding:10px 14px;border-radius:8px;font-weight:700;">Change password</a></p>`,
+    // The link in text as well: some clients strip the styled anchor, and a
+    // reset mail whose only button is gone is a reset mail that failed.
+    `<p style="font-size:12px;color:#667085;">Or paste this into your browser:<br>${escapeHtml(resetUrl)}</p>`,
     '<p>This link expires in 1 hour. If you did not request it, you can ignore this email.</p>',
     '</div>'
   ].join('');
+
+  if (MAIL_WEBHOOK_URL) {
+    await sendMailViaFlow({ kind: 'support_kanban_password_reset', to: [recipientEmail], subject, bodyHtml: html });
+    return 'flow';
+  }
+  const token = await graphDelegatedTokenFromStore();
   await graphRequest('/me/sendMail', token, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       message: {
-        subject: 'Reset your Support Kanban password',
+        subject,
         body: { contentType: 'HTML', content: html },
         toRecipients: [{ emailAddress: { address: recipientEmail } }]
       },
       saveToSentItems: true
     })
   });
+  return 'graph';
 }
 
 async function postJson(url, payload) {
@@ -3012,11 +3029,19 @@ app.post('/auth/forgot-password', passwordResetLimiter, async (req, res) => {
     `;
 
     try {
-      await graphSendPasswordResetEmail(email, resetUrl);
+      await sendPasswordResetEmail(email, resetUrl);
     } catch (mailError) {
       await prisma.$executeRaw`DELETE FROM "PasswordResetToken" WHERE "tokenHash" = ${tokenHash}`;
       console.error('Password reset email failed:', mailError);
-      return res.status(500).json({ error: 'send_email_failed' });
+      /* Which leg failed, so the login page can name the right fix. "Reconnect
+         Microsoft 365" is useless advice on a deployment that sends through a
+         flow, and someone locked out of the board cannot read the server log to
+         find that out. */
+      return res.status(500).json({
+        error: 'send_email_failed',
+        sendVia: MAIL_WEBHOOK_URL ? 'flow' : 'graph',
+        detail: String(mailError?.message || mailError).slice(0, 200)
+      });
     }
 
     return res.json({ ok: true });
