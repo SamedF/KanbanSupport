@@ -80,14 +80,104 @@ if (M365_SECRET_LOOKS_LIKE_ID) {
 // carry them, so /api/reply/from-addresses reports the gap and the composer
 // says to reconnect Outlook rather than failing at send time.
 const M365_SCOPES = String(process.env.M365_SCOPES || 'offline_access openid profile email User.Read Mail.Read Mail.Read.Shared Mail.Send Mail.Send.Shared').trim();
-const M365_CAN_SEND_MAIL = /Mail\.Send/i.test(M365_SCOPES);
+const M365_CAN_SEND_MAIL = /\bMail\.Send\b/i.test(M365_SCOPES);
+/* Sending mail without holding a credential that can send mail.
+
+   MAIL_WEBHOOK_URL is a Power Automate "When an HTTP request is received"
+   trigger whose flow does the actual Outlook send on its own connection. When
+   it is set, the board never asks Graph to send anything: it POSTs what should
+   go out and the flow sends it.
+
+   Why that is worth a second code path. A delegated Mail.Send token in this
+   process can send as the connected identity and as every mailbox Exchange
+   grants it Send As on - so whatever leaks with it is "mail as us", and the
+   board also inherits the "last person to connect owns the sending identity"
+   problem. The flow URL leaks as "post one JSON body into one flow": it cannot
+   read a mailbox, cannot change the From the flow is built with, and is revoked
+   by regenerating the trigger rather than by a tenant-wide consent change. The
+   trade is that the flow is the authority on the From address, and that its
+   failures arrive as an HTTP status rather than a Graph error.
+
+   Graph is still used for reading - bodies, attachments, the quoted original.
+   This replaces the send leg only, and only when configured. Unset, everything
+   behaves exactly as it did. */
+const MAIL_WEBHOOK_URL = String(process.env.MAIL_WEBHOOK_URL || process.env.REPLY_WEBHOOK_URL || '').trim();
+const CAN_SEND_MAIL = M365_CAN_SEND_MAIL || !!MAIL_WEBHOOK_URL;
+if (MAIL_WEBHOOK_URL) console.log('[mail] MAIL_WEBHOOK_URL is set - replies and feedback mail are sent by that flow, not by Graph.');
+
+/* One body shape for every kind of mail the board sends through the flow.
+
+   `kind` is what the flow switches on, and `mailbox`/`messageId` are what let
+   it thread a reply: a Power Automate "Reply to email (V3)" on that message id
+   keeps the conversation's real headers, which is the one thing a plain
+   "Send an email (V2)" cannot reproduce. A flow that only implements sending
+   still works - it just answers in a new thread. */
+async function sendMailViaFlow({ kind, from, mailbox, messageId, to, cc, subject, bodyHtml, replyTo, ticketId, actor }) {
+  if (!MAIL_WEBHOOK_URL) throw new Error('mail_webhook_not_configured');
+  const addresses = list => (Array.isArray(list) ? list : [])
+    .map(r => (typeof r === 'string' ? r : r?.emailAddress?.address))
+    .map(normalizeEmailAddress)
+    .filter(Boolean);
+  const to_ = addresses(to);
+  const cc_ = addresses(cc);
+  const payload = {
+    kind: kind || 'support_kanban_mail',
+    from: from || '',
+    mailbox: mailbox || '',
+    messageId: messageId || '',
+    ticketId: ticketId || '',
+    subject: subject || '',
+    bodyHtml: bodyHtml || '',
+    to: to_,
+    cc: cc_,
+    replyTo: addresses(replyTo),
+    // The same recipients as semicolon-separated strings, because that is what
+    // the Outlook actions in Power Automate take - otherwise every flow needs
+    // a join() expression somebody has to get right in the designer.
+    toLine: to_.join(';'),
+    ccLine: cc_.join(';'),
+    reporter: actor?.label || '',
+    sentBy: actor?.email || ''
+  };
+  if (!to_.length) throw new Error('missing_recipients');
+  try {
+    await postJson(MAIL_WEBHOOK_URL, payload);
+  } catch (error) {
+    // postJson reports webhook_error_<status>; renamed so the composer's error
+    // map can tell a mail-flow failure from a Teams webhook failure.
+    throw new Error(String(error?.message || error).replace(/^webhook_error_/, 'mail_flow_error_'));
+  }
+  return { to: to_, cc: cc_, subject: payload.subject };
+}
 const SUPPORT_MAILBOX = String(process.env.SUPPORT_MAILBOX || 'helpdesk@quinta.im').trim().toLowerCase();
-// Which addresses a reply may claim to be from. The helpdesk mailbox is always
-// allowed because that is where the thread already lives; anything else has to
-// be listed here AND have Send As granted to the connected identity in
-// Exchange, or Graph rejects the send. Configured rather than free-text so a
-// typo, or a deliberate attempt to reply as someone else, cannot leave the
-// board - the address is validated against this list server-side.
+/* The mailbox the board sends its own mail from.
+
+   Two kinds of mail leave this board and they do not belong in the same
+   mailbox. A reply to a client must come from SUPPORT_MAILBOX: it is the
+   address they have been corresponding with, and the only one whose reply keeps
+   the thread's real headers. But a password reset and a feedback report are the
+   board talking to its own team - putting those in the helpdesk mailbox's Sent
+   Items mixes internal plumbing into a client-facing correspondence record, and
+   sending them as "whichever agent last connected Outlook" means the From
+   address on a password reset changes depending on who signed in last week.
+
+   Set this to a mailbox of the board's own - kanban@quinta.im - and that stops
+   being true. Unset, transactional mail sends as the connected identity exactly
+   as it did.
+
+   On the Graph path this mailbox needs Send As granted to the connected
+   identity, unless the board is connected as that mailbox itself, in which case
+   it needs nothing. On the flow path the flow's own connection decides, and
+   this is passed as `from` for it to honour. */
+const KANBAN_MAILBOX = normalizeEmailForDb(process.env.KANBAN_MAILBOX || '') || '';
+if (KANBAN_MAILBOX) console.log(`[mail] board-owned mail (password resets, feedback) sends from ${KANBAN_MAILBOX}`);
+// Extra addresses a reply may claim to be from, on top of the two the board
+// works out by itself: the helpdesk mailbox (always allowed - it is where the
+// thread lives) and the signed-in agent's own mailbox. Use this for shared
+// aliases nobody's account is named after. Every address here still needs Send
+// As granted to the connected identity in Exchange, or Graph rejects the send.
+// Configured rather than free-text so a typo, or a deliberate attempt to reply
+// as someone else, cannot leave the board.
 const REPLY_FROM_ADDRESSES = (() => {
   const configured = String(process.env.REPLY_FROM_ADDRESSES || '')
     .split(/[,;\s]+/)
@@ -1782,28 +1872,55 @@ async function graphGetResilient(pathname, req) {
   }
 }
 
-async function graphSendPasswordResetEmail(recipientEmail, resetUrl) {
-  const token = await graphDelegatedTokenFromStore();
+/* The reset mail, by whichever leg this deployment has.
+
+   This is the one mail nobody can work around when it fails: an agent locked
+   out of the board cannot ask the board to let them in. It used to go only
+   through /me/sendMail on the stored Outlook connection, so a broken client
+   secret or a token without Mail.Send took password recovery down with
+   everything else Graph-backed. The flow needs neither. */
+/* Whose sendMail endpoint board-owned mail goes through.
+
+   /me is the connected identity, which can always send as itself and so needs
+   no grant at all - the safe default, and what this did before KANBAN_MAILBOX
+   existed. Naming a mailbox instead needs Send As on it, or the board to be
+   connected as it. */
+function boardSendMailPath() {
+  return KANBAN_MAILBOX ? `/users/${encodeURIComponent(KANBAN_MAILBOX)}/sendMail` : '/me/sendMail';
+}
+
+async function sendPasswordResetEmail(recipientEmail, resetUrl) {
+  const subject = 'Reset your Support Kanban password';
   const html = [
     '<div style="font-family:Segoe UI,Arial,sans-serif;color:#0f172a;line-height:1.5;">',
     '<h2 style="margin:0 0 12px;">Reset your Support Kanban password</h2>',
     '<p>We received a request to reset your password.</p>',
     `<p><a href="${escapeHtml(resetUrl)}" style="display:inline-block;background:#4f46e5;color:#ffffff;text-decoration:none;padding:10px 14px;border-radius:8px;font-weight:700;">Change password</a></p>`,
+    // The link in text as well: some clients strip the styled anchor, and a
+    // reset mail whose only button is gone is a reset mail that failed.
+    `<p style="font-size:12px;color:#667085;">Or paste this into your browser:<br>${escapeHtml(resetUrl)}</p>`,
     '<p>This link expires in 1 hour. If you did not request it, you can ignore this email.</p>',
     '</div>'
   ].join('');
-  await graphRequest('/me/sendMail', token, {
+
+  if (MAIL_WEBHOOK_URL) {
+    await sendMailViaFlow({ kind: 'support_kanban_password_reset', from: KANBAN_MAILBOX, to: [recipientEmail], subject, bodyHtml: html });
+    return 'flow';
+  }
+  const token = await graphDelegatedTokenFromStore();
+  await graphRequest(boardSendMailPath(), token, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       message: {
-        subject: 'Reset your Support Kanban password',
+        subject,
         body: { contentType: 'HTML', content: html },
         toRecipients: [{ emailAddress: { address: recipientEmail } }]
       },
       saveToSentItems: true
     })
   });
+  return 'graph';
 }
 
 async function postJson(url, payload) {
@@ -2163,11 +2280,77 @@ function cleanHighlightedText(s) {
   return stripHtml(String(s || '').replace(/<\/?span[^>]*>/gi, ''));
 }
 
+/* The projection, and why the property name is spelled the long way.
+
+   An attachments collection is typed as microsoft.graph.attachment, and the
+   base type carries id, name, contentType, size and isInline - but NOT
+   contentId, which belongs to the fileAttachment subtype. Asking for it
+   unqualified made Graph reject the entire request:
+
+     BadRequest: Parsing OData Select and Expand failed: Could not find a
+     property named 'contentId' on type 'microsoft.graph.attachment'.
+
+   which threw before a single image was listed, so every picture on every
+   message failed and the modal said the images could not be loaded. A derived
+   property has to be qualified with the type that declares it. */
+const ATTACHMENT_SELECT_BASE = '$select=id,name,contentType,size,isInline';
+const ATTACHMENT_SELECT = `${ATTACHMENT_SELECT_BASE},microsoft.graph.fileAttachment/contentId`;
+// Whether this tenant accepts that qualified projection. Set false the first
+// time it is refused, so one 400 is the whole cost rather than one per page of
+// one attachment listing of every ticket anybody opens.
+let attachmentSelectSupported = true;
+
+/* Lists one page of attachments, and never lets the projection be the reason a
+   message has no pictures.
+
+   The projection is worth having: without it Graph returns contentBytes for
+   every attachment, so a reply chain full of signatures is 10-20MB of base64
+   pulled into this process to be thrown away. But correctness comes first, so a
+   400 falls back to the unprojected listing - which is the representation known
+   to be complete - and remembers not to try the projection again. */
+// Drops $select from a Graph URL whatever form it is in. A literal string
+// replace would have worked on the URL built here and quietly failed on a
+// nextLink, where Graph echoes the query back percent-encoded (%24select) - and
+// a failed strip means retrying the request that just failed.
+function stripSelect(pathname) {
+  const [path, query = ''] = String(pathname || '').split('?');
+  const kept = query.split('&').filter(part => part && !/^(%24|\$)select=/i.test(part));
+  return kept.length ? `${path}?${kept.join('&')}` : path;
+}
+
+async function fetchAttachmentPage(pathname, req) {
+  const unprojected = stripSelect(pathname);
+  if (!attachmentSelectSupported) return graphGetResilient(unprojected, req);
+  try {
+    return await graphGetResilient(pathname, req);
+  } catch (error) {
+    if (graphErrorStatus(error) !== 400) throw error;
+    attachmentSelectSupported = false;
+    console.warn('[attachments] Graph refused the projected attachment listing, falling back to the full one:', String(error?.message || error).slice(0, 200));
+    return graphGetResilient(unprojected, req);
+  }
+}
+
 async function graphGetMessageWithAttachments(token, mailbox, msgId) {
   const msg = await graphGet(`/users/${encodeURIComponent(mailbox)}/messages/${encodeURIComponent(msgId)}?$select=id,subject,body,bodyPreview,from,toRecipients,ccRecipients,receivedDateTime,webLink,hasAttachments`, token);
   let attachments = [];
   if (msg?.hasAttachments) {
-    const at = await graphGet(`/users/${encodeURIComponent(mailbox)}/messages/${encodeURIComponent(msgId)}/attachments?$top=15&$select=id,name,contentType,size,isInline,contentBytes`, token);
+    // contentBytes, like contentId, is declared on fileAttachment rather than on
+    // the base attachment type this collection is typed as, so it has to be
+    // qualified - unqualified, Graph rejects the whole request with
+    // "Could not find a property named 'contentBytes' on type
+    // 'microsoft.graph.attachment'" and Debug Expert sees no attachments at
+    // all. Falling back to the unprojected listing keeps it working on a tenant
+    // that will not project it either; here that costs nothing extra, since
+    // this caller wants the bytes anyway.
+    const attachmentPath = `/users/${encodeURIComponent(mailbox)}/messages/${encodeURIComponent(msgId)}/attachments?$top=15`;
+    let at = null;
+    try {
+      at = await graphGet(`${attachmentPath}&${ATTACHMENT_SELECT_BASE},microsoft.graph.fileAttachment/contentBytes`, token);
+    } catch (error) {
+      if (graphErrorStatus(error) !== 400) throw error;
+      at = await graphGet(attachmentPath, token);
+    }
     attachments = Array.isArray(at?.value) ? at.value : [];
   }
   const attachmentFindings = [];
@@ -2877,11 +3060,19 @@ app.post('/auth/forgot-password', passwordResetLimiter, async (req, res) => {
     `;
 
     try {
-      await graphSendPasswordResetEmail(email, resetUrl);
+      await sendPasswordResetEmail(email, resetUrl);
     } catch (mailError) {
       await prisma.$executeRaw`DELETE FROM "PasswordResetToken" WHERE "tokenHash" = ${tokenHash}`;
       console.error('Password reset email failed:', mailError);
-      return res.status(500).json({ error: 'send_email_failed' });
+      /* Which leg failed, so the login page can name the right fix. "Reconnect
+         Microsoft 365" is useless advice on a deployment that sends through a
+         flow, and someone locked out of the board cannot read the server log to
+         find that out. */
+      return res.status(500).json({
+        error: 'send_email_failed',
+        sendVia: MAIL_WEBHOOK_URL ? 'flow' : 'graph',
+        detail: String(mailError?.message || mailError).slice(0, 200)
+      });
     }
 
     return res.json({ ok: true });
@@ -3641,82 +3832,105 @@ app.put('/api/tickets/:externalId/body', requireAuth, async (req, res) => {
     return res.status(500).json({ error: String(error.message || error) });
   }
 });
+// Shared by /api/tickets/kpis and /api/tickets/kpis/drilldown so the two
+// endpoints can never quietly drift apart on who is allowed to see what -
+// accessWhere carries the CS/support/admin scoping, and a drilldown built
+// from a second, hand-copied version of that logic would be one edit away
+// from leaking tickets outside a user's permitted scope.
+const KPI_TICKET_SELECT = {
+  id: true,
+  externalId: true,
+  displayNumber: true,
+  subject: true,
+  status: true,
+  priority: true,
+  category: true,
+  assignedAgent: true,
+  csAgent: true,
+  companyName: true,
+  senderEmail: true,
+  jiraTicketKey: true,
+  duplicateOfExternalId: true,
+  createdAt: true,
+  updatedAt: true,
+  resolvedAt: true
+};
+async function loadKpiWorkingSet(req) {
+  const bounds = kpiDateBounds(req.query.range);
+  const role = normalizeRole(req.session.role) || 'support';
+  const username = String(req.session.username || '').trim().toUpperCase();
+  const team = String(req.query.team || 'all').trim().toLowerCase();
+  const agent = String(req.query.agent || 'all').trim().toUpperCase();
+  const company = String(req.query.company || 'all').trim();
+  const jiraOnly = String(req.query.jiraOnly || '').toLowerCase() === 'true';
+
+  const baseWhere = {
+    NOT: [{ category: { equals: 'Spam', mode: 'insensitive' } }]
+  };
+  if (company && company !== 'all') baseWhere.companyName = company;
+  if (jiraOnly) baseWhere.jiraTicketKey = { not: null };
+
+  const accessWhere = {};
+  if (role === 'cs') accessWhere.csAgent = username;
+  else if (role === 'support') accessWhere.assignedAgent = username;
+  else if (agent && agent !== 'ALL') {
+    if (CS_AGENT_CODES.has(agent)) accessWhere.csAgent = agent;
+    else if (SUPPORT_AGENT_CODES.has(agent)) accessWhere.assignedAgent = agent;
+    else accessWhere.OR = [{ csAgent: agent }, { assignedAgent: agent }];
+  } else if (team === 'cs') {
+    accessWhere.csAgent = { in: Array.from(CS_AGENT_CODES) };
+  } else if (team === 'support') {
+    accessWhere.assignedAgent = { in: Array.from(SUPPORT_AGENT_CODES) };
+  }
+  const rangeWhere = {
+    OR: [
+      { createdAt: { gte: bounds.start, lte: bounds.end } },
+      { updatedAt: { gte: bounds.start, lte: bounds.end } },
+      { resolvedAt: { gte: bounds.start, lte: bounds.end } }
+    ]
+  };
+  const statusWhere = { AND: [baseWhere, accessWhere] };
+  const where = { AND: [baseWhere, accessWhere, rangeWhere] };
+
+  const tickets = await prisma.ticket.findMany({
+    where,
+    select: KPI_TICKET_SELECT,
+    orderBy: [{ createdAt: 'desc' }]
+  });
+  const statusTickets = await prisma.ticket.findMany({
+    where: statusWhere,
+    select: KPI_TICKET_SELECT
+  });
+  const scopedTicketsAll = tickets.filter(ticket => kpiTicketInRange(ticket, bounds));
+
+  // Duplicates are held back from every figure that counts work. They are
+  // still real tickets sitting on the board, so they are reported on their
+  // own rather than quietly dropped: "12 resolved, 3 of them duplicates" is
+  // the honest version of what used to read as "15 resolved".
+  const isDuplicate = t => !!t.duplicateOfExternalId;
+  const duplicatesOpen = statusTickets.filter(isDuplicate);
+  const duplicatesInRange = scopedTicketsAll.filter(isDuplicate);
+  const scopedTickets = scopedTicketsAll.filter(t => !isDuplicate(t));
+  const workTickets = statusTickets.filter(t => !isDuplicate(t));
+
+  return { bounds, team, agent, company, jiraOnly, baseWhere, accessWhere, scopedTickets, workTickets, duplicatesOpen, duplicatesInRange };
+}
+function kpiDrilldownRow(t, detail) {
+  return {
+    ticketNumber: t.displayNumber ? `#${String(t.displayNumber).padStart(4, '0')}` : null,
+    externalId: t.externalId,
+    subject: t.subject || '(no subject)',
+    company: t.companyName || 'Unknown',
+    agent: t.assignedAgent || 'Unassigned',
+    priority: t.priority || 'Normal',
+    status: normalizeDbStatusForBoard(t.status),
+    jira: t.jiraTicketKey || null,
+    detail: detail || null
+  };
+}
 app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
   try {
-    const bounds = kpiDateBounds(req.query.range);
-    const role = normalizeRole(req.session.role) || 'support';
-    const username = String(req.session.username || '').trim().toUpperCase();
-    const team = String(req.query.team || 'all').trim().toLowerCase();
-    const agent = String(req.query.agent || 'all').trim().toUpperCase();
-    const company = String(req.query.company || 'all').trim();
-    const jiraOnly = String(req.query.jiraOnly || '').toLowerCase() === 'true';
-
-    const baseWhere = {
-      NOT: [{ category: { equals: 'Spam', mode: 'insensitive' } }]
-    };
-    if (company && company !== 'all') baseWhere.companyName = company;
-    if (jiraOnly) baseWhere.jiraTicketKey = { not: null };
-
-    const accessWhere = {};
-    if (role === 'cs') accessWhere.csAgent = username;
-    else if (role === 'support') accessWhere.assignedAgent = username;
-    else if (agent && agent !== 'ALL') {
-      if (CS_AGENT_CODES.has(agent)) accessWhere.csAgent = agent;
-      else if (SUPPORT_AGENT_CODES.has(agent)) accessWhere.assignedAgent = agent;
-      else accessWhere.OR = [{ csAgent: agent }, { assignedAgent: agent }];
-    } else if (team === 'cs') {
-      accessWhere.csAgent = { in: Array.from(CS_AGENT_CODES) };
-    } else if (team === 'support') {
-      accessWhere.assignedAgent = { in: Array.from(SUPPORT_AGENT_CODES) };
-    }
-    const rangeWhere = {
-      OR: [
-        { createdAt: { gte: bounds.start, lte: bounds.end } },
-        { updatedAt: { gte: bounds.start, lte: bounds.end } },
-        { resolvedAt: { gte: bounds.start, lte: bounds.end } }
-      ]
-    };
-    const statusWhere = { AND: [baseWhere, accessWhere] };
-    const where = { AND: [baseWhere, accessWhere, rangeWhere] };
-
-    const kpiSelect = {
-      id: true,
-      externalId: true,
-      displayNumber: true,
-      subject: true,
-      status: true,
-      priority: true,
-      category: true,
-      assignedAgent: true,
-      csAgent: true,
-      companyName: true,
-      senderEmail: true,
-      jiraTicketKey: true,
-      duplicateOfExternalId: true,
-      createdAt: true,
-      updatedAt: true,
-      resolvedAt: true
-    };
-    const tickets = await prisma.ticket.findMany({
-      where,
-      select: kpiSelect,
-      orderBy: [{ createdAt: 'desc' }]
-    });
-    const statusTickets = await prisma.ticket.findMany({
-      where: statusWhere,
-      select: kpiSelect
-    });
-    const scopedTicketsAll = tickets.filter(ticket => kpiTicketInRange(ticket, bounds));
-
-    // Duplicates are held back from every figure that counts work. They are
-    // still real tickets sitting on the board, so they are reported on their
-    // own rather than quietly dropped: "12 resolved, 3 of them duplicates" is
-    // the honest version of what used to read as "15 resolved".
-    const isDuplicate = t => !!t.duplicateOfExternalId;
-    const duplicatesOpen = statusTickets.filter(isDuplicate);
-    const duplicatesInRange = scopedTicketsAll.filter(isDuplicate);
-    const scopedTickets = scopedTicketsAll.filter(t => !isDuplicate(t));
-    const workTickets = statusTickets.filter(t => !isDuplicate(t));
+    const { bounds, team, agent, company, jiraOnly, baseWhere, accessWhere, scopedTickets, workTickets, duplicatesOpen, duplicatesInRange } = await loadKpiWorkingSet(req);
 
     const statusKeys = ['new', 'inp', 'wus', 'dft', 'wct', 'res'];
     const statusCounts = Object.fromEntries(statusKeys.map(k => [k, 0]));
@@ -3815,6 +4029,7 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
     const resolvedInRange = scopedTickets.filter(t => normalizeDbStatusForBoard(t.status) === 'res');
     const resolveShiftHours = [];
     const resolveWallHours = [];
+    const breachedRows = [];
     let slaMet = 0;
     let slaBreached = 0;
     let slaUnmeasured = 0;
@@ -3823,7 +4038,21 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
       const owner = String(ticket.assignedAgent || '').trim().toUpperCase() || 'Unassigned';
       if (!agentRows[owner]) agentRows[owner] = emptyAgentRow(owner);
       if (snapshot.state === 'met') { slaMet++; agentRows[owner].slaMet++; }
-      else if (snapshot.state === 'breached') { slaBreached++; agentRows[owner].slaBreached++; }
+      else if (snapshot.state === 'breached') {
+        slaBreached++; agentRows[owner].slaBreached++;
+        breachedRows.push({
+          ticketNumber: ticket.displayNumber ? `#${String(ticket.displayNumber).padStart(4, '0')}` : null,
+          externalId: ticket.externalId,
+          subject: ticket.subject || '(no subject)',
+          company: ticket.companyName || 'Unknown',
+          agent: ticket.assignedAgent || 'Unassigned',
+          priority: ticket.priority || 'Normal',
+          status: normalizeDbStatusForBoard(ticket.status),
+          targetHours: snapshot.targetHours,
+          overdueHours: hoursFromMs(snapshot.overdueMs),
+          jira: ticket.jiraTicketKey || null
+        });
+      }
       else slaUnmeasured++;
       if (snapshot.state === 'met' || snapshot.state === 'breached') {
         resolveShiftHours.push(hoursFromMs(snapshot.shiftMs));
@@ -3831,6 +4060,7 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
       }
       resolveWallHours.push(hoursFromMs(snapshot.wallMs));
     }
+    breachedRows.sort((a, b) => b.overdueHours - a.overdueHours);
     const slaMeasured = slaMet + slaBreached;
 
     // A ticket that went back out of Resolved is work that was called done and
@@ -3901,6 +4131,7 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
         backlogOpen: openWorkTickets.length
       },
       overdueRows: overdueRows.slice(0, 25),
+      breachedRows: breachedRows.slice(0, 25),
       duplicateRows: duplicatesInRange.slice(0, 25).map(t => ({
         ticketNumber: t.displayNumber ? `#${String(t.displayNumber).padStart(4, '0')}` : null,
         externalId: t.externalId,
@@ -3936,6 +4167,85 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
   } catch (error) {
     console.error('Read ticket KPIs failed:', error);
     return res.status(500).json({ error: 'read_ticket_kpis_failed' });
+  }
+});
+// Every number on the KPI dashboard can be clicked to see the tickets behind
+// it. Fetched on demand rather than folded into /api/tickets/kpis, which is
+// polled every 60s - a card nobody clicks (most of them, most of the time)
+// should not cost a full ticket list on every poll.
+const KPI_STATUS_CATEGORIES = new Set(['new', 'inp', 'wus', 'dft', 'wct', 'res']);
+app.get('/api/tickets/kpis/drilldown', requireAuth, async (req, res) => {
+  try {
+    const category = String(req.query.category || '').trim();
+    const { bounds, baseWhere, accessWhere, scopedTickets, workTickets, duplicatesOpen } = await loadKpiWorkingSet(req);
+    const now = Date.now();
+    let rows;
+
+    if (KPI_STATUS_CATEGORIES.has(category)) {
+      rows = workTickets
+        .filter(t => normalizeDbStatusForBoard(t.status) === category)
+        .map(t => kpiDrilldownRow(t));
+    } else if (category === 'ticketsWithCs') {
+      rows = scopedTickets
+        .filter(t => String(t.csAgent || '').trim())
+        .map(t => kpiDrilldownRow(t, t.csAgent));
+    } else if (category === 'jiraLinked') {
+      rows = workTickets.filter(t => t.jiraTicketKey).map(t => kpiDrilldownRow(t, t.jiraTicketKey));
+    } else if (category === 'duplicates') {
+      rows = duplicatesOpen.map(t => kpiDrilldownRow(t, 'Duplicate'));
+    } else if (category === 'created') {
+      rows = scopedTickets.filter(t => isDateInBounds(t.createdAt, bounds)).map(t => kpiDrilldownRow(t));
+    } else if (category === 'resolved') {
+      rows = scopedTickets.filter(t => normalizeDbStatusForBoard(t.status) === 'res').map(t => kpiDrilldownRow(t));
+    } else if (category === 'overdue' || category === 'atRisk' || category === 'oldestOpen') {
+      const openSnapshots = workTickets
+        .filter(t => normalizeDbStatusForBoard(t.status) !== 'res')
+        .map(t => ({ t, snapshot: ticketSlaSnapshot(t, now) }));
+      if (category === 'overdue') {
+        rows = openSnapshots.filter(x => x.snapshot.state === 'overdue')
+          .sort((a, b) => b.snapshot.overdueMs - a.snapshot.overdueMs)
+          .map(({ t, snapshot }) => kpiDrilldownRow(t, hoursFromMs(snapshot.overdueMs) + 'h overdue'));
+      } else if (category === 'atRisk') {
+        rows = openSnapshots.filter(x => x.snapshot.state === 'at_risk')
+          .sort((a, b) => b.snapshot.shiftMs - a.snapshot.shiftMs)
+          .map(({ t, snapshot }) => kpiDrilldownRow(t, hoursFromMs(snapshot.wallMs) + 'h open'));
+      } else {
+        rows = openSnapshots.sort((a, b) => b.snapshot.wallMs - a.snapshot.wallMs)
+          .map(({ t, snapshot }) => kpiDrilldownRow(t, hoursFromMs(snapshot.wallMs) + 'h open'));
+      }
+    } else if (category === 'slaMet' || category === 'slaBreached' || category === 'slaMeasured') {
+      // 'slaMeasured' is both cards that describe the met+breached set from a
+      // different angle - the "SLA met" percentage and the average resolve
+      // time are each computed over the exact same tickets, so their
+      // drilldown should show that same combined set, not just one half of it.
+      const resolvedSnapshots = scopedTickets
+        .filter(t => normalizeDbStatusForBoard(t.status) === 'res')
+        .map(t => ({ t, snapshot: ticketSlaSnapshot(t, now) }));
+      const wantStates = category === 'slaMet' ? ['met'] : category === 'slaBreached' ? ['breached'] : ['met', 'breached'];
+      rows = resolvedSnapshots.filter(x => wantStates.includes(x.snapshot.state))
+        .sort((a, b) => b.snapshot.overdueMs - a.snapshot.overdueMs)
+        .map(({ t, snapshot }) => kpiDrilldownRow(t, snapshot.state === 'met' ? 'Met SLA' : `Missed by ${hoursFromMs(snapshot.overdueMs)}h`));
+    } else if (category === 'reopened') {
+      const events = await prisma.ticketEvent.findMany({
+        where: {
+          eventType: 'ticket_status_changed',
+          oldValue: 'Resolved',
+          NOT: [{ newValue: 'Resolved' }],
+          createdAt: { gte: bounds.start, lte: bounds.end },
+          ticket: { AND: [baseWhere, accessWhere, { duplicateOfExternalId: null }] }
+        },
+        select: { ticket: { select: KPI_TICKET_SELECT } },
+        orderBy: [{ createdAt: 'desc' }]
+      }).catch(() => []);
+      rows = events.filter(e => e.ticket).map(e => kpiDrilldownRow(e.ticket, 'Reopened'));
+    } else {
+      return res.status(400).json({ error: 'unknown_drilldown_category' });
+    }
+
+    return res.json({ category, total: rows.length, rows: rows.slice(0, 200) });
+  } catch (error) {
+    console.error('Read KPI drilldown failed:', error);
+    return res.status(500).json({ error: 'read_kpi_drilldown_failed' });
   }
 });
 app.get('/api/tickets/:id/audit', requireAdmin, async (req, res) => {
@@ -5497,18 +5807,25 @@ const MAX_IMAGE_ATTACHMENTS = 60;
 async function fetchMessageImageAttachments(mailbox, msgId, req) {
   const out = [];
   const base = `/users/${encodeURIComponent(mailbox)}/messages/${encodeURIComponent(msgId)}/attachments`;
-  const SELECT = '$select=id,name,contentType,size,isInline,contentId';
+  const SELECT = ATTACHMENT_SELECT;
   let next = `${base}?$top=50&${SELECT}`;
   for (let page = 0; page < 6 && next && out.length < MAX_IMAGE_ATTACHMENTS; page++) {
-    let data = await graphGetResilient(next, req);
+    let data = await fetchAttachmentPage(next, req);
     let items = Array.isArray(data?.value) ? data.value : [];
     // A projection that comes back with nothing to identify the attachments by
     // is useless for cid matching, and the unprojected representation is the one
     // that is known to be complete. Cheap insurance against a tenant or a
     // future Graph version that treats $select on attachments differently.
     if (items.length && items.every(a => !a?.contentId && !a?.name)) {
-      data = await graphGetResilient(next.replace(`&${SELECT}`, ''), req);
+      data = await graphGetResilient(stripSelect(next), req);
       items = Array.isArray(data?.value) ? data.value : [];
+    }
+    // A fileAttachment that came back without a contentId is not necessarily a
+    // real attachment without one: it can also be this projection quietly
+    // dropping it. Only worth saying once, and only when there is a cid to
+    // match - a genuine file attachment has no contentId and never needed one.
+    if (attachmentSelectSupported && items.some(a => a?.isInline && !a?.contentId)) {
+      console.warn('[attachments] an inline attachment came back with no contentId - cid matching will fall back to filename');
     }
     for (const a of items) {
       // itemAttachment (a forwarded mail) and referenceAttachment (a OneDrive
@@ -5592,11 +5909,13 @@ app.get('/api/message-image/:attachmentId', requireAuth, async (req, res) => {
    not in the connected identity's own mailbox, which is what Mail.Send.Shared
    is for.
 
-   The From address is chosen by the agent but validated here against
-   REPLY_FROM_ADDRESSES. Exchange still has the final say: sending as an address
-   the connected identity has no Send As right on fails at Graph, and that error
-   is passed back rather than swallowed, because "it said it sent and the client
-   never got it" is the one outcome worth being loud about. */
+   The From address is the agent's own mailbox, the helpdesk, or anything in
+   REPLY_FROM_ADDRESSES, and is validated per request against that list - see
+   resolveReplyIdentity, which also explains why being on the list is not the
+   same as Exchange permitting it. Sending as an address the connected identity
+   has no Send As right on fails at Graph, and that error is passed back rather
+   than swallowed, because "it said it sent and the client never got it" is the
+   one outcome worth being loud about. */
 const REPLY_BODY_MAX_CHARS = Number(process.env.REPLY_BODY_MAX_CHARS || 100_000);
 const MAX_REPLY_RECIPIENTS = 25;
 // Sending mail is not a read: a loop, a double-click, or a bad retry here
@@ -5640,107 +5959,378 @@ function injectReplyIntoDraftHtml(draftHtml, replyHtml) {
   return replyHtml + draft;
 }
 
+/* Who this session may answer as.
+
+   Three sources, in the order the composer lists them:
+
+   - the agent's own mailbox. SFA signed in means sfa@quinta.im: read from their
+     Kanban account's email when it has one, and otherwise derived from the
+     trigram, which is what those mailboxes are named after. Only for trigram
+     logins - `admin`, `owner` and the full-name accounts are not mailboxes, and
+     guessing one would offer an address that does not exist.
+   - the helpdesk mailbox, which is where the thread already lives.
+   - anything in REPLY_FROM_ADDRESSES.
+
+   Being offered is not the same as being permitted, and this is the part worth
+   understanding. There is one Outlook connection for the whole board, so every
+   send is made by whichever identity last signed in to Microsoft here. That
+   identity can send as its own mailbox, and as any mailbox Exchange has granted
+   it Send As on - nothing else. So the connected identity is reported alongside
+   the list: the composer marks the address that is certain to work, and a
+   refusal can name the actual reason instead of a bare 403.
+
+   The way to make an agent's own address genuinely work is for that agent to
+   connect Outlook themselves - resolveStoredM365Tokens prefers the session's
+   own tokens, so their own mailbox then needs no grant at all. */
+function agentOwnMailboxes(user) {
+  const out = [];
+  const stored = normalizeEmailAddress(user?.email);
+  if (stored) out.push(stored);
+  const username = String(user?.username || '').trim().toLowerCase();
+  if (/^[a-z]{2,4}$/.test(username)) out.push(`${username}@${TEAMS_EMAIL_DOMAIN}`);
+  return [...new Set(out)];
+}
+
+async function resolveReplyIdentity(req) {
+  let connected = false;
+  let connectedAddress = '';
+  let connectedName = '';
+  let connectError = '';
+  try {
+    const token = await graphDelegatedToken(req);
+    // Whose mailbox the board is actually holding a token for. Cheap, and it is
+    // the difference between "pick any of these" and "this one will work".
+    const me = await graphGet('/me?$select=id,displayName,mail,userPrincipalName', token);
+    connectedAddress = normalizeEmailAddress(me?.mail) || normalizeEmailAddress(me?.userPrincipalName);
+    connectedName = String(me?.displayName || '');
+    connected = true;
+  } catch (error) {
+    connectError = String(error?.message || error).slice(0, 200);
+  }
+
+  let user = null;
+  if (req.session?.userId) {
+    user = await prisma.user
+      .findUnique({ where: { id: req.session.userId }, select: { username: true, email: true } })
+      .catch(() => null);
+  }
+  const own = agentOwnMailboxes(user || { username: req.session?.username });
+
+  const seen = new Set();
+  const addresses = [];
+  [...own, SUPPORT_MAILBOX, ...REPLY_FROM_ADDRESSES, connectedAddress].forEach((candidate) => {
+    const address = normalizeEmailAddress(candidate);
+    if (!address || seen.has(address)) return;
+    seen.add(address);
+    const isOwn = own.includes(address);
+    const isHelpdesk = address === SUPPORT_MAILBOX;
+    addresses.push({
+      address,
+      label: `${address}${isOwn ? ' (you)' : isHelpdesk ? ' (helpdesk)' : ''}`,
+      isOwn,
+      isHelpdesk,
+      isConnected: !!connectedAddress && address === connectedAddress,
+      // Only a reply drafted in the mailbox that holds the message keeps the
+      // thread's own headers - see sendTicketReply.
+      threaded: isHelpdesk
+    });
+  });
+
+  return { connected, connectedAddress, connectedName, connectError, addresses, own };
+}
+
+/* Sending the reply.
+
+   Two paths, because threading and the From address pull against each other.
+
+   From the helpdesk mailbox - the mailbox that holds the message - the reply is
+   drafted with Graph's createReply. That draft already carries the conversation
+   id, In-Reply-To and References and the quoted original, so the client's mail
+   app files the answer under the thread they started. This is the good path and
+   it is the default.
+
+   From any other mailbox, those headers cannot be reproduced: Graph will not
+   let a draft in one mailbox claim another mailbox's conversation, and
+   In-Reply-To is not a settable property. So createReply is still used, but
+   only to build the quoted body and work out who a reply goes to - then the
+   draft is thrown away and the mail is sent from the chosen mailbox with the
+   same "Re:" subject. Mail clients thread that on subject, which is weaker than
+   real references but is what a reply typed in Outlook from a personal mailbox
+   would do anyway. The composer says which of the two is about to happen.
+
+   Returns what was actually sent, so the caller never has to assume. */
+/* The pieces of a reply, read from the original message rather than drafted.
+
+   The Graph path below gets these for free from createReply. The flow path
+   cannot: createReply writes a draft into the helpdesk mailbox, and the whole
+   point of sending through a flow is that this process holds no mailbox write
+   right. So the same three things - the Re: subject, who the answer goes to,
+   and the quoted original - are worked out here from a plain read of the
+   message, which is the Mail.Read.Shared the board already has for showing
+   ticket bodies.
+
+   Reply-all is To: whoever wrote it, Cc: everyone else who was on it, minus our
+   own mailboxes - putting the helpdesk back on its own reply is how a support
+   inbox ends up answering itself. */
+async function buildReplyContextFromMessage(token, mailbox, messageId, { replyAll }) {
+  const select = 'subject,body,from,sender,replyTo,toRecipients,ccRecipients,sentDateTime';
+  const original = await graphGet(
+    `/users/${encodeURIComponent(mailbox)}/messages/${encodeURIComponent(messageId)}?$select=${select}`,
+    token
+  );
+  const addr = r => normalizeEmailAddress(r?.emailAddress?.address);
+  const ours = new Set([mailbox, ...REPLY_FROM_ADDRESSES]);
+  const author = (original?.replyTo || []).map(addr).filter(Boolean);
+  const from = addr(original?.from) || addr(original?.sender);
+  const to = [...new Set(author.length ? author : (from ? [from] : []))];
+  const cc = replyAll
+    ? [...new Set([...(original?.toRecipients || []), ...(original?.ccRecipients || [])].map(addr).filter(Boolean))]
+        .filter(address => !ours.has(address) && !to.includes(address))
+    : [];
+
+  const subject = String(original?.subject || '').trim();
+  const sentAt = original?.sentDateTime ? new Date(original.sentDateTime).toUTCString() : '';
+  const originalHtml = String(original?.body?.content || '');
+  // The same visual convention Outlook uses, because the client is about to
+  // read this in Outlook: a rule, who wrote it and when, then their message.
+  const quotedHtml = originalHtml
+    ? [
+        '<div style="border-top:1px solid #d0d5dd;margin:18px 0 10px;padding-top:10px;font-family:Segoe UI,Arial,sans-serif;font-size:12px;color:#667085;">',
+        from ? `<div><strong>From:</strong> ${escapeHtml(from)}</div>` : '',
+        sentAt ? `<div><strong>Sent:</strong> ${escapeHtml(sentAt)}</div>` : '',
+        subject ? `<div><strong>Subject:</strong> ${escapeHtml(subject)}</div>` : '',
+        '</div>',
+        original?.body?.contentType === 'text'
+          ? `<div style="white-space:pre-wrap;font-family:Segoe UI,Arial,sans-serif;font-size:13px;">${escapeHtml(originalHtml)}</div>`
+          : originalHtml
+      ].join('')
+    : '';
+
+  return {
+    subject: subject ? (/^re:/i.test(subject) ? subject : `Re: ${subject}`) : '',
+    to: to.map(address => ({ emailAddress: { address } })),
+    cc: cc.map(address => ({ emailAddress: { address } })),
+    quotedHtml
+  };
+}
+
+async function sendTicketReply({ req, token, from, messageId, to, cc, bodyText, subject, subjectHint, replyAll, ticketId }) {
+  const mailbox = SUPPORT_MAILBOX;
+  const replyHtml = replyTextToHtml(bodyText);
+  const sendFromHelpdesk = from === mailbox;
+
+  /* The flow path. No draft, no Graph send: the body is built here and the flow
+     puts it on the wire from its own Outlook connection.
+
+     `messageId` is passed on rather than used, because threading is the flow's
+     job here - a "Reply to email (V3)" on that id carries the conversation's
+     real headers, which nothing this process can do without a mailbox write
+     right. If the read below fails (no consent, message deleted) the reply
+     still goes: an unquoted answer that reaches the client beats a 502. */
+  if (MAIL_WEBHOOK_URL) {
+    let context = { subject: '', to: [], cc: [], quotedHtml: '' };
+    if (messageId && token) {
+      try {
+        context = await buildReplyContextFromMessage(token, mailbox, messageId, { replyAll: replyAll && !to.length });
+      } catch (error) {
+        console.warn('Reply context not read, sending unquoted:', String(error?.message || error).slice(0, 200));
+      }
+    }
+    const resolvedTo = to.length ? to : context.to;
+    const resolvedCc = cc.length ? cc : context.cc;
+    /* subjectHint is the board's own "Re: <ticket subject>", used only when the
+       mailbox read above could not supply the real one - which is exactly the
+       case a flow-only deployment is in. It is never allowed to override a
+       subject read from the message itself. */
+    const resolvedSubject = subject || context.subject || subjectHint || 'Support ticket update';
+    if (!resolvedTo.length) throw new Error('missing_recipients');
+    const sent = await sendMailViaFlow({
+      kind: 'support_kanban_reply',
+      from,
+      mailbox,
+      messageId: sendFromHelpdesk ? (messageId || '') : '',
+      // Passed so the flow's run history says which ticket a send belongs to;
+      // finding one send among hundreds is otherwise guesswork.
+      ticketId: ticketId || '',
+      to: resolvedTo,
+      cc: resolvedCc,
+      subject: resolvedSubject,
+      bodyHtml: context.quotedHtml ? injectReplyIntoDraftHtml(context.quotedHtml, replyHtml) : replyHtml
+    });
+    return {
+      // Only the flow can thread, and only on the mailbox that holds the
+      // message - claiming otherwise would put a promise in the composer that
+      // the client's mail app then breaks.
+      threaded: !!(messageId && sendFromHelpdesk),
+      via: 'flow',
+      subject: sent.subject,
+      to: sent.to,
+      cc: sent.cc
+    };
+  }
+
+  if (messageId && sendFromHelpdesk) {
+    // createReplyAll only when the agent asked for it AND did not name the
+    // recipients themselves - an explicit To list is an instruction, and
+    // quietly adding everyone else back to it would be a data leak.
+    const useReplyAll = replyAll && !to.length;
+    const draft = await graphRequest(
+      `/users/${encodeURIComponent(mailbox)}/messages/${encodeURIComponent(messageId)}/${useReplyAll ? 'createReplyAll' : 'createReply'}`,
+      token,
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) }
+    );
+    const draftId = String(draft?.id || '');
+    if (!draftId) throw new Error('reply_draft_not_created');
+
+    const patch = { body: { contentType: 'HTML', content: injectReplyIntoDraftHtml(draft?.body?.content, replyHtml) } };
+    if (to.length) patch.toRecipients = to;
+    if (cc.length) patch.ccRecipients = cc;
+    if (subject) patch.subject = subject;
+
+    const patched = await graphRequest(`/users/${encodeURIComponent(mailbox)}/messages/${encodeURIComponent(draftId)}`, token, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch)
+    });
+    await graphRequest(`/users/${encodeURIComponent(mailbox)}/messages/${encodeURIComponent(draftId)}/send`, token, { method: 'POST' });
+    return {
+      threaded: true,
+      subject: String(patched?.subject || draft?.subject || subject || ''),
+      to: (patch.toRecipients || draft?.toRecipients || []).map(r => r?.emailAddress?.address).filter(Boolean),
+      cc: (patch.ccRecipients || draft?.ccRecipients || []).map(r => r?.emailAddress?.address).filter(Boolean)
+    };
+  }
+
+  let quotedHtml = '';
+  let resolvedSubject = subject;
+  let resolvedTo = to;
+  let resolvedCc = cc;
+
+  if (messageId) {
+    const draft = await graphRequest(
+      `/users/${encodeURIComponent(mailbox)}/messages/${encodeURIComponent(messageId)}/${replyAll && !to.length ? 'createReplyAll' : 'createReply'}`,
+      token,
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) }
+    );
+    quotedHtml = String(draft?.body?.content || '');
+    if (!resolvedSubject) resolvedSubject = String(draft?.subject || '');
+    if (!resolvedTo.length) resolvedTo = (draft?.toRecipients || []).filter(r => r?.emailAddress?.address);
+    if (!resolvedCc.length) resolvedCc = (draft?.ccRecipients || []).filter(r => r?.emailAddress?.address);
+    // The draft was only ever scaffolding. Leaving it behind would put a
+    // half-written reply in the helpdesk mailbox's Drafts for someone to find
+    // and wonder about, so it goes - and a failure to delete it must not fail
+    // a reply that is about to be sent perfectly well.
+    if (draft?.id) {
+      await graphRequest(`/users/${encodeURIComponent(mailbox)}/messages/${encodeURIComponent(draft.id)}`, token, { method: 'DELETE' })
+        .catch(error => console.warn('Scaffold reply draft not deleted:', String(error?.message || error).slice(0, 160)));
+    }
+  }
+
+  if (!resolvedTo.length) throw new Error('missing_recipients');
+  if (!resolvedSubject) resolvedSubject = 'Support ticket update';
+
+  await graphRequest(`/users/${encodeURIComponent(from)}/sendMail`, token, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      message: {
+        subject: resolvedSubject,
+        body: { contentType: 'HTML', content: quotedHtml ? injectReplyIntoDraftHtml(quotedHtml, replyHtml) : replyHtml },
+        toRecipients: resolvedTo,
+        ...(resolvedCc.length ? { ccRecipients: resolvedCc } : {})
+      },
+      saveToSentItems: true
+    })
+  });
+
+  return {
+    threaded: false,
+    subject: resolvedSubject,
+    to: resolvedTo.map(r => r?.emailAddress?.address).filter(Boolean),
+    cc: resolvedCc.map(r => r?.emailAddress?.address).filter(Boolean)
+  };
+}
+
+// Turns a Graph failure into something the composer can act on. 403 here is
+// almost always a missing grant rather than a bug, and which grant it is
+// depends on whose mailbox was being sent as.
+function replyErrorResponse(res, error, context = {}) {
+  const message = String(error?.message || error);
+  const status = graphErrorStatus(error);
+  if (message === 'missing_recipients') return res.status(400).json({ error: 'missing_recipients' });
+  if (message.startsWith('m365_not_connected')) return res.status(409).json({ error: 'm365_not_connected' });
+  if (message.startsWith('m365_reauth_required')) return res.status(409).json({ error: 'm365_reauth_required', detail: message });
+  if (message.startsWith('m365_client_secret_invalid')) return res.status(409).json({ error: 'm365_client_secret_invalid', detail: message });
+  if (status === 403) {
+    return res.status(403).json({
+      error: 'reply_send_forbidden',
+      from: context.from || null,
+      connectedAddress: context.connectedAddress || null,
+      detail: message.slice(0, 300)
+    });
+  }
+  if (status === 404) return res.status(404).json({ error: 'reply_message_not_found', detail: message.slice(0, 300) });
+  console.error('Ticket reply failed:', message.slice(0, 400));
+  return res.status(502).json({ error: 'reply_send_failed', detail: message.slice(0, 300) });
+}
+
 // Which addresses this board may reply from, and whether it can reply at all.
 // The client asks before showing the composer so it can say "reconnect Outlook"
 // up front instead of letting someone write a reply that cannot be sent.
 app.get('/api/reply/from-addresses', requireAuth, async (req, res) => {
-  let connected = false;
-  try {
-    await resolveStoredM365Tokens(req);
-    connected = true;
-  } catch (_) {
-    connected = false;
-  }
+  const identity = await resolveReplyIdentity(req);
   return res.json({
-    canSend: connected && M365_CAN_SEND_MAIL,
-    connected,
+    // A configured flow can send whether or not this board holds an Outlook
+    // token, which is the whole point of it.
+    canSend: MAIL_WEBHOOK_URL ? true : (identity.connected && M365_CAN_SEND_MAIL),
+    connected: identity.connected,
+    // Which leg actually puts the mail on the wire, so the composer can say
+    // "reconnect Outlook" only when reconnecting Outlook would help.
+    sendVia: MAIL_WEBHOOK_URL ? 'flow' : 'graph',
     // False when the app's configured scopes never asked for Mail.Send. A
     // connection made before that scope was added is indistinguishable from
     // here (the token's own scopes are not inspected), so a send can still
     // fail with a Graph 403 telling the agent to reconnect.
-    scopeConfigured: M365_CAN_SEND_MAIL,
+    scopeConfigured: CAN_SEND_MAIL,
+    // The helpdesk mailbox stays the default: it is the sender the client has
+    // been corresponding with, and the only one whose reply keeps the thread's
+    // real headers.
     defaultAddress: SUPPORT_MAILBOX,
-    addresses: REPLY_FROM_ADDRESSES.map(address => ({
-      address,
-      label: address === SUPPORT_MAILBOX ? `${address} (helpdesk)` : address,
-      isDefault: address === SUPPORT_MAILBOX
-    }))
+    helpdeskAddress: SUPPORT_MAILBOX,
+    connectedAddress: identity.connectedAddress || null,
+    connectedName: identity.connectedName || null,
+    connectError: identity.connectError || null,
+    addresses: identity.addresses.map(a => ({ ...a, isDefault: a.address === SUPPORT_MAILBOX }))
   });
 });
 
 app.post('/api/tickets/:externalId/reply', requireAuth, replyLimiter, async (req, res) => {
+  const identity = await resolveReplyIdentity(req);
+  const from = normalizeEmailAddress(req.body?.from) || SUPPORT_MAILBOX;
   try {
     const externalId = String(req.params.externalId || '').trim();
     const messageId = String(req.body?.messageId || '').trim();
     const bodyText = String(req.body?.body || '').trim();
     const replyAll = req.body?.replyAll !== false;
     const subjectOverride = String(req.body?.subject || '').trim();
+    const subjectHint = String(req.body?.subjectHint || '').trim().slice(0, 300);
     if (!externalId) return res.status(400).json({ error: 'missing_ticket' });
     if (!bodyText) return res.status(400).json({ error: 'empty_reply' });
     if (bodyText.length > REPLY_BODY_MAX_CHARS) return res.status(413).json({ error: 'reply_too_long' });
 
-    const from = normalizeEmailAddress(req.body?.from) || SUPPORT_MAILBOX;
-    if (!REPLY_FROM_ADDRESSES.includes(from)) return res.status(403).json({ error: 'reply_from_not_allowed', allowed: REPLY_FROM_ADDRESSES });
+    const allowed = identity.addresses.map(a => a.address);
+    if (!allowed.includes(from)) return res.status(403).json({ error: 'reply_from_not_allowed', allowed });
 
     const to = toGraphRecipients(req.body?.to);
     const cc = toGraphRecipients(req.body?.cc);
     if (!messageId && !to.length) return res.status(400).json({ error: 'missing_recipients' });
 
-    const token = await graphDelegatedToken(req);
-    const mailbox = SUPPORT_MAILBOX;
-    const replyHtml = replyTextToHtml(bodyText);
-    let sentSubject = subjectOverride;
-
-    if (messageId) {
-      // createReplyAll only when the agent asked for it AND did not name the
-      // recipients themselves - an explicit To list is an instruction, and
-      // quietly adding everyone else back to it would be a data leak.
-      const useReplyAll = replyAll && !to.length;
-      const draft = await graphRequest(
-        `/users/${encodeURIComponent(mailbox)}/messages/${encodeURIComponent(messageId)}/${useReplyAll ? 'createReplyAll' : 'createReply'}`,
-        token,
-        { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) }
-      );
-      const draftId = String(draft?.id || '');
-      if (!draftId) throw new Error('reply_draft_not_created');
-
-      const patch = {
-        body: {
-          contentType: 'HTML',
-          content: injectReplyIntoDraftHtml(draft?.body?.content, replyHtml)
-        }
-      };
-      if (to.length) patch.toRecipients = to;
-      if (cc.length) patch.ccRecipients = cc;
-      if (subjectOverride) patch.subject = subjectOverride;
-      // Only when it differs from the mailbox: setting `from` to the mailbox
-      // that owns the draft is a no-op that can still 403 on a tenant that
-      // treats it as a Send As.
-      if (from !== mailbox) patch.from = { emailAddress: { address: from } };
-
-      const patched = await graphRequest(`/users/${encodeURIComponent(mailbox)}/messages/${encodeURIComponent(draftId)}`, token, {
-        method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch)
-      });
-      sentSubject = String(patched?.subject || draft?.subject || sentSubject || '');
-      await graphRequest(`/users/${encodeURIComponent(mailbox)}/messages/${encodeURIComponent(draftId)}/send`, token, { method: 'POST' });
-    } else {
-      // A manual ticket, or one whose Outlook message we no longer have: there
-      // is no thread to reply into, so this is a fresh mail from the mailbox.
-      if (!sentSubject) sentSubject = 'Support ticket update';
-      await graphRequest(`/users/${encodeURIComponent(from)}/sendMail`, token, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          message: {
-            subject: sentSubject,
-            body: { contentType: 'HTML', content: replyHtml },
-            toRecipients: to,
-            ...(cc.length ? { ccRecipients: cc } : {})
-          },
-          saveToSentItems: true
-        })
-      });
-    }
+    /* With a flow configured the send itself needs no Graph token, so a missing
+       or expired Outlook connection must not block a reply. One is still asked
+       for, because reading the original message is what quotes it - and that
+       read failing only costs the quote. */
+    const token = MAIL_WEBHOOK_URL
+      ? await graphDelegatedToken(req).catch(() => null)
+      : await graphDelegatedToken(req);
+    const sent = await sendTicketReply({ req, token, from, messageId, to, cc, bodyText, subject: subjectOverride, subjectHint, replyAll, ticketId: externalId });
 
     const actor = String(req.session.username || '').trim().toUpperCase() || null;
     const ticketRow = await prisma.ticket.findUnique({ where: { externalId }, select: { id: true } }).catch(() => null);
@@ -5753,8 +6343,10 @@ app.post('/api/tickets/:externalId/reply', requireAuth, replyLimiter, async (req
         metadata: {
           actor,
           from,
-          to: to.map(r => r.emailAddress.address),
-          cc: cc.map(r => r.emailAddress.address),
+          to: sent.to,
+          cc: sent.cc,
+          threaded: sent.threaded,
+          via: sent.via || 'graph',
           replyAll: !!(messageId && replyAll && !to.length),
           messageId: messageId || null,
           chars: bodyText.length
@@ -5762,26 +6354,486 @@ app.post('/api/tickets/:externalId/reply', requireAuth, replyLimiter, async (req
       });
     }
 
-    return res.json({
-      ok: true,
-      from,
-      to: to.map(r => r.emailAddress.address),
-      cc: cc.map(r => r.emailAddress.address),
-      subject: sentSubject || null,
-      threaded: !!messageId
-    });
+    return res.json({ ok: true, from, to: sent.to, cc: sent.cc, subject: sent.subject || null, threaded: sent.threaded });
   } catch (error) {
-    const message = String(error?.message || error);
-    const status = graphErrorStatus(error);
-    if (message.startsWith('m365_not_connected')) return res.status(409).json({ error: 'm365_not_connected' });
-    if (message.startsWith('m365_reauth_required')) return res.status(409).json({ error: 'm365_reauth_required', detail: message });
-    // 403 here is almost always the missing piece rather than a bug: either the
-    // token predates the Mail.Send scopes, or the chosen From has no Send As.
-    if (status === 403) return res.status(403).json({ error: 'reply_send_forbidden', detail: message.slice(0, 300) });
-    if (status === 404) return res.status(404).json({ error: 'reply_message_not_found', detail: message.slice(0, 300) });
-    console.error('Ticket reply failed:', message.slice(0, 400));
-    return res.status(502).json({ error: 'reply_send_failed', detail: message.slice(0, 300) });
+    return replyErrorResponse(res, error, { from, connectedAddress: identity.connectedAddress });
   }
+});
+
+/* Opening the ticket in Outlook when there is no Outlook mail to open.
+
+   Every ticket that came from the mailbox has a webLink and the button just
+   follows it. A ticket raised on the board by hand has no message at all, and
+   neither does one Graph never returned a link for - so the button used to
+   disappear, which is the wrong answer to "I want to deal with this in
+   Outlook". This creates the mail that is missing, as a draft, and hands back
+   its webLink for the board to open.
+
+   A draft rather than a sent mail on purpose: the agent asked to work in
+   Outlook, so what they get is an editable message with the ticket's subject,
+   client and description already in it, waiting in their Drafts. Nothing is
+   sent from here.
+
+   Where the draft is created is the From address the composer chose, which for
+   a manual ticket is usually the agent's own mailbox - and it has to be a
+   mailbox they can open, since the whole point is that the webLink lands
+   somewhere they can edit. A ticket that does have a message drafts a reply to
+   it in the helpdesk mailbox instead, so the thread is preserved. */
+app.post('/api/tickets/:externalId/outlook-draft', requireAuth, replyLimiter, async (req, res) => {
+  const identity = await resolveReplyIdentity(req);
+  const from = normalizeEmailAddress(req.body?.from) || SUPPORT_MAILBOX;
+  try {
+    const externalId = String(req.params.externalId || '').trim();
+    const messageId = String(req.body?.messageId || '').trim();
+    if (!externalId) return res.status(400).json({ error: 'missing_ticket' });
+
+    const allowed = identity.addresses.map(a => a.address);
+    if (!allowed.includes(from)) return res.status(403).json({ error: 'reply_from_not_allowed', allowed });
+
+    const token = await graphDelegatedToken(req);
+    const bodyText = String(req.body?.body || '').trim();
+    const draftHtml = bodyText ? replyTextToHtml(bodyText) : '';
+    let draft = null;
+    let mailbox = from;
+    let threaded = false;
+
+    if (messageId) {
+      // Reply to the real message, in the mailbox that holds it, so Outlook
+      // opens it as part of the client's thread.
+      mailbox = SUPPORT_MAILBOX;
+      threaded = true;
+      draft = await graphRequest(
+        `/users/${encodeURIComponent(mailbox)}/messages/${encodeURIComponent(messageId)}/createReply`,
+        token,
+        { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) }
+      );
+      if (draftHtml && draft?.id) {
+        draft = await graphRequest(`/users/${encodeURIComponent(mailbox)}/messages/${encodeURIComponent(draft.id)}`, token, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ body: { contentType: 'HTML', content: injectReplyIntoDraftHtml(draft?.body?.content, draftHtml) } })
+        });
+      }
+    } else {
+      const subject = String(req.body?.subject || '').trim() || 'Support ticket';
+      const to = toGraphRecipients(req.body?.to);
+      const cc = toGraphRecipients(req.body?.cc);
+      draft = await graphRequest(`/users/${encodeURIComponent(mailbox)}/messages`, token, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          subject,
+          body: { contentType: 'HTML', content: draftHtml || '<p></p>' },
+          ...(to.length ? { toRecipients: to } : {}),
+          ...(cc.length ? { ccRecipients: cc } : {})
+        })
+      });
+    }
+
+    const webLink = String(draft?.webLink || '');
+    if (!webLink) throw new Error('draft_without_weblink');
+
+    const actor = String(req.session.username || '').trim().toUpperCase() || null;
+    const ticketRow = await prisma.ticket.findUnique({ where: { externalId }, select: { id: true } }).catch(() => null);
+    if (ticketRow?.id) {
+      await createTicketAuditEvent({
+        ticketId: ticketRow.id,
+        userId: req.session.userId || null,
+        eventType: 'outlook_draft_created',
+        newValue: mailbox,
+        metadata: { actor, mailbox, threaded, messageId: messageId || null }
+      });
+    }
+
+    return res.json({ ok: true, webLink, draftId: String(draft?.id || ''), mailbox, threaded });
+  } catch (error) {
+    return replyErrorResponse(res, error, { from, connectedAddress: identity.connectedAddress });
+  }
+});
+
+/* ===================== Feedback from the people using it =================
+
+   A small button in the header, a box to type in, and this - so a bug in the
+   board can be reported from the board instead of remembered until someone
+   happens to mention it.
+
+   Three things happen with one report, and they are deliberately independent:
+
+   - it is recorded, first, before any delivery is attempted. A report that was
+     emailed and lost is bad; a report that was never written down anywhere is
+     worse. This is what makes "the email failed" a nuisance rather than a lost
+     bug report.
+   - it is emailed to everyone in FEEDBACK_EMAIL, from the mailbox the board is
+     connected to
+     Outlook as (/me/sendMail), so no Send As grant is needed for it to work.
+     Reply-To is the reporter, so answering the mail answers them.
+   - it is posted to FEEDBACK_WEBHOOK_URL if one is configured, which is how it
+     reaches Teams. Empty by default: no webhook, no Teams, no error.
+
+   The response says which of the three actually happened rather than a bare ok,
+   because "sent!" over a report that went nowhere is the one outcome worth
+   never printing. */
+/* Who the report is emailed to. Comma, semicolon or space separated, because
+   feedback about the board is read by the people who maintain it and there is
+   more than one of them - a single address means one person's holiday is a
+   fortnight of unread bug reports. Deduplicated, and anything without an @ is
+   dropped so a stray separator cannot make Graph reject the whole send. */
+const FEEDBACK_EMAILS = (() => {
+  const configured = String(process.env.FEEDBACK_EMAIL || '')
+    .split(/[,;\s]+/)
+    .map(value => value.trim().toLowerCase())
+    .filter(value => value.includes('@'));
+  return configured.length ? [...new Set(configured)] : ['sfa@quinta.im', 'sgu@quinta.im', 'ahk@quinta.im'];
+})();
+// The first one, for the places that show a single address or that a flow
+// reads as one - the list is what actually gets mailed.
+const FEEDBACK_EMAIL = FEEDBACK_EMAILS[0];
+// A Teams incoming webhook, or a Power Automate "When an HTTP request is
+// received" URL. The payload carries both a MessageCard (which Teams renders on
+// its own) and the same fields flat at the top level (which a flow can read),
+// so either kind of endpoint works without a shape negotiation.
+const FEEDBACK_WEBHOOK_URL = String(process.env.FEEDBACK_WEBHOOK_URL || '').trim();
+const FEEDBACK_MAX_CHARS = Number(process.env.FEEDBACK_MAX_CHARS || 4000);
+// Feedback is typed by a person, so a handful per session is generous; this is
+// only here to stop a stuck retry loop mailing somebody a thousand times.
+const feedbackLimiter = rateLimit({ windowMs: 10 * 60 * 1000, max: 20, standardHeaders: true, legacyHeaders: false });
+
+const FEEDBACK_CATEGORIES = {
+  bug: { label: 'Bug', emoji: '\u{1F41B}', colour: 'b42318' },
+  idea: { label: 'Idea', emoji: '\u{1F4A1}', colour: '0f766e' },
+  question: { label: 'Question', emoji: '\u{2753}', colour: '2563eb' },
+  other: { label: 'Feedback', emoji: '\u{1F4AC}', colour: '4f46e5' }
+};
+
+// Only the fields the report is allowed to carry, each clamped. The client
+// collects this itself (which view, which build, which browser), and it is the
+// difference between "the board is broken" and a reproducible report - but it
+// arrives from a browser, so none of it is trusted to be sane.
+function sanitizeFeedbackContext(raw) {
+  const context = (raw && typeof raw === 'object') ? raw : {};
+  const str = (value, max) => String(value == null ? '' : value).trim().slice(0, max);
+  return {
+    view: str(context.view, 40),
+    ticketId: str(context.ticketId, 200),
+    build: str(context.build, 60),
+    url: str(context.url, 300),
+    theme: str(context.theme, 20),
+    viewport: str(context.viewport, 24),
+    userAgent: str(context.userAgent, 300)
+  };
+}
+
+function feedbackContextRows(context, actor) {
+  return [
+    ['From', actor.label],
+    ['View', context.view || 'board'],
+    ['Ticket', context.ticketId || '-'],
+    ['Build', context.build || 'unknown'],
+    ['Page', context.url || '-'],
+    ['Screen', `${context.viewport || '-'}${context.theme ? ` (${context.theme} theme)` : ''}`],
+    ['Browser', context.userAgent || '-']
+  ];
+}
+
+function buildFeedbackEmailHtml({ category, message, context, actor }) {
+  const meta = FEEDBACK_CATEGORIES[category] || FEEDBACK_CATEGORIES.other;
+  const rows = feedbackContextRows(context, actor)
+    .map(([key, value]) => `<tr><td style="padding:3px 12px 3px 0;color:#667085;font-size:12px;white-space:nowrap;vertical-align:top;">${escapeHtml(key)}</td><td style="padding:3px 0;font-size:12px;color:#0f172a;word-break:break-all;">${escapeHtml(value)}</td></tr>`)
+    .join('');
+  return [
+    '<div style="font-family:Segoe UI,Arial,sans-serif;color:#0f172a;line-height:1.5;max-width:640px;">',
+    `<div style="font-size:12px;font-weight:700;color:#${meta.colour};text-transform:uppercase;letter-spacing:.06em;">${meta.emoji} ${escapeHtml(meta.label)} &middot; Support Kanban</div>`,
+    // The message first and whole, because that is the part somebody wrote by
+    // hand and the part that has to be read.
+    `<div style="margin:10px 0 16px;padding:13px 15px;border-left:3px solid #${meta.colour};background:#f8fafc;border-radius:0 8px 8px 0;white-space:pre-wrap;font-size:14px;">${escapeHtml(message)}</div>`,
+    `<table style="border-collapse:collapse;">${rows}</table>`,
+    '<div style="margin-top:14px;font-size:11px;color:#98a2b3;">Sent by the Feedback button on the support board. Reply to this mail to answer the reporter.</div>',
+    '</div>'
+  ].join('');
+}
+
+function buildFeedbackWebhookPayload({ category, message, context, actor }) {
+  const meta = FEEDBACK_CATEGORIES[category] || FEEDBACK_CATEGORIES.other;
+  const title = `${meta.emoji} ${meta.label} from ${actor.label}`;
+  const facts = feedbackContextRows(context, actor).map(([name, value]) => ({ name, value }));
+  return {
+    // Read by a Power Automate flow, or by anything else pointed at this URL.
+    kind: 'support_kanban_feedback',
+    category,
+    categoryLabel: meta.label,
+    message,
+    reporter: actor.label,
+    reporterEmail: actor.email || '',
+    recipientEmail: FEEDBACK_EMAIL,
+    recipientEmails: FEEDBACK_EMAILS,
+    context,
+    // Rendered by a Teams incoming webhook without a flow in between.
+    '@type': 'MessageCard',
+    '@context': 'https://schema.org/extensions',
+    themeColor: meta.colour,
+    summary: title,
+    title,
+    text: message,
+    sections: [{ facts, markdown: false }],
+    /* And the Adaptive Card, for Teams Workflows.
+
+       Microsoft retired the Office 365 connector that consumed the MessageCard
+       above; the supported route is now a Power Automate workflow, and the
+       "Post to a channel when a webhook request is received" template forwards
+       whatever it finds in `attachments`. Carrying all three shapes in one body
+       is a few hundred bytes and means the same URL works whether it points at
+       an old connector, a Workflows webhook, or somebody's own flow reading the
+       flat fields - rather than the setup depending on which one was chosen. */
+    attachments: [{
+      contentType: 'application/vnd.microsoft.card.adaptive',
+      content: {
+        type: 'AdaptiveCard',
+        $schema: 'http://adaptivecards.io/schemas/adaptive-card.json',
+        version: '1.4',
+        msteams: { width: 'Full' },
+        body: [
+          { type: 'TextBlock', text: title, weight: 'Bolder', size: 'Medium', wrap: true },
+          { type: 'TextBlock', text: message, wrap: true, spacing: 'Small' },
+          { type: 'FactSet', facts: facts.map(f => ({ title: f.name, value: f.value })), spacing: 'Medium' }
+        ],
+        actions: actor.email
+          ? [{ type: 'Action.OpenUrl', title: `Email ${actor.username || 'the reporter'}`, url: `mailto:${actor.email}` }]
+          : []
+      }
+    }]
+  };
+}
+
+/* Sending one report through both channels, on demand.
+
+   Configuring this is two settings and a consent, and every one of them fails
+   silently from the outside: a wrong webhook URL, a token without Mail.Send, a
+   flow that is switched off. Without this, the only way to find out is to type
+   a real report and wait to see whether anything arrives - and if nothing does,
+   there is nothing to say which leg was at fault.
+
+   Admin-only, because it sends mail. */
+// The subject line is the report's first line. Kept as a function because a
+// report pasted out of Outlook arrives with CRLF endings, and a stray carriage
+// return on the end of a mail subject is what renders as a box in somebody's
+// inbox.
+function feedbackFirstLine(message) {
+  return String(message || '').split(/\r?\n/)[0].trim().slice(0, 90) || 'New feedback';
+}
+
+/* Mailing one report, by whichever leg this deployment actually has.
+
+   The flow first when there is one: it needs no Mail.Send consent and no
+   Outlook connection, which is exactly the state a deployment is in when the
+   Feedback button is most needed. Otherwise /me/sendMail, which sends as the
+   connected identity and so needs no Send As grant either way. */
+async function sendFeedbackEmail({ req, subject, html, actor }) {
+  if (MAIL_WEBHOOK_URL) {
+    await sendMailViaFlow({
+      kind: 'support_kanban_feedback',
+      from: KANBAN_MAILBOX,
+      to: FEEDBACK_EMAILS,
+      subject,
+      bodyHtml: html,
+      replyTo: actor.email ? [actor.email] : [],
+      actor
+    });
+    return 'flow';
+  }
+  const token = await graphDelegatedToken(req);
+  await graphRequest(boardSendMailPath(), token, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      message: {
+        subject,
+        body: { contentType: 'HTML', content: html },
+        toRecipients: FEEDBACK_EMAILS.map(address => ({ emailAddress: { address } })),
+        ...(actor.email ? { replyTo: [{ emailAddress: { address: actor.email } }] } : {})
+      },
+      saveToSentItems: false
+    })
+  });
+  return 'graph';
+}
+
+async function deliverFeedback({ req, category, message, context, actor }) {
+  const meta = FEEDBACK_CATEGORIES[category] || FEEDBACK_CATEGORIES.other;
+  const subject = `[Kanban ${meta.label}] ${feedbackFirstLine(message)}`;
+  const result = { emailed: false, notified: false, emailError: '', webhookError: '', emailVia: '' };
+
+  try {
+    result.emailVia = await sendFeedbackEmail({ req, subject, html: buildFeedbackEmailHtml({ category, message, context, actor }), actor });
+    result.emailed = true;
+  } catch (error) {
+    result.emailError = String(error?.message || error).slice(0, 300);
+    console.warn('Feedback email failed:', result.emailError);
+  }
+
+  if (FEEDBACK_WEBHOOK_URL) {
+    try {
+      await postJson(FEEDBACK_WEBHOOK_URL, buildFeedbackWebhookPayload({ category, message, context, actor }));
+      result.notified = true;
+    } catch (error) {
+      result.webhookError = String(error?.message || error).slice(0, 300);
+      console.warn('Feedback webhook failed:', result.webhookError);
+    }
+  }
+  return result;
+}
+
+async function feedbackActorFor(req) {
+  let user = null;
+  if (req.session?.userId) {
+    user = await prisma.user
+      .findUnique({ where: { id: req.session.userId }, select: { username: true, displayName: true, email: true, role: true } })
+      .catch(() => null);
+  }
+  const username = String(user?.username || req.session?.username || 'unknown');
+  return {
+    username,
+    email: normalizeEmailAddress(user?.email) || agentOwnMailboxes({ username, email: user?.email })[0] || '',
+    label: `${user?.displayName || username.toUpperCase()}${user?.role ? ` (${user.role})` : ''}`
+  };
+}
+
+/* Wrapped, because this endpoint's whole job is to be run when delivery is
+   broken - and an async throw out of an Express handler is an unhandled
+   rejection, which on current Node ends the process. A diagnostic that takes
+   the board down when the thing it diagnoses is misconfigured is worse than no
+   diagnostic. */
+app.post('/api/feedback/test', requireAdmin, feedbackLimiter, async (req, res) => {
+ try {
+  const actor = await feedbackActorFor(req);
+  const context = sanitizeFeedbackContext({
+    view: 'delivery test',
+    build: APP_BUILD_VERSION,
+    url: '/api/feedback/test',
+    theme: '-',
+    viewport: '-',
+    userAgent: String(req.headers['user-agent'] || '')
+  });
+  const message = [
+    `This is a delivery test for the Feedback button on the support board.`,
+    ``,
+    `If this reached Outlook, the email leg works. If it also appeared in Teams, the webhook leg works.`,
+    `Nothing is broken and nobody reported anything - the board sent this on purpose.`
+  ].join('\n');
+
+  const result = await deliverFeedback({ req, category: 'other', message, context, actor });
+  return res.json({
+    ok: result.emailed || result.notified,
+    emailed: result.emailed,
+    notified: result.notified,
+    emailTo: FEEDBACK_EMAILS,
+    emailVia: result.emailVia || undefined,
+    webhookConfigured: !!FEEDBACK_WEBHOOK_URL,
+    // The reasons, in full, because this endpoint exists to be diagnosed by.
+    emailError: result.emailError || undefined,
+    webhookError: result.webhookError || undefined
+  });
+ } catch (error) {
+  const detail = String(error?.message || error).slice(0, 300);
+  console.error('Feedback delivery test failed:', detail);
+  return res.status(500).json({ ok: false, emailed: false, notified: false, emailError: detail });
+ }
+});
+
+app.post('/api/feedback', requireAuth, feedbackLimiter, async (req, res) => {
+  const message = String(req.body?.message || '').trim();
+  const rawCategory = String(req.body?.category || 'other').trim().toLowerCase();
+  const category = Object.prototype.hasOwnProperty.call(FEEDBACK_CATEGORIES, rawCategory) ? rawCategory : 'other';
+  if (!message) return res.status(400).json({ error: 'empty_feedback' });
+  if (message.length > FEEDBACK_MAX_CHARS) return res.status(413).json({ error: 'feedback_too_long', max: FEEDBACK_MAX_CHARS });
+
+  const context = sanitizeFeedbackContext(req.body?.context);
+  let user = null;
+  if (req.session?.userId) {
+    user = await prisma.user
+      .findUnique({ where: { id: req.session.userId }, select: { username: true, displayName: true, email: true, role: true } })
+      .catch(() => null);
+  }
+  const username = String(user?.username || req.session?.username || 'unknown');
+  const actor = {
+    username,
+    email: normalizeEmailAddress(user?.email) || agentOwnMailboxes({ username, email: user?.email })[0] || '',
+    label: `${user?.displayName || username.toUpperCase()}${user?.role ? ` (${user.role})` : ''}`
+  };
+
+  /* Recorded before anything is sent, and its id returned, so a report is never
+     only in an email that may not have gone out. SyncLog rather than a table of
+     its own: this needs no migration to start working, and a migration is a
+     deploy step that could leave the button 500ing on an environment that had
+     not run it. Query it with
+     `provider = 'feedback'` when you want the list. */
+  let logId = null;
+  try {
+    const row = await prisma.syncLog.create({
+      data: {
+        provider: 'feedback',
+        syncType: category,
+        status: 'received',
+        message: message.slice(0, FEEDBACK_MAX_CHARS),
+        metadata: { actor, context, receivedAt: new Date().toISOString() }
+      }
+    });
+    logId = row?.id || null;
+  } catch (error) {
+    console.error('Feedback could not be recorded:', String(error?.message || error).slice(0, 200));
+  }
+
+  const meta = FEEDBACK_CATEGORIES[category];
+  const subject = `[Kanban ${meta.label}] ${message.split(/\r?\n/)[0].slice(0, 90)}`;
+  let emailed = false;
+  let emailError = '';
+  let emailVia = '';
+  try {
+    emailVia = await sendFeedbackEmail({ req, subject, html: buildFeedbackEmailHtml({ category, message, context, actor }), actor });
+    emailed = true;
+  } catch (error) {
+    emailError = String(error?.message || error).slice(0, 200);
+    console.warn('Feedback email failed:', emailError);
+  }
+
+  let notified = false;
+  let webhookError = '';
+  if (FEEDBACK_WEBHOOK_URL) {
+    try {
+      await postJson(FEEDBACK_WEBHOOK_URL, buildFeedbackWebhookPayload({ category, message, context, actor }));
+      notified = true;
+    } catch (error) {
+      webhookError = String(error?.message || error).slice(0, 200);
+      console.warn('Feedback webhook failed:', webhookError);
+    }
+  }
+
+  if (logId) {
+    // What actually happened to it, on the record itself - so a report nobody
+    // ever saw is findable later rather than indistinguishable from one that
+    // was read and ignored.
+    await prisma.syncLog
+      .update({
+        where: { id: logId },
+        data: {
+          status: emailed || notified ? 'delivered' : 'stored_only',
+          metadata: { actor, context, emailed, notified, emailVia: emailVia || undefined, emailError: emailError || undefined, webhookError: webhookError || undefined }
+        }
+      })
+      .catch(() => null);
+  }
+
+  return res.json({
+    ok: true,
+    stored: !!logId,
+    emailed,
+    notified,
+    webhookConfigured: !!FEEDBACK_WEBHOOK_URL,
+    to: emailed ? FEEDBACK_EMAILS : null,
+    // Only when nothing was delivered, and only the reason - the client turns
+    // this into "recorded, but it could not be sent yet" rather than a silent
+    // success.
+    detail: (!emailed && !notified) ? (emailError || webhookError || 'no_delivery_configured') : undefined
+  });
 });
 
 app.post('/api/mcp-proxy', requireAuth, async (req, res) => {

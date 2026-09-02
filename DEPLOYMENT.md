@@ -197,6 +197,21 @@ SUPPORT_MAILBOX=helpdesk@quinta.im
 # SUPPORT_MAILBOX which is always offered. Each one also needs Send As granted
 # to the connected Outlook identity in Exchange, or Graph refuses the send.
 REPLY_FROM_ADDRESSES=
+# Optional, and the alternative to the Mail.Send consent: a Power Automate
+# "When an HTTP request is received" URL. Set it and the board sends replies and
+# Feedback mail by POSTing to that flow instead of through Graph, so this
+# deployment holds no credential that can send mail. See the section on it below.
+MAIL_WEBHOOK_URL=
+# Optional. The mailbox the board sends its OWN mail from - password resets and
+# feedback reports, never client replies. Unset, those send as whichever
+# identity last connected Outlook. See the section on it below.
+KANBAN_MAILBOX=
+# Who the header's Feedback button mails reports to. Comma separated; every
+# address listed gets the same mail. Defaults to the three below when unset.
+FEEDBACK_EMAIL=sfa@quinta.im,sgu@quinta.im,ahk@quinta.im
+# Optional. A Teams incoming webhook, or a Power Automate "When an HTTP request
+# is received" URL, to also post each report into Teams. Empty means email only.
+FEEDBACK_WEBHOOK_URL=
 
 HUBSPOT_CLIENT_ID=
 HUBSPOT_CLIENT_SECRET=
@@ -205,24 +220,286 @@ HUBSPOT_REDIRECT_URI=https://YOUR_DOMAIN/auth/hubspot/callback
 
 After production deploy, run `node seed-admin.js` once if your hosting platform does not run it automatically.
 
-## Replying to a ticket from the board says Outlook refused the send
+## Sending mail without giving the board a credential that can send mail
 
-Symptom: the reply composer opens, but sending reports "Outlook refused the
-send: reconnect it to grant mail-send permission".
+`MAIL_WEBHOOK_URL` is the alternative to the `Mail.Send` consent below. Set it to
+a Power Automate **"When an HTTP request is received"** trigger URL and the board
+stops asking Graph to send anything - replies and Feedback mail are POSTed to
+that flow, and the flow sends them on its own Outlook connection. Unset, nothing
+changes and the Graph path described further down is used.
 
-Replying needs two Graph scopes the board did not use before it could reply:
-`Mail.Send` and `Mail.Send.Shared`. `Mail.Send.Shared` is the one that matters -
-the reply is drafted on the message where it lives, in the helpdesk mailbox,
-which is not the connected identity's own.
+**Why this is the safer shape.** A delegated `Mail.Send` token in this process
+can send as the connected identity and as every mailbox Exchange grants it Send
+As on, so anything that leaks it can send mail as us until the consent is pulled.
+The flow URL leaks as "post one JSON body into one flow": it cannot read a
+mailbox, cannot change the From address the flow was built with, and is revoked
+by regenerating the trigger. It is still a secret - the signature is in the URL -
+so it belongs in the platform's env store, not in a committed file.
 
-Both are in the default `M365_SCOPES` now, but a connection made before they
-were added still holds a token without them. Reconnect Outlook (the Microsoft
-sign-in on the board) so consent is granted again, and if the tenant requires
-admin consent for the app, grant that first.
+**What it costs.** The flow owns the From address, so `REPLY_FROM_ADDRESSES` and
+the per-agent From are only honoured as far as the flow chooses to honour them;
+and a failed send comes back as an HTTP status rather than a Graph error, so the
+flow's run history becomes the place failures are diagnosed.
 
-The other cause of the same message is a From address that is not the helpdesk
-mailbox: sending as it needs Send As granted to the connected identity in
-Exchange, per address listed in `REPLY_FROM_ADDRESSES`.
+**The body the board POSTs.** One shape for every mail, with `kind` to switch on:
+
+```json
+{
+  "kind": "support_kanban_reply",
+  "from": "helpdesk@quinta.im",
+  "mailbox": "helpdesk@quinta.im",
+  "messageId": "AAMkAD...",
+  "ticketId": "",
+  "subject": "Re: Booking not syncing",
+  "bodyHtml": "<div>the agent's reply, above the quoted original</div>",
+  "to": ["client@example.com"],
+  "cc": [],
+  "replyTo": [],
+  "toLine": "client@example.com",
+  "ccLine": "",
+  "reporter": "",
+  "sentBy": ""
+}
+```
+
+`kind` is `support_kanban_reply` for a ticket reply and `support_kanban_feedback`
+for a Feedback report. `toLine`/`ccLine` are the same recipients semicolon-
+separated, because that is the shape the Outlook actions take.
+
+**The flow, in three actions.**
+
+1. **When an HTTP request is received** - paste the JSON above as the sample
+   payload so the designer generates the fields.
+2. **Condition** on `messageId` being non-empty.
+   - **true** > Outlook **"Reply to email (V3)"**, Message Id = `messageId`,
+     Body = `bodyHtml`, Is HTML on, Reply All off, To = `toLine`, Cc = `ccLine`.
+     This is the branch that keeps the thread's real headers - the same
+     `In-Reply-To`/`References` the Graph path gets from `createReply`.
+   - **false** > Outlook **"Send an email (V2)"**, To = `toLine`, Cc = `ccLine`,
+     Subject = `subject`, Body = `bodyHtml`, Is HTML on.
+3. **Response** with status 200. Without it the trigger answers 202 and the board
+   only learns that the flow accepted the request, not that the mail went.
+
+Build the flow with the connection you want mail sent from - the helpdesk
+mailbox. The board sends `messageId` only when the From is `SUPPORT_MAILBOX`,
+because a reply from any other mailbox cannot claim that conversation anyway.
+
+**What the board still needs Graph for.** Reading: ticket bodies, attachments,
+and the quoted original that goes underneath a reply. That is `Mail.Read` /
+`Mail.Read.Shared`, which is already consented. If that read fails the reply is
+still sent, without the quote, rather than failing.
+
+## Giving the board a mailbox of its own
+
+`KANBAN_MAILBOX` is the address the board sends *its own* mail from - password
+resets and feedback reports. It does not affect replies to clients.
+
+That split is the point. A reply must come from `SUPPORT_MAILBOX`: it is the
+address the client has been corresponding with, and the only one whose reply
+keeps the thread's real headers. A password reset is the opposite kind of mail -
+the board talking to its own team - and it does not belong in a client-facing
+mailbox's Sent Items. Unset, that mail sends as whichever identity last
+connected Outlook, which means the From address on a password reset changes
+depending on who signed in last week.
+
+```
+KANBAN_MAILBOX=kanban@quinta.im
+```
+
+**Which kind of mailbox to create.** It depends on which send path you use:
+
+- **With `MAIL_WEBHOOK_URL` (the flow):** a **shared mailbox** is enough, and
+  shared mailboxes need no licence. Build the flow with a licensed account that
+  has Send As on it, and set the "From (Send as)" field in "Send an email (V2)"
+  to the shared mailbox. Nothing signs in as the board.
+- **On the Graph path:** the mailbox must either have Send As granted to the
+  connected identity, or the board must be connected to Outlook *as* that
+  mailbox - which needs a licensed account, because a shared mailbox cannot sign
+  in interactively.
+
+Connecting the board as its own account is also what fixes the "last person to
+connect owns the sending identity" problem described below: nobody's personal
+sign-in overwrites it, because it is not a person.
+
+**What it does not do.** It does not remove the need for a permission. A mailbox
+is an address, not an authorisation - it still needs either the `Mail.Send`
+consent or the flow. And do not grant this mailbox Send As on the helpdesk
+mailbox: that hands back exactly the blast radius that keeping them separate was
+meant to remove.
+
+## Which address a reply is sent from, and why one is refused
+
+The composer offers three kinds of From address:
+
+- **the signed-in agent's own mailbox** - `sfa@quinta.im` for SFA. Taken from
+  their Kanban account's email when it has one, otherwise derived from the
+  trigram. Full-name and `admin`/`owner` logins get nothing derived, since those
+  are not mailbox names; give those accounts an email in Users to offer one.
+- **the helpdesk mailbox** (`SUPPORT_MAILBOX`), which is the default. It is the
+  sender the client has been corresponding with, and the only one whose reply
+  keeps the thread's real headers - see below.
+- **anything in `REPLY_FROM_ADDRESSES`**, for shared aliases no account is named
+  after.
+
+Threading differs between them, and the composer says which applies before
+anything is typed. A reply **from the helpdesk mailbox** is drafted with Graph's
+`createReply` on the actual message, so it carries the conversation id,
+`In-Reply-To` and `References` and the client's mail app files it under the
+thread they started. A reply **from any other mailbox** cannot reproduce those -
+Graph will not let a draft in one mailbox claim another's conversation - so it
+goes out as a new `Re:` mail with the quoted original, which clients group by
+subject. That is exactly what replying from a personal mailbox in Outlook would
+do.
+
+**None of this applies when `MAIL_WEBHOOK_URL` is set** - the flow owns the From
+address and the Send As question goes away with it. The rest of this section is
+about the Graph path.
+
+**Why a send is refused.** There is one Outlook connection for the whole board:
+every send is made by whichever identity last signed in to Microsoft here. That
+identity can send as its own mailbox and as any mailbox Exchange grants it
+Send As on - nothing else. So a refusal means one of:
+
+1. the connection predates the `Mail.Send` / `Mail.Send.Shared` scopes and holds
+   a token without them. Both are in the default `M365_SCOPES` now; reconnect
+   Outlook so consent is granted again, and grant tenant admin consent first if
+   the tenant requires it.
+2. the chosen From is a mailbox the connected identity has no Send As right on.
+   Either grant it in Exchange, or have that agent connect Outlook themselves -
+   the session's own tokens are preferred over the shared ones, so their own
+   mailbox then needs no grant at all.
+
+The composer marks the one address that is certain to work (the connected
+account) and names the connected identity in the error, so which of the two it
+is should be visible without reading logs.
+
+**One caveat worth knowing.** Signing in to Microsoft stores the tokens in that
+agent's session *and* overwrites the board's shared connection, so the last
+person to connect becomes the identity used by every session that has none of
+its own. That is long-standing behaviour, not new here, but it is what decides
+whose mailbox an unauthenticated-to-Graph session sends as.
+
+## Turning the Feedback button's notifications on
+
+Two settings and one consent, and a button that proves whether they worked.
+
+**0. Or skip the consent entirely.** If `MAIL_WEBHOOK_URL` is set (see the
+section above), the report's email leg goes through that flow and none of the
+Outlook consent below applies - the Feedback button works on a deployment whose
+Outlook connection is broken, which is the deployment most likely to need it.
+Everything below is for the Graph path.
+
+**1. Outlook (email).** Nothing to set unless the address changes -
+`FEEDBACK_EMAIL` defaults to `sfa@quinta.im,sgu@quinta.im,ahk@quinta.im`, and
+takes any comma-separated list. What it needs is the `Mail.Send`
+consent: the report is sent through `/me/sendMail`, so the identity the board is
+connected to Outlook as must hold a token carrying that scope. A connection made
+before the reply composer shipped does not. **Sign in to Microsoft again on the
+board** (the same reconnect the reply composer needs - one covers both), and if
+the tenant requires admin consent for the app, grant that first.
+
+Check the boot log before anything else. If it says
+
+```
+[m365] M365_CLIENT_SECRET is a GUID, which means it is the client secret ID
+```
+
+then no token can be issued at all on that environment and nothing Graph-backed
+works - ticket bodies included. Renew the secret in Azure (App registrations >
+Certificates & secrets > New client secret > copy the **Value** column, not the
+ID) before reconnecting.
+
+**2. Teams.** Set `FEEDBACK_WEBHOOK_URL`. The supported way to get one:
+
+- In Teams, open the channel you want the reports in.
+- **... > Workflows > "Post to a channel when a webhook request is received"**.
+- Complete the template; it hands you an HTTP POST URL.
+- Put that URL in `FEEDBACK_WEBHOOK_URL` and restart.
+
+To notify SFA, SGU and AHK specifically rather than just the channel, add an
+**@mention** action for each of the three in that same flow before the post
+step, and put the mention tokens in the message - the webhook payload carries
+their report, but who gets pinged is the flow's decision, not the board's.
+
+Use Workflows rather than the old **Connectors > Incoming Webhook**: Microsoft
+has retired Office 365 connectors in Teams. The payload still carries the
+MessageCard shape an old connector consumed, so an existing one keeps working
+until it is switched off, but new ones cannot be created.
+
+Nothing else needs configuring for either kind of endpoint. One request body
+carries an Adaptive Card in `attachments` (which the Workflows template posts),
+a MessageCard at the top level (which a connector renders), and the same fields
+flat - `category`, `message`, `reporter`, `reporterEmail`, `context` - for a flow
+of your own to read.
+
+**3. Prove it.** Open the Feedback modal as an admin and press **Test delivery**.
+It sends one canned report and reports each leg separately, for example:
+
+```
+email to sfa@quinta.im sent - Teams webhook posted
+email failed (graph_error_403:...) - no Teams webhook configured
+```
+
+The full Graph or webhook error also goes to the browser console, which is the
+part worth pasting into a ticket. Nothing is stored for a test and no report is
+invented - it is a real send of an obviously-labelled test message.
+
+If a leg fails: a 403 on the email means the consent above is missing or the
+chosen mailbox is refused; a webhook error means the URL is wrong, the flow is
+off, or the flow rejected the body.
+
+## Where feedback from the Feedback button goes
+
+Three things happen to one report, independently, so that no single failure
+loses it:
+
+1. **It is recorded first**, before any delivery is attempted, in the `SyncLog`
+   table with `provider = 'feedback'`. List them with
+   `SELECT "createdAt", "syncType", status, message FROM "SyncLog" WHERE provider = 'feedback' ORDER BY "createdAt" DESC;`
+   or in `npm run db:studio`. The row's `status` ends up `delivered` or
+   `stored_only`, and its metadata records which channel worked - so a report
+   nobody ever received is findable rather than indistinguishable from one that
+   was read and ignored.
+2. **It is emailed** to every address in `FEEDBACK_EMAIL` (default
+   `sfa@quinta.im,sgu@quinta.im,ahk@quinta.im`) - one mail with all of them on
+   it, so a reply is visible to the others - from the
+   mailbox the board is connected to Outlook as, via `/me/sendMail` - so it
+   needs no Send As grant anywhere, only the `Mail.Send` scope the reply
+   composer already needs. Reply-To is the reporter, so answering the mail
+   answers them.
+3. **It is posted to `FEEDBACK_WEBHOOK_URL`** if one is set, which is how it
+   reaches Teams. The payload is both a MessageCard (a Teams incoming webhook
+   renders it with no flow in between) and the same fields flat at the top level
+   (a Power Automate flow can read `category`, `message`, `reporter`,
+   `context`), so either kind of URL works. Empty by default: no webhook, no
+   Teams, and no error.
+
+The reporter is told which of the three happened. A report that was recorded but
+not emailed says so ("recorded, but it could not be emailed yet") rather than
+showing a success it did not earn.
+
+Each report carries the view, build, browser, screen size, theme and the open
+ticket, collected in the browser and clamped server-side. That context is shown
+in the modal before sending, so nobody has to take on trust what is attached.
+
+Feedback is deliberately not a Prisma model of its own: a new table is a
+migration, and a migration is a deploy step that can leave the button returning
+500 on an environment that has not run it. If a feedback inbox in the UI is
+wanted later, that is the point to add the table.
+
+## A ticket has no email in Outlook
+
+Tickets raised on the board by hand have no Outlook message, and occasionally
+Graph returns no `webLink` for one that does. "Open in Outlook" used to
+disappear for those; it now reads **Create in Outlook** and offers to create the
+missing mail as a **draft** - subject, client and description filled in, nothing
+sent - then opens it. The draft is created in the connected account's mailbox
+(falling back to the agent's own address, then the helpdesk), because that is
+the mailbox the board can certainly write to and the agent can certainly open.
+
+The link is remembered on the ticket afterwards, so the button goes straight to
+that draft for everyone from then on rather than offering to create a second
+one.
 
 ## Tickets open with no formatting and no images
 
