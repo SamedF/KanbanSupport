@@ -539,6 +539,47 @@ npm run check:m365
   backoff, and the pictures are fetched separately so a throttled attachment
   call no longer discards the whole message.
 
+## Quinta properties in QT-Tools
+
+The QT-Tools sidebar has a **Quinta Properties** panel: the hotels this board
+supports, with each one's operational profile, and the bot's dialog catalogue,
+next to the tickets they are about.
+
+The board talks to the Quinta MCP server **as itself**, over its own bearer
+token. It cannot reuse anyone's Claude connector — that authorisation belongs to
+a Claude account, and there is no mechanism for a server to borrow it. Until the
+three variables below are set the panel says so on screen and names them; it
+never shows an empty list and pretends to be connected.
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `QUINTA_MCP_URL` | unset | The Quinta MCP server endpoint (Streamable HTTP). Unset disables the panel. |
+| `QUINTA_MCP_TOKEN` | unset | Bearer token the board authenticates with. Sent as `Authorization: Bearer …` on every call. |
+| `QUINTA_TEAM_IDS` | unset | Comma-separated numeric team ids, optionally `id:Label` (`401:Tartane St Tropez`). Required by the Properties tab only. |
+
+`QUINTA_TEAM_IDS` has to be maintained by hand, and that is a property of the
+server rather than an oversight here: it exposes `get-dialogs-list` and
+`get-hotel-settings`, and nothing that enumerates hotels. `get-hotel-settings`
+is a lookup by numeric team id, so something has to supply the list. The
+**Dialog catalogue** tab needs no team ids at all and works as soon as the URL
+and token are set.
+
+Responses are cached in memory — an hour for the dialog catalogue (definitions
+that rarely change and are identical for every caller), ten minutes for property
+profiles, which are edited by the people using this board.
+
+Two things to check on the first real call, neither of which could be verified
+without credentials:
+
+- **Auth shape.** A static bearer token is assumed. If Quinta uses OAuth client
+  credentials instead, `quintaCallTool` needs a token-exchange step added;
+  nothing else changes.
+- **Profile shape.** The panel lays out name, address, bot languages, services
+  and notification contacts. Anything else the server returns is kept and shown
+  under *Raw profile* rather than dropped, so a field this board was not written
+  for is still visible to the agent — but the named layout may need adjusting
+  once a real profile comes back.
+
 ## Important security note
 
 The uploaded ZIP contained a `.env` file. Rotate the Neon password and any Microsoft/HubSpot secrets before production deployment.
