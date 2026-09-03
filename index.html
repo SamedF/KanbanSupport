@@ -4886,6 +4886,22 @@ th {
 .q-test-ok { background:var(--emerald-50,#ecfdf5); border:1px solid var(--emerald-200,#a7f3d0); color:var(--emerald-700,#047857); }
 .q-test-bad { background:var(--red-50,#fef2f2); border:1px solid var(--red-200,#fecaca); color:var(--red-700,#b91c1c); }
 
+
+/* ===== Quinta: server endpoint field ====================================== */
+.q-field-admin {
+  border:1px dashed var(--border-strong,#cbd5e1); border-radius:10px;
+  padding:11px 12px; background:var(--surface-soft,#f8fafc);
+}
+.q-field-foot {
+  display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap;
+  margin-top:6px; font-size:10.5px; color:var(--muted,#64748b); font-weight:400;
+}
+.q-inline-btn { font-size:10.5px; padding:3px 10px; flex:0 0 auto; }
+.q-note-warn {
+  border:1px solid var(--amber-300,#fcd34d); background:var(--amber-50,#fffbeb);
+  color:var(--amber-800,#92400e); border-radius:9px; padding:9px 11px;
+}
+
 </style>
 </head>
 <body>
@@ -8437,6 +8453,28 @@ async function loadQuintaDialogs(){
   renderQuintaView();
 }
 
+async function saveQuintaServerUrl(){
+  const url=document.getElementById('q-url')?.value||'';
+  quintaBusy=true;quintaTestResult=null;renderQuintaView();
+  try{
+    const res=await fetch('/api/quinta/server',{
+      method:'POST',credentials:'include',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({url})
+    });
+    const data=await res.json();
+    if(!res.ok)throw new Error(data?.message||data?.error||('HTTP '+res.status));
+    showToast(url?'Server endpoint saved':'Server endpoint cleared','ok');
+    quintaProperties={state:'idle',rows:[]};quintaDialogs={state:'idle',rows:[],categories:[]};
+    quintaSettingsOpen=true;
+    await loadQuintaStatus();
+  }catch(error){
+    showToast(String(error?.message||error));
+  }finally{
+    quintaBusy=false;renderQuintaView();
+  }
+}
+
 async function saveQuintaSettings(){
   const token=document.getElementById('q-token')?.value||'';
   const teamIds=document.getElementById('q-teams')?.value||'';
@@ -8505,12 +8543,23 @@ function quintaValue(value){
 function quintaSettingsHtml(){
   const s=quintaStatus||{};
   const saved=!!s.connected;
+  // One server for the whole team, so it is set once - and only by an admin,
+  // because the board is what makes the outbound request with it.
+  const serverBlock=s.canEditServer
+    ? `<label class="q-field q-field-admin">
+         <span>Server endpoint <em>(shared by the whole team &middot; admin only)</em></span>
+         <input class="form-input" id="q-url" type="text" autocomplete="off" spellcheck="false" value="${esc(s.serverUrl||'')}" placeholder="https://mcp.quinta.example/mcp">
+         <span class="q-field-foot">${s.serverUrlSource==='env'?'Currently from QUINTA_MCP_URL — saving here overrides it, no redeploy needed.':s.serverUrlSource==='saved'?'Saved on the board.':'Not set yet — nobody can connect until it is.'}
+           <button class="btn-out q-inline-btn" id="q-url-save"${quintaBusy?' disabled':''}>Save endpoint</button></span>
+       </label>`
+    : (s.serverUrl?'':'<p class="q-note q-note-warn">No Quinta server has been set yet. An admin has to enter its URL before anyone can connect.</p>');
   return `<div class="q-settings">
     <div class="q-settings-head">
       <strong>${saved?'Your Quinta connection':'Connect your Quinta account'}</strong>
       ${saved?`<span class="q-hint-chip">token ending ${esc(s.tokenHint||'????')}</span>`:''}
     </div>
     <p class="q-note">The board asks each agent separately: the Quinta server is shared, but the token is yours and the properties you cover are yours. Your token is encrypted before it is stored and is never shown again - only its last four characters.</p>
+    ${serverBlock}
     <label class="q-field">
       <span>Quinta token${saved?' <em>(leave blank to keep the saved one)</em>':''}</span>
       <input class="form-input" id="q-token" type="password" autocomplete="off" spellcheck="false" placeholder="${saved?'••••••••  unchanged':'Paste the token Quinta issued you'}">
@@ -8575,6 +8624,8 @@ function quintaDialogsHtml(){
 }
 
 function quintaBindSettings(host){
+  host.querySelector('#q-url-save')?.addEventListener('click',saveQuintaServerUrl);
+  host.querySelector('#q-url')?.addEventListener('keydown',e=>{if(e.key==='Enter')saveQuintaServerUrl();});
   host.querySelector('#q-save')?.addEventListener('click',saveQuintaSettings);
   host.querySelector('#q-test')?.addEventListener('click',testQuintaConnection);
   host.querySelector('#q-clear')?.addEventListener('click',clearQuintaSettings);
@@ -8590,27 +8641,22 @@ function renderQuintaView(){
   const header=`<div class="q-head">
       <div><div class="q-title">Quinta properties</div>
         <div class="q-subtitle">${s?.endpoint?esc(s.endpoint):'The hotels you support, read from the Quinta MCP server'}</div></div>
-      ${s?.connected?`<div class="q-controls">
-        <input class="filter-sel" id="q-search" type="text" placeholder="Search…" value="${esc(quintaQuery)}" autocomplete="off">
-        <button class="btn-out" id="q-settings-toggle">${quintaSettingsOpen?'Hide connection':'Your connection'}</button>
-        <button class="btn-out" id="q-refresh">Refresh</button>
-      </div>`:''}
+      <div class="q-controls">
+        ${s?.connected?`<input class="filter-sel" id="q-search" type="text" placeholder="Search…" value="${esc(quintaQuery)}" autocomplete="off">`:''}
+        ${s?`<button class="${s.connected?'btn-out':'btn-primary'}" id="q-settings-toggle">${quintaSettingsOpen?'Hide connection':(s.connected?'Your connection':'Connect')}</button>`:''}
+        ${s?.connected?`<button class="btn-out" id="q-refresh">Refresh</button>`:''}
+      </div>
     </div>`;
-
-  // The one thing an agent genuinely cannot fix themselves.
-  if(s&&!s.serverConfigured){
-    host.innerHTML=header+`<div class="q-setup">
-      <strong>No Quinta server configured on this deployment.</strong>
-      <p>Whoever deploys the board has to set <code>QUINTA_MCP_URL</code> - the endpoint is the same for the whole team, so it is not something you can enter here. Your own token goes in once that is done.</p>
-    </div>`;
-    return;
-  }
 
   if(!s){host.innerHTML=header+'<div class="q-loading"><span class="spinner"></span> Checking your connection…</div>';return;}
 
+  // Not connected: the form is the page. An unset endpoint used to render a
+  // dead end with nothing to type into, which is the whole bug being fixed
+  // here - there is now always a way in.
   if(!s.connected){
     host.innerHTML=header+quintaSettingsHtml();
     quintaBindSettings(host);
+    host.querySelector('#q-settings-toggle')?.addEventListener('click',()=>{quintaSettingsOpen=!quintaSettingsOpen;renderQuintaView();});
     return;
   }
 

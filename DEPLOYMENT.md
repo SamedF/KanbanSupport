@@ -553,15 +553,26 @@ share one identity.
 
 | Variable | Default | Effect |
 | --- | --- | --- |
-| `QUINTA_MCP_URL` | unset | The Quinta MCP server endpoint (Streamable HTTP). The only one that has to be deployed. Unset, the panel says so and no agent can connect. |
+| `QUINTA_MCP_URL` | unset | Default Quinta MCP server endpoint (Streamable HTTP). Optional: an admin can set the endpoint from the panel instead, and a value saved there overrides this one. |
 | `QUINTA_MCP_TOKEN` | unset | *Optional fallback.* A single shared service token, used only by agents who have not saved their own. Leave unset to require a personal token from everyone. |
 | `QUINTA_TEAM_IDS` | unset | *Optional fallback.* A default property list for agents who have not set theirs. |
 
-Set `QUINTA_MCP_URL` and each agent does the rest: **QT-Tools → Quinta
-Properties → paste token → list team ids → Save**. The panel has a **Test
-connection** button that names the actual failure — token rejected, token not
-permitted, server unreachable, wrong server — rather than showing a transport
-error.
+Nothing has to be deployed at all: open **QT-Tools → Quinta Properties →
+Connect**. An admin fills in the server endpoint once (shared by the team), and
+every agent then pastes their own token and lists their team ids. The panel has
+a **Test connection** button that names the actual failure — token rejected,
+token not permitted, server unreachable, wrong server — rather than showing a
+transport error.
+
+### Who can change the endpoint, and why it is restricted
+
+Only admins. Not for tidiness: the board makes an outbound request to that URL
+carrying an agent bearer token, so a user-settable fetch target is an SSRF
+primitive. The URL is validated the same way the QT Detect URL checker validates
+its input — http(s) only, and the hostname is **resolved** and every address it
+returns has to be public. A URL that merely looks external but resolves to
+loopback, a private range, or cloud metadata is refused before any credential
+is sent to it.
 
 ### How the per-agent credential is stored
 

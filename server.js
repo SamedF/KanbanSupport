@@ -5226,6 +5226,66 @@ const QUINTA_MCP_URL = String(process.env.QUINTA_MCP_URL || '').trim();
 const QUINTA_FALLBACK_TOKEN = String(process.env.QUINTA_MCP_TOKEN || '').trim();
 const QUINTA_FALLBACK_TEAM_IDS = String(process.env.QUINTA_TEAM_IDS || '').trim();
 
+/* Where the endpoint comes from.
+
+   It was environment-only, which meant the panel could ask an agent for their
+   token but had nowhere to put the one thing that has to be right first - so
+   with QUINTA_MCP_URL unset the panel was a dead end with no way in. It is now
+   settable from the panel too, saved board-wide (one server serves everyone,
+   unlike the tokens), with the environment as the default.
+
+   Admin-only, and not for tidiness: the board makes outbound requests to this
+   URL carrying an agent's bearer token. A user-supplied fetch target is an SSRF
+   primitive, so it is restricted to admins AND checked against the same
+   private-address guard the URL checker uses - see quintaValidateServerUrl. */
+async function ensureAppSettingTable() {
+  await prisma.$executeRaw`
+    CREATE TABLE IF NOT EXISTS "AppSetting" (
+      "key" TEXT PRIMARY KEY,
+      "value" TEXT,
+      "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+  `;
+}
+async function appSettingGet(key) {
+  await ensureAppSettingTable();
+  const rows = await prisma.$queryRaw`SELECT "value" FROM "AppSetting" WHERE "key" = ${String(key)} LIMIT 1`;
+  const row = Array.isArray(rows) ? rows[0] : null;
+  return row?.value || '';
+}
+async function appSettingSet(key, value) {
+  await ensureAppSettingTable();
+  await prisma.$executeRaw`
+    INSERT INTO "AppSetting" ("key", "value", "updatedAt") VALUES (${String(key)}, ${String(value)}, CURRENT_TIMESTAMP)
+    ON CONFLICT ("key") DO UPDATE SET "value" = ${String(value)}, "updatedAt" = CURRENT_TIMESTAMP
+  `;
+}
+
+const QUINTA_URL_KEY = 'quinta.mcpUrl';
+// Saved value wins over the environment, so a deployment default can be
+// corrected from the panel without a redeploy.
+async function quintaServerUrl() {
+  return (await appSettingGet(QUINTA_URL_KEY)) || QUINTA_MCP_URL;
+}
+async function quintaServerUrlSource() {
+  return (await appSettingGet(QUINTA_URL_KEY)) ? 'saved' : (QUINTA_MCP_URL ? 'env' : 'none');
+}
+
+/* Refuses anything the board should not be pointed at. Same reasoning as the
+   URL checker: a hostname passing a text check says nothing about where it
+   resolves, so the address is resolved and every answer has to be public. */
+async function quintaValidateServerUrl(raw) {
+  const value = String(raw || '').trim();
+  if (!value) return { ok: false, message: 'Enter the Quinta MCP server URL.' };
+  let url;
+  try { url = new URL(value); } catch (_) { return { ok: false, message: 'That is not a valid URL.' }; }
+  if (!/^https?:$/.test(url.protocol)) return { ok: false, message: 'The URL must start with https:// (or http:// for a local server).' };
+  if (!(await qtResolvesToPublicHost(url.hostname))) {
+    return { ok: false, message: 'That address resolves to a private or internal host. The board will not send credentials there.' };
+  }
+  return { ok: true, url: url.toString() };
+}
+
 function quintaServerConfigured() { return !!QUINTA_MCP_URL; }
 
 async function ensureQuintaSettingsTable() {
@@ -5317,11 +5377,12 @@ async function loadMcpClientSdk() {
 // calls are infrequent and cached below, so a fresh connection is cheaper to
 // reason about than a pool.
 async function quintaCallTool(token, name, args) {
-  if (!QUINTA_MCP_URL) throw Object.assign(new Error('quinta_server_not_configured'), { status: 503 });
+  const endpoint = await quintaServerUrl();
+  if (!endpoint) throw Object.assign(new Error('quinta_server_not_configured'), { status: 503 });
   if (!token) throw Object.assign(new Error('quinta_no_token'), { status: 401 });
   const { Client, StreamableHTTPClientTransport } = await loadMcpClientSdk();
   const client = new Client({ name: 'support-kanban', version: '1.0.0' }, { capabilities: {} });
-  const transport = new StreamableHTTPClientTransport(new URL(QUINTA_MCP_URL), {
+  const transport = new StreamableHTTPClientTransport(new URL(endpoint), {
     requestInit: { headers: { Authorization: `Bearer ${token}` } }
   });
   try {
@@ -5390,10 +5451,16 @@ function quintaFriendlyError(raw) {
 app.get('/api/quinta/status', requireAuth, async (req, res) => {
   try {
     const settings = await quintaSettingsFor(req.session.userId);
+    const endpoint = await quintaServerUrl();
     return res.json({
       ok: true,
-      serverConfigured: quintaServerConfigured(),
-      endpoint: QUINTA_MCP_URL ? QUINTA_MCP_URL.replace(/^(https?:\/\/[^/]+).*$/, '$1/…') : null,
+      serverConfigured: !!endpoint,
+      serverUrl: endpoint || '',
+      serverUrlSource: await quintaServerUrlSource(),
+      // Only an admin may repoint the board, because the board is what makes
+      // the outbound request.
+      canEditServer: isAdminRole(req.session.role),
+      endpoint: endpoint ? endpoint.replace(/^(https?:\/\/[^/]+).*$/, '$1/…') : null,
       connected: !!settings.token,
       usingFallback: settings.usingFallback,
       tokenHint: settings.tokenHint,
@@ -5445,6 +5512,27 @@ app.post('/api/quinta/settings', requireAuth, async (req, res) => {
   }
 });
 
+app.post('/api/quinta/server', requireAdmin, async (req, res) => {
+  try {
+    const raw = String(req.body?.url || '').trim();
+    // Empty clears the saved value and falls back to the environment.
+    if (!raw) {
+      await appSettingSet(QUINTA_URL_KEY, '');
+      quintaCache.clear();
+      return res.json({ ok: true, serverUrl: QUINTA_MCP_URL || '', serverUrlSource: QUINTA_MCP_URL ? 'env' : 'none' });
+    }
+    const check = await quintaValidateServerUrl(raw);
+    if (!check.ok) return res.status(400).json({ error: 'invalid_server_url', message: check.message });
+    await appSettingSet(QUINTA_URL_KEY, check.url);
+    // Everything cached was fetched from the old endpoint.
+    quintaCache.clear();
+    return res.json({ ok: true, serverUrl: check.url, serverUrlSource: 'saved' });
+  } catch (error) {
+    console.error('Quinta server url save failed:', error?.message || error);
+    return res.status(500).json({ error: 'quinta_server_url_failed' });
+  }
+});
+
 app.delete('/api/quinta/settings', requireAuth, async (req, res) => {
   try {
     await ensureQuintaSettingsTable();
@@ -5463,8 +5551,10 @@ app.delete('/api/quinta/settings', requireAuth, async (req, res) => {
    in terms of what the agent can do about it. */
 app.get('/api/quinta/test', requireAuth, async (req, res) => {
   try {
-    if (!quintaServerConfigured()) {
-      return res.json({ ok: false, stage: 'server', message: 'No Quinta server is configured on this deployment. QUINTA_MCP_URL has to be set by whoever deploys the board - it is the same for everyone, so it is not something you can set here.' });
+    if (!(await quintaServerUrl())) {
+      return res.json({ ok: false, stage: 'server', message: isAdminRole(req.session.role)
+        ? 'No Quinta server set yet. Put its URL in the Server endpoint field above and save.'
+        : 'No Quinta server set yet. An admin has to enter its URL before anyone can connect.' });
     }
     const settings = await quintaSettingsFor(req.session.userId);
     if (!settings.token) return res.json({ ok: false, stage: 'token', message: 'No token saved yet. Paste the one Quinta issued you above and save.' });
@@ -5482,7 +5572,7 @@ app.get('/api/quinta/test', requireAuth, async (req, res) => {
 app.get('/api/quinta/dialogs', requireAuth, async (req, res) => {
   try {
     const settings = await quintaSettingsFor(req.session.userId);
-    if (!quintaServerConfigured()) return res.status(503).json({ error: 'quinta_server_not_configured' });
+    if (!(await quintaServerUrl())) return res.status(503).json({ error: 'quinta_server_not_configured' });
     if (!settings.token) return res.status(401).json({ error: 'quinta_no_token' });
     const categories = String(req.query.categories || '').trim();
     const propertyKind = Math.min(4, Math.max(1, Number(req.query.propertyKind) || 1));
@@ -5514,7 +5604,7 @@ app.get('/api/quinta/dialogs', requireAuth, async (req, res) => {
 app.get('/api/quinta/properties', requireAuth, async (req, res) => {
   try {
     const settings = await quintaSettingsFor(req.session.userId);
-    if (!quintaServerConfigured()) return res.status(503).json({ error: 'quinta_server_not_configured' });
+    if (!(await quintaServerUrl())) return res.status(503).json({ error: 'quinta_server_not_configured' });
     if (!settings.token) return res.status(401).json({ error: 'quinta_no_token' });
     if (!settings.teamIds.length) return res.json({ ok: true, rows: [], note: 'no_team_ids_configured' });
 
