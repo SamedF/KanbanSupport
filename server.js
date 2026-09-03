@@ -587,9 +587,21 @@ function isDateInBounds(value, bounds) {
   const date = value instanceof Date ? value : new Date(value);
   return !Number.isNaN(date.getTime()) && date >= bounds.start && date <= bounds.end;
 }
+// A resolved ticket belongs to the range it was resolved in, not the one it
+// arrived in. But only when we actually know when that was: resolvedAt is
+// nullable, and every ticket resolved before that column started being written
+// still has NULL in it. Keying on resolvedAt alone dropped those tickets out
+// of Total, Resolved and every by-category/company/CS figure at once, which is
+// what made the breakdown table read low - the same board showed 57 tickets
+// and 52 resolved for an agent, then 43 and 32, with nothing resolved in
+// between. Unstamped ones fall back to when the row was last touched, which is
+// the closest thing to a resolution date we hold for them.
 function kpiTicketInRange(ticket, bounds) {
   const statusKey = normalizeDbStatusForBoard(ticket?.status);
-  if (statusKey === 'res') return isDateInBounds(ticket?.resolvedAt, bounds);
+  if (statusKey === 'res') {
+    if (ticket?.resolvedAt) return isDateInBounds(ticket.resolvedAt, bounds);
+    return isDateInBounds(ticket?.updatedAt, bounds) || isDateInBounds(ticket?.createdAt, bounds);
+  }
   return isDateInBounds(ticket?.createdAt, bounds) || isDateInBounds(ticket?.updatedAt, bounds);
 }
 function resolvedAtFromState(state, ticketId) {
@@ -3945,12 +3957,32 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
       agent: code, total: 0, new: 0, inp: 0, wus: 0, dft: 0, wct: 0, res: 0,
       duplicates: 0, overdue: 0, atRisk: 0, slaMet: 0, slaBreached: 0, resolveHours: []
     });
-    const addAgentRow = (agentCode, statusKey) => {
+    const ensureAgentRow = agentCode => {
       const rowAgent = String(agentCode || 'Unassigned').trim().toUpperCase() || 'Unassigned';
       if (!agentRows[rowAgent]) agentRows[rowAgent] = emptyAgentRow(rowAgent);
-      agentRows[rowAgent].total++;
-      if (statusKey in agentRows[rowAgent]) agentRows[rowAgent][statusKey]++;
       return agentRows[rowAgent];
+    };
+    // Which rows of the breakdown table a ticket belongs to. Every figure in
+    // that table has to fan out the same way, or the row disagrees with
+    // itself: the status columns were keyed on this rule while the SLA
+    // columns were keyed on the assignee alone, so a CS owner's row showed
+    // 43 tickets and 32 resolved next to 0 overdue and no SLA at all - the
+    // SLA of those same tickets had been added to the support assignee's row.
+    const rowKeysForTicket = ticket => {
+      const assignee = String(ticket.assignedAgent || '').trim().toUpperCase();
+      const csOwner = String(ticket.csAgent || '').trim().toUpperCase();
+      if (team === 'cs') return [csOwner || 'Unassigned'];
+      if (team === 'support') return [assignee || 'Unassigned'];
+      const keys = [assignee || 'Unassigned'];
+      if (csOwner && csOwner !== assignee) keys.push(csOwner);
+      return keys;
+    };
+    const addAgentRow = (ticket, statusKey) => {
+      for (const key of rowKeysForTicket(ticket)) {
+        const row = ensureAgentRow(key);
+        row.total++;
+        if (statusKey in row) row[statusKey]++;
+      }
     };
 
     for (const ticket of workTickets) {
@@ -3967,14 +3999,8 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
       const companyName = String(ticket.companyName || 'Unknown').trim() || 'Unknown';
       companyCounts[companyName] = (companyCounts[companyName] || 0) + 1;
 
-      const assignee = String(ticket.assignedAgent || '').trim().toUpperCase();
       const csOwner = String(ticket.csAgent || '').trim().toUpperCase();
-      if (team === 'cs') addAgentRow(csOwner || 'Unassigned', statusKey);
-      else if (team === 'support') addAgentRow(assignee || 'Unassigned', statusKey);
-      else {
-        addAgentRow(assignee || 'Unassigned', statusKey);
-        if (csOwner && csOwner !== assignee) addAgentRow(csOwner, statusKey);
-      }
+      addAgentRow(ticket, statusKey);
       const csLabel = csOwner || 'Unassigned';
       csCounts[csLabel] = (csCounts[csLabel] || 0) + 1;
       if (csOwner) ticketsWithCs++;
@@ -4002,11 +4028,12 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
       const snapshot = ticketSlaSnapshot(ticket, now);
       if (snapshot.state in backlog) backlog[snapshot.state]++;
       oldestOpenMs = Math.max(oldestOpenMs, snapshot.wallMs);
-      const owner = String(ticket.assignedAgent || '').trim().toUpperCase() || 'Unassigned';
       if (snapshot.state === 'overdue' || snapshot.state === 'at_risk') {
-        if (!agentRows[owner]) agentRows[owner] = emptyAgentRow(owner);
-        if (snapshot.state === 'overdue') agentRows[owner].overdue++;
-        else agentRows[owner].atRisk++;
+        for (const key of rowKeysForTicket(ticket)) {
+          const row = ensureAgentRow(key);
+          if (snapshot.state === 'overdue') row.overdue++;
+          else row.atRisk++;
+        }
       }
       if (snapshot.state === 'overdue') {
         overdueRows.push({
@@ -4035,11 +4062,10 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
     let slaUnmeasured = 0;
     for (const ticket of resolvedInRange) {
       const snapshot = ticketSlaSnapshot(ticket, now);
-      const owner = String(ticket.assignedAgent || '').trim().toUpperCase() || 'Unassigned';
-      if (!agentRows[owner]) agentRows[owner] = emptyAgentRow(owner);
-      if (snapshot.state === 'met') { slaMet++; agentRows[owner].slaMet++; }
+      const rows = rowKeysForTicket(ticket).map(ensureAgentRow);
+      if (snapshot.state === 'met') { slaMet++; rows.forEach(row => row.slaMet++); }
       else if (snapshot.state === 'breached') {
-        slaBreached++; agentRows[owner].slaBreached++;
+        slaBreached++; rows.forEach(row => row.slaBreached++);
         breachedRows.push({
           ticketNumber: ticket.displayNumber ? `#${String(ticket.displayNumber).padStart(4, '0')}` : null,
           externalId: ticket.externalId,
@@ -4056,7 +4082,7 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
       else slaUnmeasured++;
       if (snapshot.state === 'met' || snapshot.state === 'breached') {
         resolveShiftHours.push(hoursFromMs(snapshot.shiftMs));
-        agentRows[owner].resolveHours.push(hoursFromMs(snapshot.shiftMs));
+        rows.forEach(row => row.resolveHours.push(hoursFromMs(snapshot.shiftMs)));
       }
       resolveWallHours.push(hoursFromMs(snapshot.wallMs));
     }
@@ -4700,7 +4726,13 @@ async function mcpUpdateTicket(apiUser, id, fields) {
     const status = String(fields.status || '').trim();
     if (!MCP_WRITABLE_STATUSES.has(status)) throw Object.assign(new Error('invalid_status'), { status: 400 });
     data.status = status;
-    data.resolvedAt = status === 'Resolved' ? new Date() : null;
+    // Only the move INTO Resolved stamps the clock. Re-stamping it on every
+    // write that happens to say "Resolved" moved the resolution date forward,
+    // which pulled long-closed tickets back into the KPI range and reported
+    // their resolve time as minutes.
+    data.resolvedAt = status === 'Resolved'
+      ? (existingTicket.status === 'Resolved' ? (existingTicket.resolvedAt || new Date()) : new Date())
+      : null;
     if (status !== 'Resolved') data.resolvedTeamsNotifiedAt = null;
   }
   if (fields?.assignedAgent !== undefined) data.assignedAgent = fields.assignedAgent ? String(fields.assignedAgent).trim().toUpperCase() : null;

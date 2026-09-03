@@ -8108,10 +8108,14 @@ function renderKpiViewLocal(){
   document.getElementById('kpi-company-rows').innerHTML=companyRows.length?companyRows.map(([name,cnt])=>`<tr style="border-bottom:1px solid var(--legacy-f0f0f0);"><td style="padding:8px 10px;">${esc(name)}</td><td style="padding:8px 10px;">${cnt}</td></tr>`).join(''):'<tr><td colspan="2" style="padding:12px 10px;color:var(--legacy-666);">No tickets for this filter.</td></tr>';
   const jiraRows=inRange.filter(t=>ticketJira[t.id]).map(t=>({t,company:companyForTicket(t)||'Unknown',agent:ticketAssignee[t.id]||'Unassigned',jira:ticketJira[t.id]})).sort((a,b)=>new Date((b.t.email?.receivedDateTime)||0)-new Date((a.t.email?.receivedDateTime)||0));
   document.getElementById('kpi-jira-ticket-rows').innerHTML=jiraRows.length?jiraRows.slice(0,50).map(x=>`<tr style="border-bottom:1px solid var(--legacy-f0f0f0);"><td class="kpi-cell-wide" style="padding:8px 10px;">${esc(x.t.email?.subject||'(no subject)')}</td><td style="padding:8px 10px;">${esc(x.company)}</td><td style="padding:8px 10px;">${esc(x.agent)}</td><td style="padding:8px 10px;font-weight:700;">${esc(x.jira)}</td></tr>`).join(''):'<tr><td colspan="4" style="padding:12px 10px;color:var(--legacy-666);">No Jira-linked tickets for this filter.</td></tr>';
+  // Keyed the same way the rows above are keyed, not on the assignee alone:
+  // with the team filter on CS the rows are CS owners, so an assignee-keyed
+  // tally never matched a single row and every agent read 0 overdue.
+  const rowKeyForTicket=t=>{const{assignee,csOwner}=ticketFilterAgentValues(t);return kpiTeamFilter==='cs'?(csOwner||'Unassigned'):(assignee||'Unassigned');};
   const overdueByAgent={};
-  localOverdue.forEach(({t})=>{const a=ticketAssignee[t.id]||'Unassigned';overdueByAgent[a]=(overdueByAgent[a]||0)+1;});
+  localOverdue.forEach(({t})=>{const a=rowKeyForTicket(t);overdueByAgent[a]=(overdueByAgent[a]||0)+1;});
   const atRiskByAgent={};
-  localAtRisk.forEach(({t})=>{const a=ticketAssignee[t.id]||'Unassigned';atRiskByAgent[a]=(atRiskByAgent[a]||0)+1;});
+  localAtRisk.forEach(({t})=>{const a=rowKeyForTicket(t);atRiskByAgent[a]=(atRiskByAgent[a]||0)+1;});
   const body=document.getElementById('kpi-agent-rows');
   body.innerHTML=rows.length?rows.map(r=>`<tr style="border-bottom:1px solid var(--legacy-f0f0f0);"><td style="padding:8px 10px;font-weight:700;">${esc(r.agent)}</td><td style="padding:8px 10px;">${r.total}</td><td style="padding:8px 10px;">${r.new}</td><td style="padding:8px 10px;">${r.inp}</td><td style="padding:8px 10px;">${r.wus||0}</td><td style="padding:8px 10px;">${r.dft||0}</td><td style="padding:8px 10px;">${r.wct||0}</td><td style="padding:8px 10px;">${r.res}</td><td style="padding:8px 10px;${overdueByAgent[r.agent]?'color:var(--red-600);font-weight:700;':''}">${overdueByAgent[r.agent]||0}</td><td style="padding:8px 10px;${atRiskByAgent[r.agent]?'color:var(--amber-700);':''}">${atRiskByAgent[r.agent]||0}</td><td style="padding:8px 10px;">-</td><td style="padding:8px 10px;">-</td></tr>`).join(''):'<tr><td colspan="12" style="padding:12px 10px;color:var(--legacy-666);">No tickets in this time range.</td></tr>';
   kpiLastLoadedAt=Date.now();
