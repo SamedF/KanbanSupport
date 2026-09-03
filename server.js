@@ -4102,7 +4102,12 @@ async function loadKpiWorkingSet(req) {
   const scopedTickets = scopedTicketsAll.filter(t => !isDuplicate(t));
   const workTickets = statusTickets.filter(t => !isDuplicate(t));
 
-  return { bounds, team, agent, company, jiraOnly, baseWhere, accessWhere, scopedTickets, workTickets, duplicatesOpen, duplicatesInRange };
+  // tickets (the range query before duplicates and the in-range filter are
+  // applied) is still read by the caller, to enumerate every agent that appears
+  // anywhere in the data for the filter dropdown. Extracting this function left
+  // it behind, so /api/tickets/kpis threw ReferenceError: tickets is not defined
+  // on every request and the whole dashboard 500d.
+  return { bounds, team, agent, company, jiraOnly, baseWhere, accessWhere, tickets, scopedTickets, workTickets, duplicatesOpen, duplicatesInRange };
 }
 function kpiDrilldownRow(t, detail) {
   return {
@@ -4119,7 +4124,7 @@ function kpiDrilldownRow(t, detail) {
 }
 app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
   try {
-    const { bounds, team, agent, company, jiraOnly, baseWhere, accessWhere, scopedTickets, workTickets, duplicatesOpen, duplicatesInRange } = await loadKpiWorkingSet(req);
+    const { bounds, team, agent, company, jiraOnly, baseWhere, accessWhere, tickets, scopedTickets, workTickets, duplicatesOpen, duplicatesInRange } = await loadKpiWorkingSet(req);
 
     const statusKeys = ['new', 'inp', 'wus', 'dft', 'wct', 'res'];
     const statusCounts = Object.fromEntries(statusKeys.map(k => [k, 0]));
