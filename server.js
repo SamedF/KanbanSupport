@@ -5192,6 +5192,182 @@ app.get('/api/insights/suggest-assignee', requireAuth, async (req, res) => {
   }
 });
 
+// ---------------------------------------------------------------------------
+// Quinta MCP: the properties this team supports, inside the board
+//
+// An agent working a ticket about a hotel has to leave the board to find out
+// anything about that hotel - which languages its bot speaks, what services it
+// has, who to notify. That data already exists on the Quinta MCP server; it was
+// just only reachable from a Claude conversation, never from here.
+//
+// This is an ordinary MCP client, pointed at that server. Two things about it
+// are worth knowing:
+//
+//   1. The board authenticates as ITSELF, with its own token. It cannot reuse
+//      anyone's Claude connector - that OAuth grant belongs to a Claude
+//      account, not to this server, and there is no mechanism to borrow it.
+//
+//   2. There is no "list every hotel" tool. get-hotel-settings is a lookup by
+//      numeric teamId, so the board has to be told which properties it covers
+//      (QUINTA_TEAM_IDS). Until that list exists the dialog catalogue still
+//      works, because get-dialogs-list needs no hotel at all.
+// ---------------------------------------------------------------------------
+const QUINTA_MCP_URL = String(process.env.QUINTA_MCP_URL || '').trim();
+const QUINTA_MCP_TOKEN = String(process.env.QUINTA_MCP_TOKEN || '').trim();
+// Comma-separated numeric team ids, optionally "id:Label" to give one a name
+// before the server has been asked for its profile.
+const QUINTA_TEAM_IDS = String(process.env.QUINTA_TEAM_IDS || '')
+  .split(/[,;\s]+/)
+  .map(entry => entry.trim())
+  .filter(Boolean)
+  .map(entry => {
+    const [id, ...label] = entry.split(':');
+    return { teamId: String(id).trim(), label: label.join(':').trim() || null };
+  })
+  .filter(entry => /^\d+$/.test(entry.teamId));
+
+function quintaConfigured() { return !!(QUINTA_MCP_URL && QUINTA_MCP_TOKEN); }
+function quintaSetupHint() {
+  const missing = [];
+  if (!QUINTA_MCP_URL) missing.push('QUINTA_MCP_URL (the Quinta MCP server endpoint)');
+  if (!QUINTA_MCP_TOKEN) missing.push('QUINTA_MCP_TOKEN (a bearer token the board can use as itself)');
+  if (!QUINTA_TEAM_IDS.length) missing.push('QUINTA_TEAM_IDS (comma-separated numeric team ids - there is no list-all tool, so the board has to be told which properties it covers)');
+  return missing.length ? `Not configured. Set ${missing.join(', ')} and restart.` : '';
+}
+
+// One short-lived client per request. The server is not ours and a pooled,
+// long-lived session would have to be reconnected on every network blip; these
+// calls are infrequent and cached below, so a fresh connection is cheaper to
+// reason about than a pool.
+let mcpClientModules = null;
+async function loadMcpClientSdk() {
+  if (!mcpClientModules) {
+    const [{ Client }, { StreamableHTTPClientTransport }] = await Promise.all([
+      import('@modelcontextprotocol/sdk/client/index.js'),
+      import('@modelcontextprotocol/sdk/client/streamableHttp.js')
+    ]);
+    mcpClientModules = { Client, StreamableHTTPClientTransport };
+  }
+  return mcpClientModules;
+}
+
+async function quintaCallTool(name, args) {
+  if (!quintaConfigured()) throw Object.assign(new Error('quinta_not_configured'), { status: 503 });
+  const { Client, StreamableHTTPClientTransport } = await loadMcpClientSdk();
+  const client = new Client({ name: 'support-kanban', version: '1.0.0' }, { capabilities: {} });
+  const transport = new StreamableHTTPClientTransport(new URL(QUINTA_MCP_URL), {
+    requestInit: { headers: { Authorization: `Bearer ${QUINTA_MCP_TOKEN}` } }
+  });
+  try {
+    await client.connect(transport);
+    const result = await client.callTool({ name, arguments: args || {} });
+    if (result?.isError) {
+      const text = (result.content || []).map(part => part.text).filter(Boolean).join(' ').slice(0, 300);
+      throw Object.assign(new Error(text || 'quinta_tool_error'), { status: 502 });
+    }
+    // Every tool on that server answers with a single JSON text block.
+    const text = (result?.content || []).filter(part => part.type === 'text').map(part => part.text).join('');
+    if (!text) return null;
+    try { return JSON.parse(text); } catch (_) { return { raw: text }; }
+  } finally {
+    await client.close().catch(() => {});
+  }
+}
+
+// The dialog catalogue is a definitions list that changes rarely and is
+// identical for every caller, so it is held for an hour rather than re-fetched
+// per agent. Property profiles are held for less: they are edited by the people
+// using this board.
+const quintaCache = new Map();
+async function quintaCached(key, ttlMs, load) {
+  const hit = quintaCache.get(key);
+  if (hit && hit.at > Date.now() - ttlMs) return hit.value;
+  const value = await load();
+  quintaCache.set(key, { at: Date.now(), value });
+  return value;
+}
+
+app.get('/api/quinta/status', requireAuth, (req, res) => {
+  res.json({
+    ok: true,
+    configured: quintaConfigured(),
+    hint: quintaSetupHint(),
+    endpoint: QUINTA_MCP_URL ? QUINTA_MCP_URL.replace(/^(https?:\/\/[^/]+).*$/, '$1/…') : null,
+    propertyCount: QUINTA_TEAM_IDS.length
+  });
+});
+
+// The dialog/intent catalogue - what the bots can be asked about. Needs no
+// hotel, so this works the moment the server is reachable.
+app.get('/api/quinta/dialogs', requireAuth, async (req, res) => {
+  try {
+    if (!quintaConfigured()) return res.status(503).json({ error: 'quinta_not_configured', message: quintaSetupHint() });
+    const categories = String(req.query.categories || '').trim();
+    const propertyKind = Math.min(4, Math.max(1, Number(req.query.propertyKind) || 1));
+    const data = await quintaCached(`dialogs:${categories}:${propertyKind}`, 60 * 60 * 1000, () =>
+      quintaCallTool('get-dialogs-list', {
+        ...(categories ? { categories } : {}),
+        description: true,
+        property_kind: propertyKind
+      }));
+
+    // The server groups dialogs by category into nested objects. Flattened here
+    // so the board can render, search and count them without knowing that shape.
+    const rows = [];
+    for (const [category, dialogs] of Object.entries(data || {})) {
+      if (!dialogs || typeof dialogs !== 'object') continue;
+      for (const [fid, dialog] of Object.entries(dialogs)) {
+        rows.push({
+          fid,
+          category,
+          name: dialog?.name || fid,
+          description: dialog?.description || ''
+        });
+      }
+    }
+    rows.sort((a, b) => a.fid.localeCompare(b.fid));
+    return res.json({ ok: true, total: rows.length, categories: [...new Set(rows.map(r => r.category))].sort(), rows });
+  } catch (error) {
+    console.error('Quinta dialogs failed:', error?.message || error);
+    return res.status(error?.status || 502).json({ error: 'quinta_dialogs_failed', message: String(error?.message || error).slice(0, 300) });
+  }
+});
+
+// The properties this board covers, with the operational profile of each.
+app.get('/api/quinta/properties', requireAuth, async (req, res) => {
+  try {
+    if (!quintaConfigured()) return res.status(503).json({ error: 'quinta_not_configured', message: quintaSetupHint() });
+    if (!QUINTA_TEAM_IDS.length) return res.json({ ok: true, rows: [], note: 'no_team_ids_configured', message: quintaSetupHint() });
+
+    const teams = QUINTA_TEAM_IDS.map(entry => entry.teamId).join(',');
+    const data = await quintaCached(`properties:${teams}`, 10 * 60 * 1000, () =>
+      quintaCallTool('get-hotel-settings', { teams }));
+
+    // The profile comes back keyed by team id, or as a single object when one
+    // id was asked for - normalised to a list either way.
+    const byTeam = (data && typeof data === 'object' && !Array.isArray(data)) ? data : {};
+    const rows = QUINTA_TEAM_IDS.map(entry => {
+      const profile = byTeam[entry.teamId] || byTeam[Number(entry.teamId)] || (QUINTA_TEAM_IDS.length === 1 ? data : null) || {};
+      const info = profile.information || profile;
+      return {
+        teamId: entry.teamId,
+        name: info?.name || entry.label || `Property ${entry.teamId}`,
+        address: info?.address || null,
+        languages: profile?.velma_settings?.languages || profile?.languages || null,
+        services: profile?.services || null,
+        contacts: profile?.notification_contacts || profile?.contacts || null,
+        // Kept so an agent can see anything the shaping above did not name,
+        // rather than the board silently hiding fields it was not written for.
+        raw: profile
+      };
+    });
+    return res.json({ ok: true, total: rows.length, rows });
+  } catch (error) {
+    console.error('Quinta properties failed:', error?.message || error);
+    return res.status(error?.status || 502).json({ error: 'quinta_properties_failed', message: String(error?.message || error).slice(0, 300) });
+  }
+});
+
 app.get('/api/insights/languages', requireAuth, async (req, res) => {
   try {
     const rows = await prisma.ticketTranslation.findMany({

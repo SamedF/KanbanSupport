@@ -4836,6 +4836,35 @@ th {
 .emc-suggest-btn { font-size: 10px; padding: 3px 10px; }
 .emc-suggest-current { font-size: 10px; color: var(--muted, #64748b); font-style: italic; }
 
+
+/* ===== Quinta properties panel ============================================ */
+.q-head { display:flex; align-items:flex-start; justify-content:space-between; gap:16px; flex-wrap:wrap; margin-bottom:14px; }
+.q-title { font-family:Caladea,serif; font-size:26px; color:var(--text,#0f172a); }
+.q-subtitle { font-size:11px; color:var(--muted,#64748b); margin-top:3px; }
+.q-controls { display:flex; align-items:center; gap:10px; }
+.q-body { padding-bottom:30px; }
+.q-lead { font-size:12px; color:var(--text-soft,#334155); margin-bottom:12px; line-height:1.5; }
+.q-loading, .q-empty { padding:34px 10px; text-align:center; color:var(--muted,#64748b); font-size:13px; line-height:1.6; }
+.q-error { padding:14px; border-radius:10px; font-size:13px; background:var(--red-50,#fef2f2); border:1px solid var(--red-200,#fecaca); color:var(--red-700,#b91c1c); }
+.q-muted { color:var(--muted,#64748b); font-style:italic; }
+.q-setup {
+  border:1px solid var(--amber-300,#fcd34d); background:var(--amber-50,#fffbeb);
+  color:var(--amber-800,#92400e); border-radius:12px; padding:16px 18px; font-size:13px; line-height:1.6; max-width:760px;
+}
+.q-setup code { background:var(--surface,#fff); border:1px solid var(--amber-300,#fcd34d); border-radius:5px; padding:1px 6px; font-size:12px; }
+.q-setup p { margin:8px 0 0; }
+.q-note { font-size:11.5px; opacity:.85; }
+.q-card { border:1px solid var(--border,#e2e8f0); border-radius:12px; background:var(--surface,#fff); padding:13px 15px; margin-bottom:10px; }
+.q-card-head { display:flex; align-items:flex-start; justify-content:space-between; gap:12px; }
+.q-name { font-size:14px; font-weight:700; color:var(--text,#0f172a); }
+.q-sub { font-size:11px; color:var(--muted,#64748b); margin-top:2px; }
+.q-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:10px 18px; margin-top:11px; }
+.q-label { display:block; font-size:9.5px; font-weight:800; text-transform:uppercase; letter-spacing:.05em; color:var(--muted,#64748b); margin-bottom:3px; }
+.q-pill { display:inline-block; margin:0 4px 4px 0; padding:1px 8px; border-radius:999px; font-size:10px; font-weight:600;
+  background:var(--indigo-50,#eef2ff); color:var(--indigo-800,#3730a3); border:1px solid var(--indigo-200,#c7d2fe); }
+.q-raw { margin-top:11px; padding:10px; border-radius:8px; background:var(--surface-muted,#f1f5f9); font-size:11px;
+  max-height:340px; overflow:auto; white-space:pre-wrap; word-break:break-word; color:var(--text-soft,#334155); }
+
 </style>
 </head>
 <body>
@@ -4933,6 +4962,7 @@ th {
       </div>
       <div class="crm-nav-section" aria-label="QT-Tools">
         <div class="crm-nav-section-title">QT-Tools</div>
+        <button class="crm-nav-btn" id="quinta-view-btn"> Quinta Properties</button>
         <button class="crm-nav-btn" id="qt-seize-view-btn"> QT Seize</button>
         <!-- Admin only: hidden by syncRoleRestrictedControls, and the endpoint
              behind it is requireAdmin, so hiding the button is presentation
@@ -5091,6 +5121,9 @@ th {
       <tbody id="assignlog-rows"></tbody>
     </table>
   </div>
+</div>
+<div id="quinta-view" style="display:none;min-height:calc(100dvh - 175px);padding:var(--content-pad);">
+  <div id="quinta-body"></div>
 </div>
 <div id="insights-view" style="display:none;min-height:calc(100dvh - 175px);padding:var(--content-pad);">
   <div id="insights-body"></div>
@@ -7060,6 +7093,7 @@ function setSideNavActive(mode){
   document.getElementById('ticket-kpi-view-btn')?.classList.toggle('active',mode==='kpi');
   document.getElementById('insights-view-btn')?.classList.toggle('active',mode==='insights');
   document.getElementById('qt-seize-view-btn')?.classList.toggle('active',mode==='qtSeize');
+  document.getElementById('quinta-view-btn')?.classList.toggle('active',mode==='quinta');
   document.getElementById('assignlog-view-btn')?.classList.toggle('active',mode==='assignlog');
   document.getElementById('qt-detect-view-btn')?.classList.toggle('active',mode==='qtDetect');
 }
@@ -7125,6 +7159,7 @@ function restoreLastWorkspaceSession(){
   if(mode==='qtSeize')return showQtSeizeView();
   if(mode==='assignlog')return showAssignLogView();
   if(mode==='insights')return showInsightsView();
+  if(mode==='quinta')return showQuintaView();
   // showQtDetectView falls back to the board itself if the user is not an
   // admin, so a stale saved session cannot strand them on a hidden view.
   if(mode==='qtDetect')return showQtDetectView();
@@ -7740,7 +7775,7 @@ document.getElementById('emt-submit').addEventListener('click',async()=>{
 });
 
 //  View switching
-function hidePrimaryViews(){stopKpiAutoRefresh();document.getElementById('main-board').style.display='none';document.getElementById('spam-view').classList.remove('active');document.getElementById('archive-view').classList.remove('active');document.getElementById('companies-view').style.display='none';document.getElementById('kpi-view').style.display='none';document.getElementById('insights-view').style.display='none';document.getElementById('qt-seize-view').style.display='none';document.getElementById('assignlog-view').style.display='none';document.getElementById('qt-detect-view').style.display='none';}
+function hidePrimaryViews(){stopKpiAutoRefresh();document.getElementById('main-board').style.display='none';document.getElementById('spam-view').classList.remove('active');document.getElementById('archive-view').classList.remove('active');document.getElementById('companies-view').style.display='none';document.getElementById('kpi-view').style.display='none';document.getElementById('insights-view').style.display='none';document.getElementById('quinta-view').style.display='none';document.getElementById('qt-seize-view').style.display='none';document.getElementById('assignlog-view').style.display='none';document.getElementById('qt-detect-view').style.display='none';}
 function showBoardView(){viewMode='board';setBoardChromeVisible(true);hidePrimaryViews();document.getElementById('main-board').style.display='flex';setSideNavActive('board');saveLastWorkspaceSession('board');renderBoard();}
 function showSpamView(){viewMode='spam';setBoardChromeVisible(true);hidePrimaryViews();document.getElementById('spam-view').classList.add('active');setSideNavActive('spam');saveLastWorkspaceSession('spam');renderSpamView();}
 function showArchiveView(){viewMode='archive';setBoardChromeVisible(true);hidePrimaryViews();document.getElementById('archive-view').classList.add('active');setSideNavActive('archive');saveLastWorkspaceSession('archive');renderArchiveView();}
@@ -8303,7 +8338,200 @@ function renderInsightsView(){
 
 document.getElementById('insights-view-btn')?.addEventListener('click',()=>{if(viewMode==='insights')showBoardView();else showInsightsView();});
 
-function renderActiveView(){if(viewMode==='board')renderBoard();else if(viewMode==='spam')renderSpamView();else if(viewMode==='archive')renderArchiveView();else if(viewMode==='kpi')renderKpiView();else if(viewMode==='assignlog')renderAssignLogView();else if(viewMode==='insights')renderInsightsView();else if(viewMode==='qtSeize')return;else renderCompaniesView();}
+
+/* ===========================================================================
+   Quinta properties, in QT-Tools
+   ---------------------------------------------------------------------------
+   An agent working a ticket about a hotel had to leave the board to learn
+   anything about it. This puts the property's operational profile and the bot's
+   dialog catalogue next to the tickets they are about.
+
+   Everything is served by the board (/api/quinta/*), which talks to the Quinta
+   MCP server as itself. The board never borrows anyone's Claude connector - see
+   the server module for why it cannot.
+   =========================================================================== */
+
+let quintaTab = 'properties';
+let quintaStatus = null;
+let quintaProperties = { state: 'idle', rows: [] };
+let quintaDialogs = { state: 'idle', rows: [], categories: [] };
+let quintaQuery = '';
+let quintaExpanded = new Set();
+
+function showQuintaView(){
+  viewMode='quinta';
+  setBoardChromeVisible(false);
+  hidePrimaryViews();
+  document.getElementById('quinta-view').style.display='block';
+  setSideNavActive('quinta');
+  saveLastWorkspaceSession('quinta');
+  renderQuintaView();
+  if(!quintaStatus)loadQuintaStatus();
+}
+
+async function loadQuintaStatus(){
+  try{
+    const res=await fetch('/api/quinta/status',{credentials:'include'});
+    quintaStatus=await res.json();
+  }catch(error){
+    quintaStatus={configured:false,hint:'Could not reach the board: '+String(error?.message||error)};
+  }
+  renderQuintaView();
+  if(quintaStatus?.configured)loadQuintaTab();
+}
+
+function loadQuintaTab(){
+  if(quintaTab==='properties'&&quintaProperties.state==='idle')loadQuintaProperties();
+  if(quintaTab==='dialogs'&&quintaDialogs.state==='idle')loadQuintaDialogs();
+}
+
+async function loadQuintaProperties(){
+  quintaProperties={state:'loading',rows:[]};renderQuintaView();
+  try{
+    const res=await fetch('/api/quinta/properties',{credentials:'include'});
+    const data=await res.json();
+    quintaProperties=data?.error
+      ?{state:'error',rows:[],message:data.message||data.error}
+      :{state:'done',rows:data.rows||[],note:data.note||''};
+  }catch(error){
+    quintaProperties={state:'error',rows:[],message:String(error?.message||error)};
+  }
+  renderQuintaView();
+}
+
+async function loadQuintaDialogs(){
+  quintaDialogs={state:'loading',rows:[],categories:[]};renderQuintaView();
+  try{
+    const res=await fetch('/api/quinta/dialogs',{credentials:'include'});
+    const data=await res.json();
+    quintaDialogs=data?.error
+      ?{state:'error',rows:[],categories:[],message:data.message||data.error}
+      :{state:'done',rows:data.rows||[],categories:data.categories||[]};
+  }catch(error){
+    quintaDialogs={state:'error',rows:[],categories:[],message:String(error?.message||error)};
+  }
+  renderQuintaView();
+}
+
+function quintaMatches(text){
+  const q=quintaQuery.trim().toLowerCase();
+  return !q||String(text||'').toLowerCase().includes(q);
+}
+
+// A property profile carries fields this board was not written for, and hiding
+// them would mean an agent cannot see something the server actually said. The
+// named ones are laid out; the rest are available under Raw profile.
+function quintaValue(value){
+  if(value==null)return '<span class="q-muted">not set</span>';
+  if(Array.isArray(value))return value.length?value.map(v=>`<span class="q-pill">${esc(String(v))}</span>`).join(''):'<span class="q-muted">none</span>';
+  if(typeof value==='object')return `<span class="q-muted">${esc(Object.keys(value).length+' field(s)')}</span>`;
+  return esc(String(value));
+}
+
+function quintaPropertiesHtml(){
+  if(quintaProperties.state==='loading')return '<div class="q-loading"><span class="spinner"></span> Asking the Quinta server…</div>';
+  if(quintaProperties.state==='error')return `<div class="q-error">Could not load properties: ${esc(quintaProperties.message||'')}</div>`;
+  const rows=(quintaProperties.rows||[]).filter(r=>quintaMatches(r.name)||quintaMatches(r.teamId)||quintaMatches(r.address));
+  if(!rows.length){
+    return quintaProperties.note==='no_team_ids_configured'
+      ? `<div class="q-empty"><strong>No properties configured.</strong><br>There is no "list every hotel" tool on the Quinta server - <code>get-hotel-settings</code> is a lookup by numeric team id. Set <code>QUINTA_TEAM_IDS</code> to the properties this board covers.</div>`
+      : '<div class="q-empty">Nothing matches that search.</div>';
+  }
+  return rows.map(row=>{
+    const open=quintaExpanded.has(row.teamId);
+    return `<div class="q-card">
+      <div class="q-card-head">
+        <div>
+          <div class="q-name">${esc(row.name)}</div>
+          <div class="q-sub">${esc(row.address||'no address on file')}</div>
+        </div>
+        <button class="btn-out" data-q-raw="${esc(row.teamId)}">${open?'Hide':'Raw profile'}</button>
+      </div>
+      <div class="q-grid">
+        <div><span class="q-label">Bot languages</span>${quintaValue(row.languages)}</div>
+        <div><span class="q-label">Services</span>${quintaValue(row.services)}</div>
+        <div><span class="q-label">Notification contacts</span>${quintaValue(row.contacts)}</div>
+      </div>
+      ${open?`<pre class="q-raw">${esc(JSON.stringify(row.raw,null,2))}</pre>`:''}
+    </div>`;
+  }).join('');
+}
+
+function quintaDialogsHtml(){
+  if(quintaDialogs.state==='loading')return '<div class="q-loading"><span class="spinner"></span> Loading the dialog catalogue…</div>';
+  if(quintaDialogs.state==='error')return `<div class="q-error">Could not load dialogs: ${esc(quintaDialogs.message||'')}</div>`;
+  const rows=(quintaDialogs.rows||[]).filter(r=>quintaMatches(r.name)||quintaMatches(r.fid)||quintaMatches(r.description)||quintaMatches(r.category));
+  if(!rows.length)return '<div class="q-empty">Nothing matches that search.</div>';
+  return `<div class="q-lead">${rows.length} of ${quintaDialogs.rows.length} dialogs. These are what the bot can be asked about - the FID is the id support and the Quinta team use to refer to one.</div>
+    <div class="ins-table-wrap"><table class="ins-table">
+    <thead><tr><th>FID</th><th>Category</th><th>Name</th><th>What it handles</th></tr></thead>
+    <tbody>${rows.map(r=>`<tr>
+      <td style="font-weight:700;font-variant-numeric:tabular-nums;">${esc(r.fid)}</td>
+      <td>${esc(r.category)}</td>
+      <td>${esc(r.name)}</td>
+      <td style="white-space:normal;">${esc(r.description)}</td>
+    </tr>`).join('')}</tbody></table></div>`;
+}
+
+function renderQuintaView(){
+  const host=document.getElementById('quinta-body');
+  if(!host)return;
+
+  if(quintaStatus&&!quintaStatus.configured){
+    host.innerHTML=`
+      <div class="q-head"><div><div class="q-title">Quinta properties</div>
+        <div class="q-subtitle">The hotels this board supports, read from the Quinta MCP server</div></div></div>
+      <div class="q-setup">
+        <strong>Not connected yet.</strong>
+        <p>${esc(quintaStatus.hint||'')}</p>
+        <p class="q-note">The board connects to the Quinta MCP server <em>as itself</em>, with its own token. It cannot reuse a Claude connector: that authorisation belongs to a Claude account, and there is no way for a server to borrow it.</p>
+      </div>`;
+    return;
+  }
+
+  const tabs=[['properties','Properties'],['dialogs','Dialog catalogue']];
+  host.innerHTML=`
+    <div class="q-head">
+      <div><div class="q-title">Quinta properties</div>
+        <div class="q-subtitle">${quintaStatus?.endpoint?esc(quintaStatus.endpoint):'Reading from the Quinta MCP server'}</div></div>
+      <div class="q-controls">
+        <input class="filter-sel" id="q-search" type="text" placeholder="Search…" value="${esc(quintaQuery)}" autocomplete="off">
+        <button class="btn-out" id="q-refresh">Refresh</button>
+      </div>
+    </div>
+    <div class="ins-tabs">${tabs.map(([k,l])=>`<button class="ins-tab${quintaTab===k?' active':''}" data-q-tab="${k}">${esc(l)}</button>`).join('')}</div>
+    <div class="q-body">${quintaTab==='properties'?quintaPropertiesHtml():quintaDialogsHtml()}</div>`;
+
+  host.querySelectorAll('[data-q-tab]').forEach(btn=>btn.addEventListener('click',()=>{
+    quintaTab=btn.dataset.qTab;renderQuintaView();loadQuintaTab();
+  }));
+  host.querySelectorAll('[data-q-raw]').forEach(btn=>btn.addEventListener('click',()=>{
+    const id=btn.dataset.qRaw;
+    if(quintaExpanded.has(id))quintaExpanded.delete(id);else quintaExpanded.add(id);
+    renderQuintaView();
+  }));
+  const search=host.querySelector('#q-search');
+  if(search)search.addEventListener('input',e=>{
+    quintaQuery=e.target.value;
+    // Re-rendering the whole panel would drop focus mid-keystroke, so only the
+    // list below the search box is redrawn.
+    const body=host.querySelector('.q-body');
+    if(body)body.innerHTML=quintaTab==='properties'?quintaPropertiesHtml():quintaDialogsHtml();
+    host.querySelectorAll('[data-q-raw]').forEach(btn=>btn.addEventListener('click',()=>{
+      const id=btn.dataset.qRaw;
+      if(quintaExpanded.has(id))quintaExpanded.delete(id);else quintaExpanded.add(id);
+      renderQuintaView();
+    }));
+  });
+  host.querySelector('#q-refresh')?.addEventListener('click',()=>{
+    quintaProperties={state:'idle',rows:[]};quintaDialogs={state:'idle',rows:[],categories:[]};
+    loadQuintaTab();
+  });
+}
+
+document.getElementById('quinta-view-btn')?.addEventListener('click',()=>{if(viewMode==='quinta')showBoardView();else showQuintaView();});
+
+function renderActiveView(){if(viewMode==='board')renderBoard();else if(viewMode==='spam')renderSpamView();else if(viewMode==='archive')renderArchiveView();else if(viewMode==='kpi')renderKpiView();else if(viewMode==='assignlog')renderAssignLogView();else if(viewMode==='insights')renderInsightsView();else if(viewMode==='quinta')renderQuintaView();else if(viewMode==='qtSeize')return;else renderCompaniesView();}
 
 // ---------------------------------------------------------------------------
 // Assignment Log
