@@ -5193,52 +5193,113 @@ app.get('/api/insights/suggest-assignee', requireAuth, async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
-// Quinta MCP: the properties this team supports, inside the board
+// Quinta MCP: the properties each agent supports, inside the board
 //
-// An agent working a ticket about a hotel has to leave the board to find out
+// An agent working a ticket about a hotel had to leave the board to find out
 // anything about that hotel - which languages its bot speaks, what services it
 // has, who to notify. That data already exists on the Quinta MCP server; it was
 // just only reachable from a Claude conversation, never from here.
 //
-// This is an ordinary MCP client, pointed at that server. Two things about it
-// are worth knowing:
+// Three things about how this is wired:
 //
-//   1. The board authenticates as ITSELF, with its own token. It cannot reuse
-//      anyone's Claude connector - that OAuth grant belongs to a Claude
-//      account, not to this server, and there is no mechanism to borrow it.
+//   1. The endpoint is shared; the credential is not. One Quinta server serves
+//      the whole team (QUINTA_MCP_URL, set once by whoever deploys this), but
+//      each agent authenticates as themselves with their own token, and covers
+//      their own set of properties. So the token and the team ids are stored
+//      per user and asked for in the panel - not baked into the environment,
+//      where everyone would share one identity.
 //
-//   2. There is no "list every hotel" tool. get-hotel-settings is a lookup by
-//      numeric teamId, so the board has to be told which properties it covers
-//      (QUINTA_TEAM_IDS). Until that list exists the dialog catalogue still
-//      works, because get-dialogs-list needs no hotel at all.
+//   2. Tokens are encrypted at rest. They are other systems' credentials
+//      sitting in our database, and an agent must never be able to read
+//      another agent's - or their own back out of the API. Only the last four
+//      characters are ever returned, so the panel can show which token is
+//      saved without being able to reveal it.
+//
+//   3. There is no "list every hotel" tool. get-hotel-settings is a lookup by
+//      numeric teamId, so each agent has to say which properties they cover.
+//      The dialog catalogue needs no hotel at all, so it works as soon as a
+//      token is saved.
 // ---------------------------------------------------------------------------
 const QUINTA_MCP_URL = String(process.env.QUINTA_MCP_URL || '').trim();
-const QUINTA_MCP_TOKEN = String(process.env.QUINTA_MCP_TOKEN || '').trim();
-// Comma-separated numeric team ids, optionally "id:Label" to give one a name
-// before the server has been asked for its profile.
-const QUINTA_TEAM_IDS = String(process.env.QUINTA_TEAM_IDS || '')
-  .split(/[,;\s]+/)
-  .map(entry => entry.trim())
-  .filter(Boolean)
-  .map(entry => {
-    const [id, ...label] = entry.split(':');
-    return { teamId: String(id).trim(), label: label.join(':').trim() || null };
-  })
-  .filter(entry => /^\d+$/.test(entry.teamId));
+// Optional fallbacks for a single shared service identity. A per-user token
+// always wins; these only cover an agent who has not set one up.
+const QUINTA_FALLBACK_TOKEN = String(process.env.QUINTA_MCP_TOKEN || '').trim();
+const QUINTA_FALLBACK_TEAM_IDS = String(process.env.QUINTA_TEAM_IDS || '').trim();
 
-function quintaConfigured() { return !!(QUINTA_MCP_URL && QUINTA_MCP_TOKEN); }
-function quintaSetupHint() {
-  const missing = [];
-  if (!QUINTA_MCP_URL) missing.push('QUINTA_MCP_URL (the Quinta MCP server endpoint)');
-  if (!QUINTA_MCP_TOKEN) missing.push('QUINTA_MCP_TOKEN (a bearer token the board can use as itself)');
-  if (!QUINTA_TEAM_IDS.length) missing.push('QUINTA_TEAM_IDS (comma-separated numeric team ids - there is no list-all tool, so the board has to be told which properties it covers)');
-  return missing.length ? `Not configured. Set ${missing.join(', ')} and restart.` : '';
+function quintaServerConfigured() { return !!QUINTA_MCP_URL; }
+
+async function ensureQuintaSettingsTable() {
+  await prisma.$executeRaw`
+    CREATE TABLE IF NOT EXISTS "QuintaUserSetting" (
+      "userId" INTEGER PRIMARY KEY REFERENCES "User"("id") ON DELETE CASCADE,
+      "tokenCipher" TEXT,
+      "tokenHint" TEXT,
+      "teamIds" TEXT,
+      "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+  `;
 }
 
-// One short-lived client per request. The server is not ours and a pooled,
-// long-lived session would have to be reconnected on every network blip; these
-// calls are infrequent and cached below, so a fresh connection is cheaper to
-// reason about than a pool.
+/* Encryption at rest.
+
+   The key is derived from SESSION_SECRET rather than a key of its own, so there
+   is one secret to deploy rather than two. The tradeoff is stated plainly:
+   rotating SESSION_SECRET makes stored tokens undecryptable, and the panel then
+   asks for the token again. That is the right failure - it is a re-entry, not a
+   leak, and it is far better than keeping other systems' credentials in
+   plaintext next to the tickets. */
+function quintaKey() {
+  return crypto.createHash('sha256').update(String(SESSION_SECRET || '') + '|quinta').digest();
+}
+function quintaEncrypt(plain) {
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', quintaKey(), iv);
+  const enc = Buffer.concat([cipher.update(String(plain), 'utf8'), cipher.final()]);
+  return [iv.toString('base64'), cipher.getAuthTag().toString('base64'), enc.toString('base64')].join('.');
+}
+function quintaDecrypt(stored) {
+  try {
+    const [iv, tag, data] = String(stored || '').split('.');
+    if (!iv || !tag || !data) return '';
+    const decipher = crypto.createDecipheriv('aes-256-gcm', quintaKey(), Buffer.from(iv, 'base64'));
+    decipher.setAuthTag(Buffer.from(tag, 'base64'));
+    return Buffer.concat([decipher.update(Buffer.from(data, 'base64')), decipher.final()]).toString('utf8');
+  } catch (_) {
+    // Wrong key (SESSION_SECRET rotated) or tampered row. Treated as "no token
+    // saved" so the panel asks again rather than throwing at the agent.
+    return '';
+  }
+}
+
+function quintaParseTeamIds(raw) {
+  return String(raw || '')
+    .split(/[,;\s]+/)
+    .map(entry => entry.trim())
+    .filter(Boolean)
+    .map(entry => {
+      const [id, ...label] = entry.split(':');
+      return { teamId: String(id).trim(), label: label.join(':').trim() || null };
+    })
+    .filter(entry => /^\d+$/.test(entry.teamId));
+}
+
+async function quintaSettingsFor(userId) {
+  await ensureQuintaSettingsTable();
+  const rows = await prisma.$queryRaw`
+    SELECT "tokenCipher", "tokenHint", "teamIds" FROM "QuintaUserSetting" WHERE "userId" = ${Number(userId)} LIMIT 1
+  `;
+  const row = Array.isArray(rows) ? rows[0] : null;
+  const token = row?.tokenCipher ? quintaDecrypt(row.tokenCipher) : '';
+  return {
+    token: token || QUINTA_FALLBACK_TOKEN,
+    // Only ever the last four, and only for a token this agent saved.
+    tokenHint: token ? (row.tokenHint || '') : (QUINTA_FALLBACK_TOKEN ? 'shared' : ''),
+    usingFallback: !token && !!QUINTA_FALLBACK_TOKEN,
+    teamIdsRaw: row?.teamIds || QUINTA_FALLBACK_TEAM_IDS || '',
+    teamIds: quintaParseTeamIds(row?.teamIds || QUINTA_FALLBACK_TEAM_IDS)
+  };
+}
+
 let mcpClientModules = null;
 async function loadMcpClientSdk() {
   if (!mcpClientModules) {
@@ -5251,12 +5312,17 @@ async function loadMcpClientSdk() {
   return mcpClientModules;
 }
 
-async function quintaCallTool(name, args) {
-  if (!quintaConfigured()) throw Object.assign(new Error('quinta_not_configured'), { status: 503 });
+// One short-lived client per request. The server is not ours and a pooled,
+// long-lived session would have to be reconnected on every network blip; these
+// calls are infrequent and cached below, so a fresh connection is cheaper to
+// reason about than a pool.
+async function quintaCallTool(token, name, args) {
+  if (!QUINTA_MCP_URL) throw Object.assign(new Error('quinta_server_not_configured'), { status: 503 });
+  if (!token) throw Object.assign(new Error('quinta_no_token'), { status: 401 });
   const { Client, StreamableHTTPClientTransport } = await loadMcpClientSdk();
   const client = new Client({ name: 'support-kanban', version: '1.0.0' }, { capabilities: {} });
   const transport = new StreamableHTTPClientTransport(new URL(QUINTA_MCP_URL), {
-    requestInit: { headers: { Authorization: `Bearer ${QUINTA_MCP_TOKEN}` } }
+    requestInit: { headers: { Authorization: `Bearer ${token}` } }
   });
   try {
     await client.connect(transport);
@@ -5265,7 +5331,6 @@ async function quintaCallTool(name, args) {
       const text = (result.content || []).map(part => part.text).filter(Boolean).join(' ').slice(0, 300);
       throw Object.assign(new Error(text || 'quinta_tool_error'), { status: 502 });
     }
-    // Every tool on that server answers with a single JSON text block.
     const text = (result?.content || []).filter(part => part.type === 'text').map(part => part.text).join('');
     if (!text) return null;
     try { return JSON.parse(text); } catch (_) { return { raw: text }; }
@@ -5274,38 +5339,155 @@ async function quintaCallTool(name, args) {
   }
 }
 
-// The dialog catalogue is a definitions list that changes rarely and is
-// identical for every caller, so it is held for an hour rather than re-fetched
-// per agent. Property profiles are held for less: they are edited by the people
-// using this board.
+// Cached per token, never globally: two agents may see different properties,
+// and one agent's answers must not be served to another.
 const quintaCache = new Map();
-async function quintaCached(key, ttlMs, load) {
-  const hit = quintaCache.get(key);
+function quintaCacheKey(token, key) {
+  return crypto.createHash('sha256').update(String(token)).digest('hex').slice(0, 16) + ':' + key;
+}
+async function quintaCached(token, key, ttlMs, load) {
+  const cacheKey = quintaCacheKey(token, key);
+  const hit = quintaCache.get(cacheKey);
   if (hit && hit.at > Date.now() - ttlMs) return hit.value;
   const value = await load();
-  quintaCache.set(key, { at: Date.now(), value });
+  quintaCache.set(cacheKey, { at: Date.now(), value });
   return value;
 }
+function quintaClearCache(token) {
+  const prefix = crypto.createHash('sha256').update(String(token)).digest('hex').slice(0, 16) + ':';
+  [...quintaCache.keys()].filter(k => k.startsWith(prefix)).forEach(k => quintaCache.delete(k));
+}
 
-app.get('/api/quinta/status', requireAuth, (req, res) => {
-  res.json({
-    ok: true,
-    configured: quintaConfigured(),
-    hint: quintaSetupHint(),
-    endpoint: QUINTA_MCP_URL ? QUINTA_MCP_URL.replace(/^(https?:\/\/[^/]+).*$/, '$1/…') : null,
-    propertyCount: QUINTA_TEAM_IDS.length
-  });
+/* What went wrong, in terms of what the agent can do about it.
+
+   Matched on the strings these failures actually produce rather than on HTTP
+   status codes: the MCP client wraps the response body in a transport error, so
+   a rejected token arrives as
+   'Streamable HTTP error: Error POSTing to endpoint: {"error":"invalid_token"}'
+   with no status code anywhere in the text. */
+function quintaFriendlyError(raw) {
+  const text = String(raw || '');
+  if (/invalid_token|invalid_grant|\b401\b|unauthoriz|unauthentic/i.test(text)) {
+    return 'The Quinta server rejected your token. Check you pasted it whole, and that it has not expired.';
+  }
+  if (/invalid_client|\b403\b|forbidden|access.?denied/i.test(text)) {
+    return 'Your token was accepted but is not allowed to do this. Ask Quinta to grant it access to the MCP tools.';
+  }
+  if (/not found|-32601|-32602|unknown tool/i.test(text)) {
+    // Authenticated fine, then asked for a tool that server does not have -
+    // which nearly always means the endpoint points at the wrong MCP server.
+    return 'Connected, but that server does not have the tools this panel needs (get-dialogs-list / get-hotel-settings). QUINTA_MCP_URL is probably pointing at a different MCP server.';
+  }
+  if (/ENOTFOUND|ECONNREFUSED|EAI_AGAIN|fetch failed|ETIMEDOUT|socket hang up/i.test(text)) {
+    return 'The board could not reach the Quinta server. The endpoint may be wrong or unreachable from here - that is a deployment setting, not yours.';
+  }
+  if (/certificate|self.signed|SSL|TLS/i.test(text)) {
+    return 'The Quinta server presented a TLS certificate the board would not accept.';
+  }
+  return text.slice(0, 300);
+}
+
+app.get('/api/quinta/status', requireAuth, async (req, res) => {
+  try {
+    const settings = await quintaSettingsFor(req.session.userId);
+    return res.json({
+      ok: true,
+      serverConfigured: quintaServerConfigured(),
+      endpoint: QUINTA_MCP_URL ? QUINTA_MCP_URL.replace(/^(https?:\/\/[^/]+).*$/, '$1/…') : null,
+      connected: !!settings.token,
+      usingFallback: settings.usingFallback,
+      tokenHint: settings.tokenHint,
+      teamIdsRaw: settings.teamIdsRaw,
+      propertyCount: settings.teamIds.length
+    });
+  } catch (error) {
+    console.error('Quinta status failed:', error?.message || error);
+    return res.status(500).json({ error: 'quinta_status_failed' });
+  }
+});
+
+// The agent's own credential. The token is write-only over this API: it goes in
+// and is never returned, only its last four characters.
+app.post('/api/quinta/settings', requireAuth, async (req, res) => {
+  try {
+    await ensureQuintaSettingsTable();
+    const userId = Number(req.session.userId);
+    const rawToken = String(req.body?.token || '').trim();
+    const teamIds = String(req.body?.teamIds || '').trim();
+    if (teamIds && !quintaParseTeamIds(teamIds).length) {
+      return res.status(400).json({ error: 'invalid_team_ids', message: 'Team ids must be numeric, comma separated - e.g. 401, 252 or 401:Tartane St Tropez.' });
+    }
+    if (rawToken && rawToken.length > 4096) return res.status(400).json({ error: 'token_too_long' });
+
+    // An empty token field means "leave the saved one alone", so an agent can
+    // edit their property list without retyping a token they cannot read.
+    if (rawToken) {
+      const cipher = quintaEncrypt(rawToken);
+      const hint = rawToken.slice(-4);
+      await prisma.$executeRaw`
+        INSERT INTO "QuintaUserSetting" ("userId", "tokenCipher", "tokenHint", "teamIds", "updatedAt")
+        VALUES (${userId}, ${cipher}, ${hint}, ${teamIds}, CURRENT_TIMESTAMP)
+        ON CONFLICT ("userId") DO UPDATE SET "tokenCipher" = ${cipher}, "tokenHint" = ${hint}, "teamIds" = ${teamIds}, "updatedAt" = CURRENT_TIMESTAMP
+      `;
+    } else {
+      await prisma.$executeRaw`
+        INSERT INTO "QuintaUserSetting" ("userId", "teamIds", "updatedAt")
+        VALUES (${userId}, ${teamIds}, CURRENT_TIMESTAMP)
+        ON CONFLICT ("userId") DO UPDATE SET "teamIds" = ${teamIds}, "updatedAt" = CURRENT_TIMESTAMP
+      `;
+    }
+    const settings = await quintaSettingsFor(userId);
+    quintaClearCache(settings.token);
+    return res.json({ ok: true, connected: !!settings.token, tokenHint: settings.tokenHint, propertyCount: settings.teamIds.length });
+  } catch (error) {
+    console.error('Quinta settings save failed:', error?.message || error);
+    return res.status(500).json({ error: 'quinta_settings_failed' });
+  }
+});
+
+app.delete('/api/quinta/settings', requireAuth, async (req, res) => {
+  try {
+    await ensureQuintaSettingsTable();
+    const settings = await quintaSettingsFor(req.session.userId);
+    quintaClearCache(settings.token);
+    await prisma.$executeRaw`DELETE FROM "QuintaUserSetting" WHERE "userId" = ${Number(req.session.userId)}`;
+    return res.json({ ok: true });
+  } catch (error) {
+    console.error('Quinta settings clear failed:', error?.message || error);
+    return res.status(500).json({ error: 'quinta_settings_failed' });
+  }
+});
+
+/* Says exactly what is wrong, because the alternative is an agent staring at a
+   red box with someone else's credential problem in it. Each failure is named
+   in terms of what the agent can do about it. */
+app.get('/api/quinta/test', requireAuth, async (req, res) => {
+  try {
+    if (!quintaServerConfigured()) {
+      return res.json({ ok: false, stage: 'server', message: 'No Quinta server is configured on this deployment. QUINTA_MCP_URL has to be set by whoever deploys the board - it is the same for everyone, so it is not something you can set here.' });
+    }
+    const settings = await quintaSettingsFor(req.session.userId);
+    if (!settings.token) return res.json({ ok: false, stage: 'token', message: 'No token saved yet. Paste the one Quinta issued you above and save.' });
+
+    const data = await quintaCallTool(settings.token, 'get-dialogs-list', { categories: '10' });
+    const count = Object.values(data || {}).reduce((n, group) => n + Object.keys(group || {}).length, 0);
+    return res.json({ ok: true, stage: 'done', message: `Connected. The server answered with ${count} dialog${count === 1 ? '' : 's'}, so your token works.` });
+  } catch (error) {
+    return res.json({ ok: false, stage: 'call', message: quintaFriendlyError(error?.message || error) });
+  }
 });
 
 // The dialog/intent catalogue - what the bots can be asked about. Needs no
-// hotel, so this works the moment the server is reachable.
+// hotel, so this works as soon as a token is saved.
 app.get('/api/quinta/dialogs', requireAuth, async (req, res) => {
   try {
-    if (!quintaConfigured()) return res.status(503).json({ error: 'quinta_not_configured', message: quintaSetupHint() });
+    const settings = await quintaSettingsFor(req.session.userId);
+    if (!quintaServerConfigured()) return res.status(503).json({ error: 'quinta_server_not_configured' });
+    if (!settings.token) return res.status(401).json({ error: 'quinta_no_token' });
     const categories = String(req.query.categories || '').trim();
     const propertyKind = Math.min(4, Math.max(1, Number(req.query.propertyKind) || 1));
-    const data = await quintaCached(`dialogs:${categories}:${propertyKind}`, 60 * 60 * 1000, () =>
-      quintaCallTool('get-dialogs-list', {
+    const data = await quintaCached(settings.token, `dialogs:${categories}:${propertyKind}`, 60 * 60 * 1000, () =>
+      quintaCallTool(settings.token, 'get-dialogs-list', {
         ...(categories ? { categories } : {}),
         description: true,
         property_kind: propertyKind
@@ -5317,37 +5499,34 @@ app.get('/api/quinta/dialogs', requireAuth, async (req, res) => {
     for (const [category, dialogs] of Object.entries(data || {})) {
       if (!dialogs || typeof dialogs !== 'object') continue;
       for (const [fid, dialog] of Object.entries(dialogs)) {
-        rows.push({
-          fid,
-          category,
-          name: dialog?.name || fid,
-          description: dialog?.description || ''
-        });
+        rows.push({ fid, category, name: dialog?.name || fid, description: dialog?.description || '' });
       }
     }
     rows.sort((a, b) => a.fid.localeCompare(b.fid));
     return res.json({ ok: true, total: rows.length, categories: [...new Set(rows.map(r => r.category))].sort(), rows });
   } catch (error) {
     console.error('Quinta dialogs failed:', error?.message || error);
-    return res.status(error?.status || 502).json({ error: 'quinta_dialogs_failed', message: String(error?.message || error).slice(0, 300) });
+    return res.status(error?.status || 502).json({ error: 'quinta_dialogs_failed', message: quintaFriendlyError(error?.message || error) });
   }
 });
 
-// The properties this board covers, with the operational profile of each.
+// The properties this agent covers, with the operational profile of each.
 app.get('/api/quinta/properties', requireAuth, async (req, res) => {
   try {
-    if (!quintaConfigured()) return res.status(503).json({ error: 'quinta_not_configured', message: quintaSetupHint() });
-    if (!QUINTA_TEAM_IDS.length) return res.json({ ok: true, rows: [], note: 'no_team_ids_configured', message: quintaSetupHint() });
+    const settings = await quintaSettingsFor(req.session.userId);
+    if (!quintaServerConfigured()) return res.status(503).json({ error: 'quinta_server_not_configured' });
+    if (!settings.token) return res.status(401).json({ error: 'quinta_no_token' });
+    if (!settings.teamIds.length) return res.json({ ok: true, rows: [], note: 'no_team_ids_configured' });
 
-    const teams = QUINTA_TEAM_IDS.map(entry => entry.teamId).join(',');
-    const data = await quintaCached(`properties:${teams}`, 10 * 60 * 1000, () =>
-      quintaCallTool('get-hotel-settings', { teams }));
+    const teams = settings.teamIds.map(entry => entry.teamId).join(',');
+    const data = await quintaCached(settings.token, `properties:${teams}`, 10 * 60 * 1000, () =>
+      quintaCallTool(settings.token, 'get-hotel-settings', { teams }));
 
     // The profile comes back keyed by team id, or as a single object when one
     // id was asked for - normalised to a list either way.
     const byTeam = (data && typeof data === 'object' && !Array.isArray(data)) ? data : {};
-    const rows = QUINTA_TEAM_IDS.map(entry => {
-      const profile = byTeam[entry.teamId] || byTeam[Number(entry.teamId)] || (QUINTA_TEAM_IDS.length === 1 ? data : null) || {};
+    const rows = settings.teamIds.map(entry => {
+      const profile = byTeam[entry.teamId] || byTeam[Number(entry.teamId)] || (settings.teamIds.length === 1 ? data : null) || {};
       const info = profile.information || profile;
       return {
         teamId: entry.teamId,
@@ -5364,9 +5543,10 @@ app.get('/api/quinta/properties', requireAuth, async (req, res) => {
     return res.json({ ok: true, total: rows.length, rows });
   } catch (error) {
     console.error('Quinta properties failed:', error?.message || error);
-    return res.status(error?.status || 502).json({ error: 'quinta_properties_failed', message: String(error?.message || error).slice(0, 300) });
+    return res.status(error?.status || 502).json({ error: 'quinta_properties_failed', message: quintaFriendlyError(error?.message || error) });
   }
 });
+
 
 app.get('/api/insights/languages', requireAuth, async (req, res) => {
   try {

@@ -541,45 +541,74 @@ npm run check:m365
 
 ## Quinta properties in QT-Tools
 
-The QT-Tools sidebar has a **Quinta Properties** panel: the hotels this board
+The QT-Tools sidebar has a **Quinta Properties** panel: the hotels an agent
 supports, with each one's operational profile, and the bot's dialog catalogue,
 next to the tickets they are about.
 
-The board talks to the Quinta MCP server **as itself**, over its own bearer
-token. It cannot reuse anyone's Claude connector — that authorisation belongs to
-a Claude account, and there is no mechanism for a server to borrow it. Until the
-three variables below are set the panel says so on screen and names them; it
-never shows an empty list and pretends to be connected.
+**The endpoint is shared; the credential is not.** One Quinta server serves the
+whole team, so its URL is deployment configuration. But each agent signs in with
+their own token and covers their own properties, so those are asked for in the
+panel and stored per user — not in the environment, where the whole team would
+share one identity.
 
 | Variable | Default | Effect |
 | --- | --- | --- |
-| `QUINTA_MCP_URL` | unset | The Quinta MCP server endpoint (Streamable HTTP). Unset disables the panel. |
-| `QUINTA_MCP_TOKEN` | unset | Bearer token the board authenticates with. Sent as `Authorization: Bearer …` on every call. |
-| `QUINTA_TEAM_IDS` | unset | Comma-separated numeric team ids, optionally `id:Label` (`401:Tartane St Tropez`). Required by the Properties tab only. |
+| `QUINTA_MCP_URL` | unset | The Quinta MCP server endpoint (Streamable HTTP). The only one that has to be deployed. Unset, the panel says so and no agent can connect. |
+| `QUINTA_MCP_TOKEN` | unset | *Optional fallback.* A single shared service token, used only by agents who have not saved their own. Leave unset to require a personal token from everyone. |
+| `QUINTA_TEAM_IDS` | unset | *Optional fallback.* A default property list for agents who have not set theirs. |
 
-`QUINTA_TEAM_IDS` has to be maintained by hand, and that is a property of the
-server rather than an oversight here: it exposes `get-dialogs-list` and
-`get-hotel-settings`, and nothing that enumerates hotels. `get-hotel-settings`
-is a lookup by numeric team id, so something has to supply the list. The
-**Dialog catalogue** tab needs no team ids at all and works as soon as the URL
-and token are set.
+Set `QUINTA_MCP_URL` and each agent does the rest: **QT-Tools → Quinta
+Properties → paste token → list team ids → Save**. The panel has a **Test
+connection** button that names the actual failure — token rejected, token not
+permitted, server unreachable, wrong server — rather than showing a transport
+error.
 
-Responses are cached in memory — an hour for the dialog catalogue (definitions
-that rarely change and are identical for every caller), ten minutes for property
-profiles, which are edited by the people using this board.
+### How the per-agent credential is stored
 
-Two things to check on the first real call, neither of which could be verified
-without credentials:
+Tokens live in `QuintaUserSetting`, one row per user, created on first use with
+`CREATE TABLE IF NOT EXISTS` (the same pattern as `PasswordResetToken`) so no
+migration step is needed to deploy this.
 
-- **Auth shape.** A static bearer token is assumed. If Quinta uses OAuth client
-  credentials instead, `quintaCallTool` needs a token-exchange step added;
+They are **encrypted at rest** with AES-256-GCM, and the API never returns one:
+the panel only ever learns the last four characters, enough to show which token
+is saved. Saving with the token field left blank keeps the stored token, so an
+agent can edit their property list without retyping a credential they cannot
+read.
+
+The encryption key is derived from `SESSION_SECRET` rather than a key of its
+own, so there is one secret to deploy rather than two. The tradeoff is worth
+stating: **rotating `SESSION_SECRET` makes stored Quinta tokens undecryptable**,
+and each agent is asked for theirs again. That is a re-entry, not a leak.
+
+### Why the team ids are typed in by hand
+
+The Quinta server exposes `get-dialogs-list` and `get-hotel-settings`, and
+nothing that enumerates hotels. `get-hotel-settings` is a lookup by numeric team
+id, so something has to supply the list. Enter them comma separated — `401, 252`
+— optionally labelled, `401:Tartane St Tropez`.
+
+The **Dialog catalogue** tab needs no team ids at all and works as soon as a
+token is saved.
+
+### Caching
+
+Per token, never global — two agents may see different properties, and one
+agent's answers must never be served to another. An hour for the dialog
+catalogue (definitions that rarely change), ten minutes for property profiles,
+which are edited by the people using this board. Saving or removing a token
+clears that token's cache immediately.
+
+### Two things unverified until a real server answers
+
+- **Auth shape.** A static bearer token is assumed. If Quinta issues OAuth
+  client credentials instead, `quintaCallTool` needs a token-exchange step;
   nothing else changes.
 - **Profile shape.** The panel lays out name, address, bot languages, services
   and notification contacts. Anything else the server returns is kept and shown
   under *Raw profile* rather than dropped, so a field this board was not written
-  for is still visible to the agent — but the named layout may need adjusting
-  once a real profile comes back.
+  for is still visible to the agent.
 
 ## Important security note
+
 
 The uploaded ZIP contained a `.env` file. Rotate the Neon password and any Microsoft/HubSpot secrets before production deployment.

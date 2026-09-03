@@ -4865,6 +4865,27 @@ th {
 .q-raw { margin-top:11px; padding:10px; border-radius:8px; background:var(--surface-muted,#f1f5f9); font-size:11px;
   max-height:340px; overflow:auto; white-space:pre-wrap; word-break:break-word; color:var(--text-soft,#334155); }
 
+
+/* ===== Quinta per-agent connection ======================================== */
+.q-settings {
+  border:1px solid var(--border-strong,#cbd5e1); border-radius:12px;
+  background:var(--surface,#fff); padding:16px 18px; margin-bottom:16px; max-width:720px;
+}
+.q-settings-head { display:flex; align-items:center; gap:10px; margin-bottom:6px; font-size:14px; color:var(--text,#0f172a); }
+.q-hint-chip {
+  font-size:10px; font-weight:700; padding:2px 8px; border-radius:999px;
+  background:var(--emerald-50,#ecfdf5); color:var(--emerald-700,#047857); border:1px solid var(--emerald-200,#a7f3d0);
+}
+.q-field { display:block; margin:12px 0; }
+.q-field > span { display:block; font-size:11.5px; font-weight:600; color:var(--text-soft,#334155); margin-bottom:5px; }
+.q-field > span em { font-weight:400; font-style:normal; color:var(--muted,#64748b); }
+.q-field code { background:var(--surface-muted,#f1f5f9); border-radius:4px; padding:0 4px; font-size:11px; }
+.q-field .form-input { width:100%; }
+.q-settings-actions { display:flex; gap:9px; align-items:center; margin-top:14px; flex-wrap:wrap; }
+.q-test { margin-top:12px; padding:10px 12px; border-radius:9px; font-size:12px; line-height:1.5; }
+.q-test-ok { background:var(--emerald-50,#ecfdf5); border:1px solid var(--emerald-200,#a7f3d0); color:var(--emerald-700,#047857); }
+.q-test-bad { background:var(--red-50,#fef2f2); border:1px solid var(--red-200,#fecaca); color:var(--red-700,#b91c1c); }
+
 </style>
 </head>
 <body>
@@ -8342,13 +8363,13 @@ document.getElementById('insights-view-btn')?.addEventListener('click',()=>{if(v
 /* ===========================================================================
    Quinta properties, in QT-Tools
    ---------------------------------------------------------------------------
-   An agent working a ticket about a hotel had to leave the board to learn
-   anything about it. This puts the property's operational profile and the bot's
-   dialog catalogue next to the tickets they are about.
+   The endpoint is shared, the credential is not: one Quinta server serves the
+   team, but each agent signs in with their own token and covers their own
+   properties. So this panel asks for both, per agent, rather than the board
+   holding one identity everybody borrows.
 
-   Everything is served by the board (/api/quinta/*), which talks to the Quinta
-   MCP server as itself. The board never borrows anyone's Claude connector - see
-   the server module for why it cannot.
+   A saved token is never sent back here - the panel only ever learns its last
+   four characters, enough to show which one is saved and nothing more.
    =========================================================================== */
 
 let quintaTab = 'properties';
@@ -8357,6 +8378,9 @@ let quintaProperties = { state: 'idle', rows: [] };
 let quintaDialogs = { state: 'idle', rows: [], categories: [] };
 let quintaQuery = '';
 let quintaExpanded = new Set();
+let quintaSettingsOpen = false;
+let quintaTestResult = null;
+let quintaBusy = false;
 
 function showQuintaView(){
   viewMode='quinta';
@@ -8374,10 +8398,10 @@ async function loadQuintaStatus(){
     const res=await fetch('/api/quinta/status',{credentials:'include'});
     quintaStatus=await res.json();
   }catch(error){
-    quintaStatus={configured:false,hint:'Could not reach the board: '+String(error?.message||error)};
+    quintaStatus={serverConfigured:false,connected:false,error:String(error?.message||error)};
   }
   renderQuintaView();
-  if(quintaStatus?.configured)loadQuintaTab();
+  if(quintaStatus?.connected)loadQuintaTab();
 }
 
 function loadQuintaTab(){
@@ -8413,19 +8437,96 @@ async function loadQuintaDialogs(){
   renderQuintaView();
 }
 
+async function saveQuintaSettings(){
+  const token=document.getElementById('q-token')?.value||'';
+  const teamIds=document.getElementById('q-teams')?.value||'';
+  quintaBusy=true;quintaTestResult=null;renderQuintaView();
+  try{
+    const res=await fetch('/api/quinta/settings',{
+      method:'POST',credentials:'include',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({token,teamIds})
+    });
+    const data=await res.json();
+    if(!res.ok)throw new Error(data?.message||data?.error||('HTTP '+res.status));
+    showToast('Saved','ok');
+    quintaSettingsOpen=false;
+    // Whatever was cached belonged to the old credential.
+    quintaProperties={state:'idle',rows:[]};quintaDialogs={state:'idle',rows:[],categories:[]};
+    await loadQuintaStatus();
+    await testQuintaConnection();
+  }catch(error){
+    showToast('Could not save: '+String(error?.message||error));
+  }finally{
+    quintaBusy=false;renderQuintaView();
+  }
+}
+
+async function clearQuintaSettings(){
+  if(!confirm('Remove your saved Quinta token and property list from this board?'))return;
+  quintaBusy=true;renderQuintaView();
+  try{
+    await fetch('/api/quinta/settings',{method:'DELETE',credentials:'include'});
+    quintaTestResult=null;
+    quintaProperties={state:'idle',rows:[]};quintaDialogs={state:'idle',rows:[],categories:[]};
+    await loadQuintaStatus();
+    showToast('Removed','ok');
+  }finally{
+    quintaBusy=false;renderQuintaView();
+  }
+}
+
+async function testQuintaConnection(){
+  quintaBusy=true;renderQuintaView();
+  try{
+    const res=await fetch('/api/quinta/test',{credentials:'include'});
+    quintaTestResult=await res.json();
+  }catch(error){
+    quintaTestResult={ok:false,message:String(error?.message||error)};
+  }finally{
+    quintaBusy=false;renderQuintaView();
+  }
+}
+
 function quintaMatches(text){
   const q=quintaQuery.trim().toLowerCase();
   return !q||String(text||'').toLowerCase().includes(q);
 }
 
-// A property profile carries fields this board was not written for, and hiding
-// them would mean an agent cannot see something the server actually said. The
-// named ones are laid out; the rest are available under Raw profile.
 function quintaValue(value){
   if(value==null)return '<span class="q-muted">not set</span>';
   if(Array.isArray(value))return value.length?value.map(v=>`<span class="q-pill">${esc(String(v))}</span>`).join(''):'<span class="q-muted">none</span>';
   if(typeof value==='object')return `<span class="q-muted">${esc(Object.keys(value).length+' field(s)')}</span>`;
   return esc(String(value));
+}
+
+// The form. Shown on its own when nothing is saved, and foldable once it is -
+// an agent should not have to walk past their own credentials to read a hotel.
+function quintaSettingsHtml(){
+  const s=quintaStatus||{};
+  const saved=!!s.connected;
+  return `<div class="q-settings">
+    <div class="q-settings-head">
+      <strong>${saved?'Your Quinta connection':'Connect your Quinta account'}</strong>
+      ${saved?`<span class="q-hint-chip">token ending ${esc(s.tokenHint||'????')}</span>`:''}
+    </div>
+    <p class="q-note">The board asks each agent separately: the Quinta server is shared, but the token is yours and the properties you cover are yours. Your token is encrypted before it is stored and is never shown again - only its last four characters.</p>
+    <label class="q-field">
+      <span>Quinta token${saved?' <em>(leave blank to keep the saved one)</em>':''}</span>
+      <input class="form-input" id="q-token" type="password" autocomplete="off" spellcheck="false" placeholder="${saved?'••••••••  unchanged':'Paste the token Quinta issued you'}">
+    </label>
+    <label class="q-field">
+      <span>Your properties <em>(numeric team ids, comma separated - <code>401, 252</code> or <code>401:Tartane St Tropez</code>)</em></span>
+      <input class="form-input" id="q-teams" type="text" autocomplete="off" spellcheck="false" value="${esc(s.teamIdsRaw||'')}" placeholder="401, 252, 19919">
+    </label>
+    <p class="q-note">There is no "list every hotel" tool on the Quinta server - <code>get-hotel-settings</code> is a lookup by team id - so the board has to be told which ones are yours. The dialog catalogue needs none of this and works with just a token.</p>
+    <div class="q-settings-actions">
+      <button class="btn-primary" id="q-save"${quintaBusy?' disabled':''}>${quintaBusy?'Working…':'Save'}</button>
+      <button class="btn-out" id="q-test"${quintaBusy?' disabled':''}>Test connection</button>
+      ${saved?`<button class="btn-out" id="q-clear"${quintaBusy?' disabled':''}>Remove</button>`:''}
+    </div>
+    ${quintaTestResult?`<div class="q-test ${quintaTestResult.ok?'q-test-ok':'q-test-bad'}">${esc(quintaTestResult.message||'')}</div>`:''}
+  </div>`;
 }
 
 function quintaPropertiesHtml(){
@@ -8434,7 +8535,7 @@ function quintaPropertiesHtml(){
   const rows=(quintaProperties.rows||[]).filter(r=>quintaMatches(r.name)||quintaMatches(r.teamId)||quintaMatches(r.address));
   if(!rows.length){
     return quintaProperties.note==='no_team_ids_configured'
-      ? `<div class="q-empty"><strong>No properties configured.</strong><br>There is no "list every hotel" tool on the Quinta server - <code>get-hotel-settings</code> is a lookup by numeric team id. Set <code>QUINTA_TEAM_IDS</code> to the properties this board covers.</div>`
+      ? `<div class="q-empty"><strong>No properties listed yet.</strong><br>Add your team ids under <em>Your connection</em> above.</div>`
       : '<div class="q-empty">Nothing matches that search.</div>';
   }
   return rows.map(row=>{
@@ -8473,55 +8574,70 @@ function quintaDialogsHtml(){
     </tr>`).join('')}</tbody></table></div>`;
 }
 
+function quintaBindSettings(host){
+  host.querySelector('#q-save')?.addEventListener('click',saveQuintaSettings);
+  host.querySelector('#q-test')?.addEventListener('click',testQuintaConnection);
+  host.querySelector('#q-clear')?.addEventListener('click',clearQuintaSettings);
+  host.querySelector('#q-token')?.addEventListener('keydown',e=>{if(e.key==='Enter')saveQuintaSettings();});
+  host.querySelector('#q-teams')?.addEventListener('keydown',e=>{if(e.key==='Enter')saveQuintaSettings();});
+}
+
 function renderQuintaView(){
   const host=document.getElementById('quinta-body');
   if(!host)return;
+  const s=quintaStatus;
 
-  if(quintaStatus&&!quintaStatus.configured){
-    host.innerHTML=`
-      <div class="q-head"><div><div class="q-title">Quinta properties</div>
-        <div class="q-subtitle">The hotels this board supports, read from the Quinta MCP server</div></div></div>
-      <div class="q-setup">
-        <strong>Not connected yet.</strong>
-        <p>${esc(quintaStatus.hint||'')}</p>
-        <p class="q-note">The board connects to the Quinta MCP server <em>as itself</em>, with its own token. It cannot reuse a Claude connector: that authorisation belongs to a Claude account, and there is no way for a server to borrow it.</p>
-      </div>`;
+  const header=`<div class="q-head">
+      <div><div class="q-title">Quinta properties</div>
+        <div class="q-subtitle">${s?.endpoint?esc(s.endpoint):'The hotels you support, read from the Quinta MCP server'}</div></div>
+      ${s?.connected?`<div class="q-controls">
+        <input class="filter-sel" id="q-search" type="text" placeholder="Search…" value="${esc(quintaQuery)}" autocomplete="off">
+        <button class="btn-out" id="q-settings-toggle">${quintaSettingsOpen?'Hide connection':'Your connection'}</button>
+        <button class="btn-out" id="q-refresh">Refresh</button>
+      </div>`:''}
+    </div>`;
+
+  // The one thing an agent genuinely cannot fix themselves.
+  if(s&&!s.serverConfigured){
+    host.innerHTML=header+`<div class="q-setup">
+      <strong>No Quinta server configured on this deployment.</strong>
+      <p>Whoever deploys the board has to set <code>QUINTA_MCP_URL</code> - the endpoint is the same for the whole team, so it is not something you can enter here. Your own token goes in once that is done.</p>
+    </div>`;
+    return;
+  }
+
+  if(!s){host.innerHTML=header+'<div class="q-loading"><span class="spinner"></span> Checking your connection…</div>';return;}
+
+  if(!s.connected){
+    host.innerHTML=header+quintaSettingsHtml();
+    quintaBindSettings(host);
     return;
   }
 
   const tabs=[['properties','Properties'],['dialogs','Dialog catalogue']];
-  host.innerHTML=`
-    <div class="q-head">
-      <div><div class="q-title">Quinta properties</div>
-        <div class="q-subtitle">${quintaStatus?.endpoint?esc(quintaStatus.endpoint):'Reading from the Quinta MCP server'}</div></div>
-      <div class="q-controls">
-        <input class="filter-sel" id="q-search" type="text" placeholder="Search…" value="${esc(quintaQuery)}" autocomplete="off">
-        <button class="btn-out" id="q-refresh">Refresh</button>
-      </div>
-    </div>
-    <div class="ins-tabs">${tabs.map(([k,l])=>`<button class="ins-tab${quintaTab===k?' active':''}" data-q-tab="${k}">${esc(l)}</button>`).join('')}</div>
-    <div class="q-body">${quintaTab==='properties'?quintaPropertiesHtml():quintaDialogsHtml()}</div>`;
+  host.innerHTML=header
+    +(quintaSettingsOpen?quintaSettingsHtml():'')
+    +`<div class="ins-tabs">${tabs.map(([k,l])=>`<button class="ins-tab${quintaTab===k?' active':''}" data-q-tab="${k}">${esc(l)}</button>`).join('')}</div>
+      <div class="q-body">${quintaTab==='properties'?quintaPropertiesHtml():quintaDialogsHtml()}</div>`;
 
+  quintaBindSettings(host);
+  host.querySelector('#q-settings-toggle')?.addEventListener('click',()=>{quintaSettingsOpen=!quintaSettingsOpen;renderQuintaView();});
   host.querySelectorAll('[data-q-tab]').forEach(btn=>btn.addEventListener('click',()=>{
     quintaTab=btn.dataset.qTab;renderQuintaView();loadQuintaTab();
   }));
-  host.querySelectorAll('[data-q-raw]').forEach(btn=>btn.addEventListener('click',()=>{
+  const bindRaw=()=>host.querySelectorAll('[data-q-raw]').forEach(btn=>btn.addEventListener('click',()=>{
     const id=btn.dataset.qRaw;
     if(quintaExpanded.has(id))quintaExpanded.delete(id);else quintaExpanded.add(id);
     renderQuintaView();
   }));
-  const search=host.querySelector('#q-search');
-  if(search)search.addEventListener('input',e=>{
+  bindRaw();
+  host.querySelector('#q-search')?.addEventListener('input',e=>{
     quintaQuery=e.target.value;
-    // Re-rendering the whole panel would drop focus mid-keystroke, so only the
-    // list below the search box is redrawn.
+    // Only the list is redrawn - re-rendering the panel would drop focus
+    // mid-keystroke.
     const body=host.querySelector('.q-body');
     if(body)body.innerHTML=quintaTab==='properties'?quintaPropertiesHtml():quintaDialogsHtml();
-    host.querySelectorAll('[data-q-raw]').forEach(btn=>btn.addEventListener('click',()=>{
-      const id=btn.dataset.qRaw;
-      if(quintaExpanded.has(id))quintaExpanded.delete(id);else quintaExpanded.add(id);
-      renderQuintaView();
-    }));
+    bindRaw();
   });
   host.querySelector('#q-refresh')?.addEventListener('click',()=>{
     quintaProperties={state:'idle',rows:[]};quintaDialogs={state:'idle',rows:[],categories:[]};
