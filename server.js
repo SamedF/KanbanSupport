@@ -348,7 +348,12 @@ const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 20, standardHeade
 const passwordResetLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 5, standardHeaders: true, legacyHeaders: false });
 
 function isAuthed(req) { return req.session && req.session.authenticated === true; }
-function requireAuth(req, res, next) { return isAuthed(req) ? next() : res.status(401).json({ error: 'unauthorized' }); }
+// Deliberately not a plain session check any more - see revalidateSession for
+// what the session alone was letting through.
+function requireAuth(req, res, next) {
+  if (!isAuthed(req)) return res.status(401).json({ error: 'unauthorized' });
+  return revalidateSession(req, res, next);
+}
 function isAdminRole(role) { return role === 'admin' || role === 'owner'; }
 function isOwnerRole(role) { return role === 'owner'; }
 // The two decisions that are CS's to make, named once so the client's hidden
@@ -389,8 +394,12 @@ function canConfirmResolution(role, username) {
 function canAssignSupportAgent(role, username) { return canConfirmResolution(role, username); }
 function requireAdmin(req, res, next) {
   if (!isAuthed(req)) return res.status(401).json({ error: 'unauthorized' });
-  if (!isAdminRole(req.session.role)) return res.status(403).json({ error: 'admin_required' });
-  return next();
+  // Revalidate first, so the role checked below is the one on the row rather
+  // than the one copied into the session at login.
+  return revalidateSession(req, res, () => {
+    if (!isAdminRole(req.session.role)) return res.status(403).json({ error: 'admin_required' });
+    return next();
+  });
 }
 function hashApiToken(rawToken) {
   return crypto.createHash('sha256').update(String(rawToken || '')).digest('hex');
@@ -416,6 +425,123 @@ async function requireApiToken(req, res, next) {
     return res.status(500).json({ error: 'auth_failed' });
   }
 }
+
+// ---------------------------------------------------------------------------
+// Session revalidation
+//
+// requireAuth used to trust the session alone, and the session carries a copy
+// of role and username taken at login. That copy never expires, so three
+// things that are supposed to remove access did not:
+//
+//   - deactivating a user left their open session working for up to 12 hours
+//   - demoting an admin left them with admin routes until they logged out
+//   - a password reset ended only the session that performed it
+//
+// API tokens already checked isActive on every call (requireApiToken), so the
+// cookie path was the odd one out. Now both re-read the user, and the session's
+// role is refreshed from the row rather than believed.
+//
+// Cached briefly because this runs on every authenticated request, including
+// the SSE stream and the polling the board does on its own. The window is short
+// enough that a deactivation takes effect in seconds rather than hours.
+const AUTH_REVALIDATE_MS = 15 * 1000;
+const authUserCache = new Map();
+
+function invalidateAuthCache(userId) {
+  if (userId == null) authUserCache.clear();
+  else authUserCache.delete(Number(userId));
+}
+
+async function loadAuthUser(userId) {
+  const id = Number(userId);
+  if (!Number.isInteger(id) || id <= 0) return null;
+  const cached = authUserCache.get(id);
+  if (cached && cached.at > Date.now() - AUTH_REVALIDATE_MS) return cached.user;
+  const user = await prisma.user.findUnique({
+    where: { id },
+    select: { id: true, username: true, role: true, isActive: true }
+  });
+  authUserCache.set(id, { at: Date.now(), user });
+  return user;
+}
+
+// Every session-authenticated request goes through this. A failure to reach the
+// database is deliberately NOT treated as "log everyone out" - the board would
+// empty itself on a blip - but it is also not treated as a fresh check: the
+// cached answer stands, and if there is none the request is refused.
+async function revalidateSession(req, res, next) {
+  if (!isAuthed(req)) return res.status(401).json({ error: 'unauthorized' });
+  try {
+    const user = await loadAuthUser(req.session.userId);
+    if (!user || user.isActive === false) {
+      req.session.destroy(() => {});
+      return res.status(401).json({ error: 'session_revoked' });
+    }
+    // The row is the authority on both, so a demotion applies to the request
+    // being served rather than the next login.
+    req.session.role = user.role;
+    req.session.username = user.username;
+    return next();
+  } catch (error) {
+    console.error('Session revalidation failed:', error?.message || error);
+    return res.status(503).json({ error: 'auth_unavailable' });
+  }
+}
+
+// Ends every session belonging to one user, across every browser they are
+// signed in on. connect-pg-simple stores the session as JSON in one table, so
+// the userId inside it is queryable. Used after a password reset and after an
+// admin deactivates or demotes someone - the point of both is that access stops
+// now, not when a cookie happens to expire.
+async function revokeAllSessionsForUser(userId, { keepSid = null } = {}) {
+  const id = Number(userId);
+  if (!Number.isInteger(id) || id <= 0) return 0;
+  invalidateAuthCache(id);
+  try {
+    const result = keepSid
+      ? await sessionPool.query(`DELETE FROM session WHERE (sess->>'userId')::int = $1 AND sid <> $2`, [id, keepSid])
+      : await sessionPool.query(`DELETE FROM session WHERE (sess->>'userId')::int = $1`, [id]);
+    return result.rowCount || 0;
+  } catch (error) {
+    console.warn('Session revocation failed:', error?.message || error);
+    return 0;
+  }
+}
+
+// A password reset that leaves the old API tokens working has not locked anyone
+// out - a token is a standing credential, and "I changed my password" is the
+// one moment a person expects everything else to stop.
+async function revokeApiTokensForUser(userId) {
+  const id = Number(userId);
+  if (!Number.isInteger(id) || id <= 0) return 0;
+  const result = await prisma.apiToken.updateMany({
+    where: { userId: id, revokedAt: null },
+    data: { revokedAt: new Date() }
+  }).catch(() => ({ count: 0 }));
+  return result.count || 0;
+}
+
+// ---------------------------------------------------------------------------
+// Which mailboxes this board may read
+//
+// /api/mcp-proxy took the mailbox to read from the request body
+// (args.mailboxOwnerEmail, and ?owner= on a mail:// URI) and passed it to
+// Graph. Every other Graph call in this file hardcodes SUPPORT_MAILBOX; that
+// one endpoint let any signed-in user - any role, including the read-only ones
+// - name any mailbox in the tenant the connected identity can open, and read
+// its mail through the board.
+//
+// The board only ever needs the helpdesk mailbox and the addresses already
+// configured as legitimate reply identities.
+function allowedReadMailboxes() {
+  return new Set([SUPPORT_MAILBOX, KANBAN_MAILBOX, ...REPLY_FROM_ADDRESSES].filter(Boolean).map(a => String(a).toLowerCase()));
+}
+function resolveReadableMailbox(requested) {
+  const wanted = normalizeEmailAddress(requested) || '';
+  if (!wanted) return SUPPORT_MAILBOX;
+  return allowedReadMailboxes().has(wanted) ? wanted : null;
+}
+
 function avatarFilenameForUserId(id) {
   if (!id) return null;
   try {
@@ -469,6 +595,11 @@ function sanitizeUser(user) {
     updatedAt: user.updatedAt
   };
 }
+// How close together two identical audit rows have to be before the second is
+// taken as a duplicate write rather than a real repeat. A person cannot set the
+// same field to the same value twice inside this window; two racing saves do it
+// routinely.
+const AUDIT_WRITE_DEDUPE_MS = 5000;
 async function createTicketAuditEvent({
   ticketId,
   userId = null,
@@ -479,6 +610,23 @@ async function createTicketAuditEvent({
 }) {
   try {
     if (!ticketId || !eventType) return null;
+
+    // Two board tabs saving at once both read the same "before" row and both
+    // write the same diff, ~100ms apart, which is why the log holds two
+    // identical rows for every change anyone has ever made. Nothing downstream
+    // could tell them apart, so every count taken off the log read double.
+    // Guarded here rather than at each call site: this is the only door in.
+    const duplicate = await prisma.ticketEvent.findFirst({
+      where: {
+        ticketId,
+        eventType,
+        oldValue: oldValue === undefined || oldValue === null ? null : String(oldValue),
+        newValue: newValue === undefined || newValue === null ? null : String(newValue),
+        createdAt: { gte: new Date(Date.now() - AUDIT_WRITE_DEDUPE_MS) }
+      },
+      select: { id: true }
+    }).catch(() => null);
+    if (duplicate) return null;
 
     return await prisma.ticketEvent.create({
       data: {
@@ -3126,6 +3274,15 @@ app.post('/auth/reset-password', passwordResetLimiter, async (req, res) => {
       prisma.$executeRaw`UPDATE "PasswordResetToken" SET "usedAt" = ${new Date()} WHERE "id" = ${Number(reset.id)}`
     ]);
 
+    // Everything the old password could still reach: other browsers, and any
+    // standing API token. Resetting a password because it leaked and leaving
+    // those alive defeats the reset.
+    const killedSessions = await revokeAllSessionsForUser(user.id);
+    const killedTokens = await revokeApiTokensForUser(user.id);
+    if (killedSessions || killedTokens) {
+      console.log(`[auth] password reset for ${user.username}: ${killedSessions} session(s) and ${killedTokens} API token(s) revoked`);
+    }
+
     if (req.session) {
       req.session.authenticated = false;
       delete req.session.userId;
@@ -3167,10 +3324,21 @@ app.post('/auth/login', authLimiter, async (req, res) => {
       return res.status(401).json({ error: 'invalid_credentials' });
     }
 
+    // A new session id at the moment privilege changes. Without this the
+    // session the browser arrived with - which anyone able to set the cookie
+    // could have chosen - becomes an authenticated one, which is session
+    // fixation. regenerate() issues a fresh id and drops the old row.
+    await new Promise((resolve, reject) => req.session.regenerate(err => (err ? reject(err) : resolve())));
+
     req.session.authenticated = true;
     req.session.userId = user.id;
     req.session.username = user.username;
     req.session.role = user.role;
+    invalidateAuthCache(user.id);
+
+    // Persist before replying, so the very next request (the board loads
+    // immediately) is guaranteed to find the session already stored.
+    await new Promise((resolve, reject) => req.session.save(err => (err ? reject(err) : resolve())));
 
     return res.json({ ok: true, user: sanitizeUser(user) });
   } catch (error) {
@@ -3684,6 +3852,15 @@ app.patch('/api/admin/users/:id', requireAdmin, async (req, res) => {
     if (!Object.keys(data).length) return res.status(400).json({ error: 'no_changes' });
 
     const user = await prisma.user.update({ where: { id }, data });
+    invalidateAuthCache(user.id);
+    // The three changes that are meant to take something away. Without this the
+    // person keeps whatever their live session already had until it expires.
+    const revoked = data.isActive === false || data.passwordHash || (data.role && data.role !== existing.role);
+    if (revoked) {
+      const killed = await revokeAllSessionsForUser(user.id, { keepSid: isSelf ? req.sessionID : null });
+      if (killed) console.log(`[auth] ${user.username}: ${killed} session(s) ended by an admin change`);
+      if (data.passwordHash) await revokeApiTokensForUser(user.id);
+    }
     res.json({ user: sanitizeUser(user) });
   } catch (error) {
     console.error('Update user failed:', error);
@@ -4274,6 +4451,766 @@ app.get('/api/tickets/kpis/drilldown', requireAuth, async (req, res) => {
     return res.status(500).json({ error: 'read_kpi_drilldown_failed' });
   }
 });
+// ---------------------------------------------------------------------------
+// Insights
+//
+// Everything below reads the TicketEvent log rather than the Ticket rows. The
+// rows say where a ticket is now; the log says how it got there, which is what
+// answers "who dropped this", "which column is the real queue", and "what did
+// the board look like on Tuesday".
+//
+// One property of the log has to be handled before any of it means anything:
+// a single change is written twice, ~70-100ms apart, with identical old/new
+// values (the same diff is audited on two paths). Left alone that doubles
+// every count here. dedupeTicketEvents collapses an identical
+// (type, old, new) pair seen inside AUDIT_DEDUPE_MS into one - a window far
+// too short for a person to have made the same change twice on purpose.
+// ---------------------------------------------------------------------------
+const AUDIT_DEDUPE_MS = 5000;
+
+// Beyond this many handoffs a ticket is not being passed between people, it is
+// being rewritten by something automated. Those are reported under their own
+// heading instead of at the top of the bounce list, where they would crowd out
+// every ticket a human actually dropped.
+const FLAPPING_HANDOFFS = 12;
+
+function dedupeTicketEvents(events) {
+  const out = [];
+  for (const ev of events) {
+    const prev = out[out.length - 1];
+    if (prev
+      && prev.ticketId === ev.ticketId
+      && prev.eventType === ev.eventType
+      && String(prev.oldValue ?? '') === String(ev.oldValue ?? '')
+      && String(prev.newValue ?? '') === String(ev.newValue ?? '')
+      && Math.abs(new Date(ev.createdAt).getTime() - new Date(prev.createdAt).getTime()) <= AUDIT_DEDUPE_MS) continue;
+    out.push(ev);
+  }
+  return out;
+}
+
+// The same team/agent scoping every KPI figure obeys, so an insight never
+// quietly reports a board-wide total to someone who can only see their own
+// tickets.
+function insightsAccessWhere(req) {
+  const role = normalizeRole(req.session?.role) || 'support';
+  const username = String(req.session?.username || '').trim().toUpperCase();
+  if (role === 'cs') return { csAgent: username };
+  if (role === 'support') return { assignedAgent: username };
+  return {};
+}
+
+function insightsDays(value, fallback = 30) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(365, Math.max(1, Math.round(n)));
+}
+
+function ticketNumberOf(ticket) {
+  return ticket?.displayNumber ? `#${String(ticket.displayNumber).padStart(4, '0')}` : null;
+}
+
+const INSIGHT_TICKET_SELECT = {
+  id: true, externalId: true, displayNumber: true, subject: true, status: true,
+  priority: true, companyName: true, senderEmail: true, assignedAgent: true,
+  csAgent: true, category: true, createdAt: true, updatedAt: true, resolvedAt: true,
+  duplicateOfExternalId: true
+};
+
+// --- Bounce detection ------------------------------------------------------
+//
+// A ticket that changed hands three times, or re-entered a column it had
+// already left, is the painful kind. No existing figure surfaces it: it can sit
+// inside SLA the whole time it is being passed around.
+app.get('/api/insights/bounce', requireAuth, async (req, res) => {
+  try {
+    const days = insightsDays(req.query.days, 30);
+    const since = new Date(Date.now() - days * 86400000);
+    const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 50));
+    const access = insightsAccessWhere(req);
+
+    const events = await prisma.ticketEvent.findMany({
+      where: {
+        eventType: { in: ['ticket_assignedAgent_changed', 'ticket_status_changed'] },
+        createdAt: { gte: since },
+        ticket: { AND: [{ duplicateOfExternalId: null }, access] }
+      },
+      select: { ticketId: true, eventType: true, oldValue: true, newValue: true, createdAt: true },
+      orderBy: [{ ticketId: 'asc' }, { createdAt: 'asc' }]
+    });
+
+    const byTicket = new Map();
+    for (const ev of dedupeTicketEvents(events)) {
+      if (!byTicket.has(ev.ticketId)) byTicket.set(ev.ticketId, []);
+      byTicket.get(ev.ticketId).push(ev);
+    }
+
+    const rows = [];
+    const flapping = [];
+    for (const [ticketId, list] of byTicket) {
+      let handoffs = 0;
+      let statusChanges = 0;
+      let revisits = 0;
+      const agents = new Set();
+      const seenStatuses = new Set();
+      let lastAgent = null;
+      let firstAt = null;
+      let lastAt = null;
+
+      for (const ev of list) {
+        const oldValue = String(ev.oldValue || '').trim();
+        const newValue = String(ev.newValue || '').trim();
+        if (!firstAt) firstAt = ev.createdAt;
+        lastAt = ev.createdAt;
+
+        if (ev.eventType === 'ticket_assignedAgent_changed') {
+          // An unassigned -> someone transition is the ticket being picked up,
+          // not being handed off. Only a person-to-person move counts.
+          if (oldValue && newValue && oldValue !== newValue) {
+            handoffs++;
+            agents.add(oldValue);
+            agents.add(newValue);
+            lastAgent = newValue;
+          } else if (newValue) {
+            agents.add(newValue);
+            lastAgent = newValue;
+          }
+        } else {
+          if (oldValue) seenStatuses.add(oldValue);
+          if (newValue && oldValue && newValue !== oldValue) {
+            statusChanges++;
+            // Re-entering a column the ticket has already been in - the
+            // ping-pong half of the signal.
+            if (seenStatuses.has(newValue)) revisits++;
+            seenStatuses.add(newValue);
+          }
+        }
+      }
+
+      if (handoffs >= FLAPPING_HANDOFFS) {
+        flapping.push({ ticketId, handoffs, distinctAgents: agents.size });
+        continue;
+      }
+      if (handoffs < 3 && revisits < 2) continue;
+      rows.push({
+        ticketId,
+        handoffs,
+        distinctAgents: agents.size,
+        statusChanges,
+        revisits,
+        lastAgent,
+        firstChangeAt: firstAt,
+        lastChangeAt: lastAt,
+        score: handoffs + revisits * 2
+      });
+    }
+
+    rows.sort((a, b) => b.score - a.score || b.handoffs - a.handoffs);
+    const top = rows.slice(0, limit);
+    const tickets = top.length
+      ? await prisma.ticket.findMany({ where: { id: { in: top.map(r => r.ticketId) } }, select: INSIGHT_TICKET_SELECT })
+      : [];
+    const ticketById = new Map(tickets.map(t => [t.id, t]));
+
+    return res.json({
+      ok: true,
+      generatedAt: new Date().toISOString(),
+      range: { days, since: since.toISOString() },
+      total: rows.length,
+      flappingCount: flapping.length,
+      // Not a bounce - a ticket being rewritten faster than a person could.
+      // Surfaced so the churn is visible without it drowning the real list.
+      flapping: flapping.sort((a, b) => b.handoffs - a.handoffs).slice(0, 10),
+      rows: top.map(row => {
+        const ticket = ticketById.get(row.ticketId);
+        return {
+          ...row,
+          ticketNumber: ticketNumberOf(ticket),
+          externalId: ticket?.externalId || null,
+          subject: ticket?.subject || '(no subject)',
+          company: ticket?.companyName || 'Unknown',
+          status: normalizeDbStatusForBoard(ticket?.status),
+          priority: ticket?.priority || 'Normal',
+          agent: ticket?.assignedAgent || 'Unassigned'
+        };
+      }).filter(row => row.externalId)
+    });
+  } catch (error) {
+    console.error('Bounce insight failed:', error);
+    return res.status(500).json({ error: 'bounce_insight_failed' });
+  }
+});
+
+// --- Dwell heatmap ---------------------------------------------------------
+//
+// How long tickets actually sit in each column, per week. A column with a high
+// average dwell is the bottleneck, and it is usually not the column anyone
+// would have named.
+function isoWeekKey(date) {
+  const d = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
+  const day = d.getUTCDay() || 7;
+  d.setUTCDate(d.getUTCDate() + 4 - day);
+  const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
+  const week = Math.ceil((((d - yearStart) / 86400000) + 1) / 7);
+  return `${d.getUTCFullYear()}-W${String(week).padStart(2, '0')}`;
+}
+// Midnight UTC on the Monday after the one containing `ms` - the boundary an
+// interval is split at when it runs across weeks.
+function nextIsoWeekStart(ms) {
+  const d = new Date(ms);
+  const monday = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()) - ((d.getUTCDay() || 7) - 1) * 86400000;
+  return monday + 7 * 86400000;
+}
+
+app.get('/api/insights/dwell', requireAuth, async (req, res) => {
+  try {
+    const weeks = Math.min(26, Math.max(1, Number(req.query.weeks) || 8));
+    const since = new Date(Date.now() - weeks * 7 * 86400000);
+    const now = Date.now();
+    const access = insightsAccessWhere(req);
+
+    const tickets = await prisma.ticket.findMany({
+      where: { AND: [{ duplicateOfExternalId: null }, access, { OR: [{ updatedAt: { gte: since } }, { createdAt: { gte: since } }] }] },
+      select: { id: true, status: true, createdAt: true }
+    });
+    if (!tickets.length) return res.json({ ok: true, weeks: [], stages: [], cells: {}, totals: {}, sampleSize: 0 });
+
+    const ticketIds = tickets.map(t => t.id);
+    const events = dedupeTicketEvents(await prisma.ticketEvent.findMany({
+      where: { ticketId: { in: ticketIds }, eventType: 'ticket_status_changed' },
+      select: { ticketId: true, eventType: true, oldValue: true, newValue: true, createdAt: true },
+      orderBy: [{ ticketId: 'asc' }, { createdAt: 'asc' }]
+    }));
+
+    const eventsByTicket = new Map();
+    for (const ev of events) {
+      if (!eventsByTicket.has(ev.ticketId)) eventsByTicket.set(ev.ticketId, []);
+      eventsByTicket.get(ev.ticketId).push(ev);
+    }
+
+    // Two different questions, two different numbers.
+    //
+    // cells[stage][week] = { ms, tickets } is LOAD: the ticket-hours that
+    // column carried that week, and how many distinct tickets were sitting in
+    // it. An average per cell would be worthless here - almost every ticket
+    // spans the whole week, so it would read 168h in every cell of every
+    // column and say nothing.
+    //
+    // totals[stage] is DWELL: how long a ticket takes to get through the
+    // column, averaged over the intervals that actually ended. Intervals still
+    // running are counted separately as `open` rather than folded in, because
+    // a ticket that has been in New for a month is not evidence that New takes
+    // a month - it is evidence that one ticket is stuck.
+    const cells = {};
+    const totals = {};
+    const weekKeys = new Set();
+    const cellTickets = {};
+    let sampleSize = 0;
+
+    const ensureTotal = stage => (totals[stage] = totals[stage] || { completedMs: 0, completedN: 0, openMs: 0, openN: 0 });
+
+    const addInterval = (stage, ticketId, startMs, endMs, closed) => {
+      if (!stage) return;
+      // Only the slice of the interval that falls inside the window counts. A
+      // ticket that has been sitting in New since March would otherwise
+      // contribute all five of those months to this window.
+      const from = Math.max(startMs, since.getTime());
+      const to = Math.min(endMs, now);
+      if (!(to > from)) return;
+
+      const total = ensureTotal(stage);
+      if (closed) { total.completedMs += endMs - startMs; total.completedN += 1; }
+      else { total.openMs += now - startMs; total.openN += 1; }
+      sampleSize++;
+
+      // An interval that spans three weeks belongs to all three, not to the
+      // one it happened to start in - otherwise a long stall shows up as a
+      // single hot cell followed by two empty ones.
+      let cursor = from;
+      while (cursor < to) {
+        const boundary = Math.min(to, nextIsoWeekStart(cursor));
+        const key = isoWeekKey(new Date(cursor));
+        weekKeys.add(key);
+        cells[stage] = cells[stage] || {};
+        cells[stage][key] = cells[stage][key] || { ms: 0, tickets: 0 };
+        cells[stage][key].ms += boundary - cursor;
+        cellTickets[stage] = cellTickets[stage] || {};
+        cellTickets[stage][key] = cellTickets[stage][key] || new Set();
+        cellTickets[stage][key].add(ticketId);
+        cursor = boundary;
+      }
+    };
+
+    for (const ticket of tickets) {
+      const list = eventsByTicket.get(ticket.id) || [];
+      let stage = normalizeDbStatusForBoard(list.length ? list[0].oldValue : ticket.status);
+      let startMs = new Date(ticket.createdAt).getTime();
+      for (const ev of list) {
+        const at = new Date(ev.createdAt).getTime();
+        addInterval(stage, ticket.id, startMs, at, true);
+        stage = normalizeDbStatusForBoard(ev.newValue);
+        startMs = at;
+      }
+      // The column it is sitting in right now, still accumulating. Resolved is
+      // an end state, not a queue - counting the time since it was resolved
+      // would make Resolved the biggest number on the chart forever.
+      if (stage !== 'res') addInterval(stage, ticket.id, startMs, now, false);
+    }
+
+    for (const stage of Object.keys(cells)) {
+      for (const week of Object.keys(cells[stage])) {
+        cells[stage][week].tickets = cellTickets[stage][week].size;
+      }
+    }
+
+    const stages = ['new', 'inp', 'wus', 'dft', 'wct', 'res'].filter(s => cells[s]);
+    return res.json({
+      ok: true,
+      generatedAt: new Date().toISOString(),
+      weeks: [...weekKeys].sort(),
+      stages,
+      cells,
+      totals: Object.fromEntries(Object.entries(totals).map(([stage, t]) => [stage, {
+        avgHours: t.completedN ? Math.round((t.completedMs / t.completedN / 3600000) * 10) / 10 : null,
+        completed: t.completedN,
+        open: t.openN,
+        openAvgHours: t.openN ? Math.round((t.openMs / t.openN / 3600000) * 10) / 10 : null
+      }])),
+      sampleSize
+    });
+  } catch (error) {
+    console.error('Dwell insight failed:', error);
+    return res.status(500).json({ error: 'dwell_insight_failed' });
+  }
+});
+
+// --- Reply-outcome loop ----------------------------------------------------
+//
+// A resolve that comes straight back is not a resolve. Throughput counts it the
+// same as one that stuck, so this is what tells the two apart.
+app.get('/api/insights/reopened', requireAuth, async (req, res) => {
+  try {
+    const days = insightsDays(req.query.days, 30);
+    const windowHours = Math.min(720, Math.max(1, Number(req.query.windowHours) || 72));
+    const since = new Date(Date.now() - days * 86400000);
+    const access = insightsAccessWhere(req);
+
+    const events = dedupeTicketEvents(await prisma.ticketEvent.findMany({
+      where: {
+        eventType: 'ticket_status_changed',
+        createdAt: { gte: since },
+        ticket: { AND: [{ duplicateOfExternalId: null }, access] }
+      },
+      select: { ticketId: true, eventType: true, oldValue: true, newValue: true, createdAt: true },
+      orderBy: [{ ticketId: 'asc' }, { createdAt: 'asc' }]
+    }));
+
+    const byTicket = new Map();
+    for (const ev of events) {
+      if (!byTicket.has(ev.ticketId)) byTicket.set(ev.ticketId, []);
+      byTicket.get(ev.ticketId).push(ev);
+    }
+
+    const rows = [];
+    let resolvedCount = 0;
+    for (const [ticketId, list] of byTicket) {
+      let resolvedAt = null;
+      let bounces = 0;
+      let fastest = null;
+      for (const ev of list) {
+        if (ev.newValue === 'Resolved') { resolvedAt = new Date(ev.createdAt).getTime(); resolvedCount++; continue; }
+        if (ev.oldValue === 'Resolved' && ev.newValue !== 'Resolved') {
+          bounces++;
+          if (resolvedAt) {
+            const gapHours = (new Date(ev.createdAt).getTime() - resolvedAt) / 3600000;
+            if (fastest === null || gapHours < fastest) fastest = gapHours;
+          }
+          resolvedAt = null;
+        }
+      }
+      if (!bounces) continue;
+      rows.push({ ticketId, bounces, hoursToReopen: fastest === null ? null : Math.round(fastest * 10) / 10 });
+    }
+
+    const within = rows.filter(r => r.hoursToReopen !== null && r.hoursToReopen <= windowHours);
+    rows.sort((a, b) => b.bounces - a.bounces || (a.hoursToReopen ?? 1e9) - (b.hoursToReopen ?? 1e9));
+
+    const tickets = rows.length
+      ? await prisma.ticket.findMany({ where: { id: { in: rows.slice(0, 100).map(r => r.ticketId) } }, select: INSIGHT_TICKET_SELECT })
+      : [];
+    const ticketById = new Map(tickets.map(t => [t.id, t]));
+
+    return res.json({
+      ok: true,
+      generatedAt: new Date().toISOString(),
+      range: { days, since: since.toISOString(), windowHours },
+      totals: {
+        resolves: resolvedCount,
+        reopened: rows.length,
+        reopenedWithinWindow: within.length,
+        stickRate: resolvedCount ? Math.round(((resolvedCount - rows.length) / resolvedCount) * 1000) / 10 : null
+      },
+      rows: rows.slice(0, 100).map(row => {
+        const ticket = ticketById.get(row.ticketId);
+        return {
+          ...row,
+          ticketNumber: ticketNumberOf(ticket),
+          externalId: ticket?.externalId || null,
+          subject: ticket?.subject || '(no subject)',
+          company: ticket?.companyName || 'Unknown',
+          agent: ticket?.assignedAgent || 'Unassigned',
+          status: normalizeDbStatusForBoard(ticket?.status)
+        };
+      }).filter(row => row.externalId)
+    });
+  } catch (error) {
+    console.error('Reopened insight failed:', error);
+    return res.status(500).json({ error: 'reopened_insight_failed' });
+  }
+});
+
+// --- Board rewind ----------------------------------------------------------
+//
+// What the board looked like at an arbitrary past moment. Reconstructed by
+// running the log backwards: for each ticket, the first status change recorded
+// AFTER the target time carries, in its oldValue, exactly the status the
+// ticket was sitting in at that time. No snapshot table needed.
+app.get('/api/insights/board-at', requireAuth, async (req, res) => {
+  try {
+    const at = new Date(String(req.query.at || ''));
+    if (Number.isNaN(at.getTime())) return res.status(400).json({ error: 'invalid_at' });
+    if (at.getTime() > Date.now()) return res.status(400).json({ error: 'at_in_future' });
+    const access = insightsAccessWhere(req);
+
+    const tickets = await prisma.ticket.findMany({
+      where: { AND: [{ createdAt: { lte: at } }, access] },
+      select: INSIGHT_TICKET_SELECT
+    });
+    if (!tickets.length) return res.json({ ok: true, at: at.toISOString(), counts: {}, tickets: [] });
+
+    const ids = tickets.map(t => t.id);
+    // Only the earliest post-cutoff change per ticket matters, but Prisma has
+    // no per-group limit - fetch the changes after the cutoff ascending and
+    // keep the first one seen for each ticket.
+    const later = await prisma.ticketEvent.findMany({
+      where: { ticketId: { in: ids }, eventType: { in: ['ticket_status_changed', 'ticket_assignedAgent_changed'] }, createdAt: { gt: at } },
+      select: { ticketId: true, eventType: true, oldValue: true, createdAt: true },
+      orderBy: [{ createdAt: 'asc' }]
+    });
+    const statusAt = new Map();
+    const agentAt = new Map();
+    for (const ev of later) {
+      const target = ev.eventType === 'ticket_status_changed' ? statusAt : agentAt;
+      if (!target.has(ev.ticketId)) target.set(ev.ticketId, ev.oldValue);
+    }
+
+    const counts = { new: 0, inp: 0, wus: 0, dft: 0, wct: 0, res: 0 };
+    const rows = tickets.map(ticket => {
+      const stage = normalizeDbStatusForBoard(statusAt.has(ticket.id) ? statusAt.get(ticket.id) : ticket.status);
+      const agent = agentAt.has(ticket.id) ? (agentAt.get(ticket.id) || null) : (ticket.assignedAgent || null);
+      if (stage in counts) counts[stage]++;
+      return {
+        ticketNumber: ticketNumberOf(ticket),
+        externalId: ticket.externalId,
+        subject: ticket.subject || '(no subject)',
+        company: ticket.companyName || 'Unknown',
+        priority: ticket.priority || 'Normal',
+        stage,
+        agent: agent || 'Unassigned',
+        stageNow: normalizeDbStatusForBoard(ticket.status),
+        agentNow: ticket.assignedAgent || 'Unassigned'
+      };
+    });
+
+    return res.json({
+      ok: true,
+      at: at.toISOString(),
+      generatedAt: new Date().toISOString(),
+      counts,
+      // What is different between then and now - the answer to "who dropped
+      // this" is usually in this subset, not in the full list.
+      changed: rows.filter(r => r.stage !== r.stageNow || r.agent !== r.agentNow).length,
+      tickets: rows
+    });
+  } catch (error) {
+    console.error('Board rewind failed:', error);
+    return res.status(500).json({ error: 'board_rewind_failed' });
+  }
+});
+
+// --- One ticket's timeline -------------------------------------------------
+app.get('/api/tickets/:externalId/timeline', requireAuth, async (req, res) => {
+  try {
+    const externalId = String(req.params.externalId || '').trim();
+    if (!externalId) return res.status(400).json({ error: 'missing_ticket' });
+    const ticket = await prisma.ticket.findUnique({ where: { externalId }, select: { id: true, createdAt: true, status: true } });
+    if (!ticket) return res.json({ ok: true, externalId, events: [], note: 'not_in_database' });
+
+    const events = dedupeTicketEvents(await prisma.ticketEvent.findMany({
+      where: { ticketId: ticket.id },
+      select: { ticketId: true, eventType: true, oldValue: true, newValue: true, createdAt: true, user: { select: { username: true } } },
+      orderBy: [{ createdAt: 'asc' }],
+      take: 500
+    }));
+
+    return res.json({
+      ok: true,
+      externalId,
+      createdAt: ticket.createdAt,
+      statusNow: normalizeDbStatusForBoard(ticket.status),
+      events: events.map(ev => ({
+        at: ev.createdAt,
+        type: ev.eventType,
+        from: ev.oldValue,
+        to: ev.newValue,
+        by: ev.user?.username ? String(ev.user.username).toUpperCase() : null
+      }))
+    });
+  } catch (error) {
+    console.error('Ticket timeline failed:', error);
+    return res.status(500).json({ error: 'ticket_timeline_failed' });
+  }
+});
+
+// --- Similar tickets -------------------------------------------------------
+//
+// "This company asked something like this before, and here is what we said."
+// Turns the ticket history into a lookup without building a knowledge base.
+const SIMILAR_STOPWORDS = new Set(['the', 'and', 'for', 'with', 'from', 'this', 'that', 'you', 'your', 'our', 'not', 'are', 'has', 'have', 'was', 'were', 'can', 'will', 'about', 'please', 'hello', 'dear', 'thanks', 'thank', 'regards', 'support', 'issue', 'question', 'help']);
+function similarityTokens(text) {
+  return new Set(String(text || '')
+    .toLowerCase()
+    .replace(/^\s*((re|fw|fwd)\s*:\s*)+/gi, '')
+    .split(/[^a-z0-9]+/)
+    .filter(word => word.length >= 3 && !SIMILAR_STOPWORDS.has(word)));
+}
+function jaccard(a, b) {
+  if (!a.size || !b.size) return 0;
+  let shared = 0;
+  for (const token of a) if (b.has(token)) shared++;
+  return shared / (a.size + b.size - shared);
+}
+
+app.get('/api/tickets/:externalId/similar', requireAuth, async (req, res) => {
+  try {
+    const externalId = String(req.params.externalId || '').trim();
+    if (!externalId) return res.status(400).json({ error: 'missing_ticket' });
+    const limit = Math.min(10, Math.max(1, Number(req.query.limit) || 5));
+
+    const source = await prisma.ticket.findUnique({ where: { externalId }, select: INSIGHT_TICKET_SELECT });
+    if (!source) return res.json({ ok: true, externalId, rows: [], note: 'not_in_database' });
+
+    const or = [];
+    if (source.senderEmail) or.push({ senderEmail: source.senderEmail });
+    if (source.companyName) or.push({ companyName: source.companyName });
+    if (source.category) or.push({ category: source.category });
+    if (!or.length) return res.json({ ok: true, externalId, rows: [] });
+
+    const candidates = await prisma.ticket.findMany({
+      where: { AND: [{ OR: or }, { NOT: { externalId } }, { duplicateOfExternalId: null }] },
+      select: INSIGHT_TICKET_SELECT,
+      orderBy: [{ updatedAt: 'desc' }],
+      take: 200
+    });
+
+    const sourceTokens = similarityTokens(source.subject);
+    const scored = candidates.map(candidate => {
+      const overlap = jaccard(sourceTokens, similarityTokens(candidate.subject));
+      const sameSender = !!(source.senderEmail && candidate.senderEmail === source.senderEmail);
+      const sameCompany = !!(source.companyName && candidate.companyName === source.companyName);
+      const resolved = normalizeDbStatusForBoard(candidate.status) === 'res';
+      // A resolved one is worth more than an open one: it carries an answer.
+      const score = overlap * 4 + (sameSender ? 1.5 : 0) + (sameCompany ? 1 : 0) + (resolved ? 0.75 : 0);
+      return { candidate, overlap, sameSender, sameCompany, resolved, score };
+    }).filter(row => row.score >= 1).sort((a, b) => b.score - a.score).slice(0, limit);
+
+    // The resolving note, where there is one - the actual reusable part.
+    const ids = scored.map(row => row.candidate.id);
+    const comments = ids.length
+      ? await prisma.ticketComment.findMany({ where: { ticketId: { in: ids } }, orderBy: { createdAt: 'desc' }, select: { ticketId: true, comment: true, createdAt: true, user: { select: { username: true } } } })
+      : [];
+    const lastComment = new Map();
+    for (const comment of comments) if (!lastComment.has(comment.ticketId)) lastComment.set(comment.ticketId, comment);
+
+    return res.json({
+      ok: true,
+      externalId,
+      rows: scored.map(({ candidate, overlap, sameSender, sameCompany, resolved, score }) => {
+        const comment = lastComment.get(candidate.id);
+        return {
+          ticketNumber: ticketNumberOf(candidate),
+          externalId: candidate.externalId,
+          subject: candidate.subject || '(no subject)',
+          company: candidate.companyName || 'Unknown',
+          sender: candidate.senderEmail || null,
+          status: normalizeDbStatusForBoard(candidate.status),
+          category: candidate.category || null,
+          agent: candidate.assignedAgent || 'Unassigned',
+          resolvedAt: candidate.resolvedAt,
+          createdAt: candidate.createdAt,
+          why: [sameSender ? 'same sender' : null, sameCompany ? 'same company' : null, overlap >= 0.2 ? 'similar subject' : null, resolved ? 'resolved' : null].filter(Boolean),
+          score: Math.round(score * 100) / 100,
+          lastNote: comment ? { text: String(comment.comment || '').slice(0, 600), by: comment.user?.username ? String(comment.user.username).toUpperCase() : 'SYSTEM', at: comment.createdAt } : null
+        };
+      })
+    });
+  } catch (error) {
+    console.error('Similar tickets failed:', error);
+    return res.status(500).json({ error: 'similar_tickets_failed' });
+  }
+});
+
+// --- Detected languages ----------------------------------------------------
+//
+// TicketTranslation already records what language each translated ticket was
+// written in. That is a signal the board pays for and then throws away - this
+// hands it back so a card can carry a language chip and the board can filter
+// on it.
+// --- Who should take this --------------------------------------------------
+//
+// Assignment on this board is a dropdown of seven trigrams with nothing behind
+// it, so it falls to whoever is nearest or whoever always gets picked. The
+// board already knows who has actually finished this kind of work: the resolved
+// tickets from the same company, the same category, and the same sender.
+//
+// This ranks people on that evidence and says why, so the suggestion can be
+// argued with rather than just obeyed. It suggests; it never assigns.
+app.get('/api/insights/suggest-assignee', requireAuth, async (req, res) => {
+  try {
+    const externalId = String(req.query.externalId || '').trim();
+    if (!externalId) return res.status(400).json({ error: 'missing_ticket' });
+
+    const ticket = await prisma.ticket.findUnique({ where: { externalId }, select: INSIGHT_TICKET_SELECT });
+    if (!ticket) return res.json({ ok: true, externalId, suggestions: [], note: 'not_in_database' });
+
+    const or = [];
+    if (ticket.companyName) or.push({ companyName: ticket.companyName });
+    if (ticket.senderEmail) or.push({ senderEmail: ticket.senderEmail });
+    if (ticket.category) or.push({ category: ticket.category });
+    if (!or.length) return res.json({ ok: true, externalId, suggestions: [], note: 'nothing_to_go_on' });
+
+    // Only finished work counts. An open ticket sitting with someone is not
+    // evidence that they are the right person for it - quite often it is the
+    // opposite.
+    const history = await prisma.ticket.findMany({
+      where: { AND: [{ OR: or }, { NOT: { externalId } }, { status: 'Resolved' }, { assignedAgent: { not: null } }, { duplicateOfExternalId: null }] },
+      select: { assignedAgent: true, companyName: true, category: true, senderEmail: true, subject: true, createdAt: true, resolvedAt: true, displayNumber: true },
+      orderBy: { resolvedAt: 'desc' },
+      take: 300
+    });
+    if (!history.length) return res.json({ ok: true, externalId, suggestions: [], note: 'no_resolved_history' });
+
+    // What everyone is already carrying, so a suggestion does not pile another
+    // ticket on the person who is furthest behind.
+    const openCounts = await prisma.ticket.groupBy({
+      by: ['assignedAgent'],
+      where: { AND: [{ NOT: { status: 'Resolved' } }, { assignedAgent: { not: null } }, { duplicateOfExternalId: null }] },
+      _count: { _all: true }
+    }).catch(() => []);
+    const load = Object.fromEntries(openCounts.map(row => [row.assignedAgent, row._count._all]));
+    const busiest = Math.max(1, ...Object.values(load));
+
+    const subjectTokens = similarityTokens(ticket.subject);
+    const now = Date.now();
+    const agents = new Map();
+
+    for (const past of history) {
+      const agent = String(past.assignedAgent || '').trim().toUpperCase();
+      if (!agent) continue;
+      if (!agents.has(agent)) agents.set(agent, { agent, sameCompany: 0, sameSender: 0, sameCategory: 0, similarSubject: 0, total: 0, lastAt: null, examples: [] });
+      const row = agents.get(agent);
+      row.total++;
+
+      const sameCompany = !!(ticket.companyName && past.companyName === ticket.companyName);
+      const sameSender = !!(ticket.senderEmail && past.senderEmail === ticket.senderEmail);
+      const sameCategory = !!(ticket.category && past.category === ticket.category);
+      const overlap = jaccard(subjectTokens, similarityTokens(past.subject));
+      if (sameCompany) row.sameCompany++;
+      if (sameSender) row.sameSender++;
+      if (sameCategory) row.sameCategory++;
+      if (overlap >= 0.25) row.similarSubject++;
+
+      const at = past.resolvedAt ? new Date(past.resolvedAt).getTime() : null;
+      if (at && (!row.lastAt || at > row.lastAt)) row.lastAt = at;
+      if (row.examples.length < 3 && (sameCompany || sameSender || overlap >= 0.25)) {
+        row.examples.push({
+          ticketNumber: past.displayNumber ? `#${String(past.displayNumber).padStart(4, '0')}` : null,
+          subject: past.subject || '(no subject)',
+          resolvedAt: past.resolvedAt
+        });
+      }
+    }
+
+    const suggestions = [...agents.values()].map(row => {
+      // Weighted by how specific the evidence is. Having answered this exact
+      // client before beats having answered the same category once.
+      const evidence = row.sameSender * 3 + row.sameCompany * 2 + row.similarSubject * 2 + row.sameCategory;
+      // Six months old is still evidence, just weaker.
+      const ageMonths = row.lastAt ? (now - row.lastAt) / (30 * 86400000) : 24;
+      const recency = 1 / (1 + Math.max(0, ageMonths) / 6);
+      // A soft penalty, not a veto: the person who knows the client is often
+      // still the right answer even when they are busy.
+      const loadPenalty = 1 - 0.35 * ((load[row.agent] || 0) / busiest);
+      const score = evidence * recency * loadPenalty;
+      return {
+        agent: row.agent,
+        score: Math.round(score * 100) / 100,
+        resolvedForThisClient: row.sameSender,
+        resolvedForThisCompany: row.sameCompany,
+        resolvedInThisCategory: row.sameCategory,
+        resolvedSimilarSubjects: row.similarSubject,
+        totalResolved: row.total,
+        lastResolvedAt: row.lastAt ? new Date(row.lastAt).toISOString() : null,
+        openNow: load[row.agent] || 0,
+        // Said in words, because a number nobody can interrogate is not a
+        // reason to hand someone a ticket.
+        why: [
+          row.sameSender ? `resolved ${row.sameSender} ticket${row.sameSender === 1 ? '' : 's'} from this client` : null,
+          row.sameCompany ? `${row.sameCompany} for this company` : null,
+          row.similarSubject ? `${row.similarSubject} on a similar subject` : null,
+          row.sameCategory ? `${row.sameCategory} in this category` : null
+        ].filter(Boolean),
+        examples: row.examples
+      };
+    }).filter(row => row.score > 0).sort((a, b) => b.score - a.score).slice(0, 5);
+
+    return res.json({
+      ok: true,
+      externalId,
+      ticketNumber: ticketNumberOf(ticket),
+      basedOn: history.length,
+      suggestions
+    });
+  } catch (error) {
+    console.error('Assignee suggestion failed:', error);
+    return res.status(500).json({ error: 'suggest_assignee_failed' });
+  }
+});
+
+app.get('/api/insights/languages', requireAuth, async (req, res) => {
+  try {
+    const rows = await prisma.ticketTranslation.findMany({
+      where: { sourceLang: { not: null } },
+      select: { ticketExternalId: true, sourceLang: true, sourceLangName: true, createdAt: true },
+      orderBy: { createdAt: 'desc' },
+      take: 5000
+    });
+    const byTicket = {};
+    const counts = {};
+    for (const row of rows) {
+      if (byTicket[row.ticketExternalId]) continue; // newest wins
+      const code = String(row.sourceLang || '').toLowerCase();
+      if (!code) continue;
+      byTicket[row.ticketExternalId] = { lang: code, name: row.sourceLangName || code.toUpperCase() };
+      counts[code] = (counts[code] || 0) + 1;
+    }
+    return res.json({ ok: true, generatedAt: new Date().toISOString(), languages: byTicket, counts });
+  } catch (error) {
+    console.error('Language insight failed:', error);
+    return res.status(500).json({ error: 'language_insight_failed' });
+  }
+});
+
 app.get('/api/tickets/:id/audit', requireAdmin, async (req, res) => {
   const ticketId = Number(req.params.id);
 
@@ -4764,6 +5701,267 @@ function mcpHttpErrorStatus(error) {
   return Number.isInteger(error?.status) ? error.status : 500;
 }
 
+
+
+// --- Assistant-facing tools ------------------------------------------------
+//
+// The four below are what turn the connector from a reader into something that
+// does triage work. Every one of them stops short of the irreversible step: a
+// proposed reply is a comment until a person sends it, a duplicate is a
+// suggestion until a person marks it. Nothing here emails a client.
+
+// The board renders a comment carrying this tag as a proposed reply with an
+// "Use this" button, rather than as an ordinary internal note.
+const PROPOSED_REPLY_TAG = 'PROPOSED-REPLY';
+
+async function mcpProposeReply(apiUser, id, rawText) {
+  const text = String(rawText || '').trim();
+  if (!Number.isInteger(id) || id <= 0) throw Object.assign(new Error('invalid_ticket_id'), { status: 400 });
+  if (!text) throw Object.assign(new Error('text_required'), { status: 400 });
+  if (text.length > 8000) throw Object.assign(new Error('text_too_long'), { status: 400 });
+  const ticket = await prisma.ticket.findUnique({ where: { id }, select: { id: true, displayNumber: true, subject: true, senderEmail: true } });
+  if (!ticket) throw Object.assign(new Error('ticket_not_found'), { status: 404 });
+
+  const comment = await prisma.ticketComment.create({
+    data: { ticketId: id, userId: apiUser.id, comment: text, isInternal: true, tags: [PROPOSED_REPLY_TAG] }
+  });
+  await createTicketAuditEvent({
+    ticketId: id, userId: apiUser.id, eventType: 'reply_proposed',
+    newValue: text.slice(0, 200), metadata: { via: 'mcp' }
+  });
+  return {
+    ok: true,
+    ticketNumber: ticket.displayNumber ? `#${String(ticket.displayNumber).padStart(4, '0')}` : null,
+    commentId: comment.id,
+    // Said plainly because it is the whole point of the tool: this did not
+    // reach the client and will not until an agent sends it.
+    status: 'The draft is on the ticket as a proposed reply. Nothing was sent to the client - an agent has to open the ticket and send it.'
+  };
+}
+
+const TEMPLATE_PLACEHOLDER_RE = /\[([^\][\n]{1,60})\]/g;
+function templatePlaceholders(body) {
+  const found = [];
+  const seen = new Set();
+  for (const match of String(body || '').matchAll(TEMPLATE_PLACEHOLDER_RE)) {
+    const label = match[1].trim();
+    const key = label.toLowerCase();
+    if (!label || seen.has(key)) continue;
+    seen.add(key);
+    found.push(label);
+  }
+  return found;
+}
+// What the ticket can answer on the agent's behalf. Only fields the ticket
+// actually holds - a guessed value in a client-facing template is worse than
+// a blank one an agent has to fill.
+function prefillFromTicket(label, ticket) {
+  const key = String(label || '').toLowerCase();
+  if (/(client|contact|customer|sender)?\s*name/.test(key) && !/company/.test(key)) return ticket.senderName || null;
+  if (/company|organisation|organization|account/.test(key)) return ticket.companyName || null;
+  if (/e-?mail|address/.test(key)) return ticket.senderEmail || null;
+  if (/ticket|reference|ref\b|number/.test(key)) return ticket.displayNumber ? `#${String(ticket.displayNumber).padStart(4, '0')}` : null;
+  if (/agent|owner|assignee/.test(key)) return ticket.assignedAgent || null;
+  if (/subject|title/.test(key)) return ticket.subject || null;
+  if (/categor/.test(key)) return ticket.category || null;
+  return null;
+}
+
+async function mcpSuggestTemplate(id, limit) {
+  if (!Number.isInteger(id) || id <= 0) throw Object.assign(new Error('invalid_ticket_id'), { status: 400 });
+  const ticket = await prisma.ticket.findUnique({ where: { id }, select: INSIGHT_TICKET_SELECT });
+  if (!ticket) throw Object.assign(new Error('ticket_not_found'), { status: 404 });
+
+  const templates = await prisma.template.findMany({ select: { id: true, name: true, body: true } });
+  if (!templates.length) return { ok: true, matches: [], note: 'No templates exist on this board yet.' };
+
+  const ticketTokens = similarityTokens(`${ticket.subject || ''} ${ticket.category || ''}`);
+  const take = Math.min(5, Math.max(1, Number(limit) || 3));
+  const scored = templates
+    .map(template => ({
+      template,
+      score: jaccard(ticketTokens, similarityTokens(`${template.name} ${template.body}`))
+    }))
+    // A template sharing no words at all with the ticket is not a match, and
+    // returning it as the top one - which is what happens when it is the only
+    // template on the board - invites the assistant to send an answer to a
+    // different question.
+    .filter(row => row.score > 0)
+    .sort((a, b) => b.score - a.score);
+
+  if (!scored.length) {
+    return {
+      ok: true,
+      ticketNumber: ticket.displayNumber ? `#${String(ticket.displayNumber).padStart(4, '0')}` : null,
+      matches: [],
+      note: `None of the ${templates.length} template${templates.length === 1 ? '' : 's'} on this board share any wording with this ticket. Write the reply from scratch rather than bending one of them to fit.`
+    };
+  }
+
+  const matches = scored
+    .slice(0, take)
+    .map(({ template, score }) => {
+      const placeholders = templatePlaceholders(template.body).map(label => ({
+        label,
+        suggested: prefillFromTicket(label, ticket)
+      }));
+      return {
+        templateId: template.id,
+        name: template.name,
+        score: Math.round(score * 1000) / 1000,
+        body: template.body,
+        placeholders,
+        // The ones a person still has to answer. Reported separately so the
+        // assistant asks about exactly these rather than re-reading the body.
+        unfilled: placeholders.filter(p => !p.suggested).map(p => p.label)
+      };
+    });
+
+  return {
+    ok: true,
+    ticketNumber: ticket.displayNumber ? `#${String(ticket.displayNumber).padStart(4, '0')}` : null,
+    matches
+  };
+}
+
+async function mcpFindDuplicates(id, limit) {
+  if (!Number.isInteger(id) || id <= 0) throw Object.assign(new Error('invalid_ticket_id'), { status: 400 });
+  const source = await prisma.ticket.findUnique({ where: { id }, select: INSIGHT_TICKET_SELECT });
+  if (!source) throw Object.assign(new Error('ticket_not_found'), { status: 404 });
+  const take = Math.min(10, Math.max(1, Number(limit) || 5));
+
+  const or = [];
+  if (source.senderEmail) or.push({ senderEmail: source.senderEmail });
+  if (source.companyName) or.push({ companyName: source.companyName });
+  if (!or.length) return { ok: true, candidates: [] };
+
+  // A duplicate arrives near the original. Beyond a month apart the same
+  // client asking the same question again is a new ticket, not a duplicate.
+  const created = new Date(source.createdAt).getTime();
+  const candidates = await prisma.ticket.findMany({
+    where: {
+      AND: [
+        { OR: or },
+        { NOT: { id: source.id } },
+        { duplicateOfExternalId: null },
+        { createdAt: { gte: new Date(created - 30 * 86400000), lte: new Date(created + 30 * 86400000) } }
+      ]
+    },
+    select: INSIGHT_TICKET_SELECT,
+    take: 200
+  });
+
+  const sourceTokens = similarityTokens(source.subject);
+  const scored = candidates
+    .map(candidate => {
+      const overlap = jaccard(sourceTokens, similarityTokens(candidate.subject));
+      const sameSender = !!(source.senderEmail && candidate.senderEmail === source.senderEmail);
+      const hoursApart = Math.abs(new Date(candidate.createdAt).getTime() - created) / 3600000;
+      const confidence = overlap * 0.6 + (sameSender ? 0.3 : 0) + (hoursApart <= 48 ? 0.1 : 0);
+      return { candidate, overlap, sameSender, hoursApart, confidence };
+    })
+    .filter(row => row.overlap >= 0.35 && row.sameSender)
+    .sort((a, b) => b.confidence - a.confidence)
+    .slice(0, take);
+
+  return {
+    ok: true,
+    ticketNumber: source.displayNumber ? `#${String(source.displayNumber).padStart(4, '0')}` : null,
+    candidates: scored.map(({ candidate, overlap, sameSender, hoursApart, confidence }) => ({
+      ticketNumber: candidate.displayNumber ? `#${String(candidate.displayNumber).padStart(4, '0')}` : null,
+      internalId: candidate.id,
+      subject: candidate.subject || '(no subject)',
+      sender: candidate.senderEmail,
+      company: candidate.companyName,
+      createdAt: candidate.createdAt,
+      hoursApart: Math.round(hoursApart * 10) / 10,
+      subjectOverlap: Math.round(overlap * 100) / 100,
+      sameSender,
+      confidence: Math.round(confidence * 100) / 100
+    })),
+    note: 'These are suggestions only. Marking a ticket as a duplicate is done by an agent on the board - report the ticket numbers and let them confirm.'
+  };
+}
+
+async function mcpShiftHandover(hours) {
+  const windowHours = Math.min(168, Math.max(1, Number(hours) || 12));
+  const since = new Date(Date.now() - windowHours * 3600000);
+  const now = Date.now();
+
+  const events = dedupeTicketEvents(await prisma.ticketEvent.findMany({
+    where: { createdAt: { gte: since }, eventType: { in: ['ticket_status_changed', 'ticket_assignedAgent_changed', 'ticket_created', 'comment_added', 'reply_proposed'] } },
+    select: { ticketId: true, eventType: true, oldValue: true, newValue: true, createdAt: true },
+    orderBy: [{ ticketId: 'asc' }, { createdAt: 'asc' }]
+  }));
+
+  const movedIds = new Set(events.map(e => e.ticketId));
+  const openTickets = await prisma.ticket.findMany({
+    where: { AND: [{ NOT: { status: 'Resolved' } }, { duplicateOfExternalId: null }, { NOT: [{ category: { equals: 'Spam', mode: 'insensitive' } }] }] },
+    select: INSIGHT_TICKET_SELECT
+  });
+
+  const describe = ticket => ({
+    ticketNumber: ticket.displayNumber ? `#${String(ticket.displayNumber).padStart(4, '0')}` : null,
+    subject: ticket.subject || '(no subject)',
+    company: ticket.companyName || 'Unknown',
+    agent: ticket.assignedAgent || 'Unassigned',
+    priority: ticket.priority || 'Normal',
+    status: ticket.status,
+    ageHours: Math.round(((now - new Date(ticket.createdAt).getTime()) / 3600000) * 10) / 10
+  });
+
+  const statusMoves = events.filter(e => e.eventType === 'ticket_status_changed');
+  const openById = new Map(openTickets.map(t => [t.id, t]));
+
+  const moved = [...new Set(statusMoves.map(e => e.ticketId))]
+    .map(ticketId => {
+      const ticket = openById.get(ticketId);
+      const list = statusMoves.filter(e => e.ticketId === ticketId);
+      return {
+        ticketId,
+        ticketNumber: ticket ? describe(ticket).ticketNumber : null,
+        subject: ticket?.subject || null,
+        from: list[0].oldValue,
+        to: list[list.length - 1].newValue,
+        hops: list.length
+      };
+    })
+    .filter(row => row.ticketNumber);
+
+  // Nothing has happened to these in the window, and they are not resolved.
+  // The point of a handover is that the next shift knows these exist.
+  const stuck = openTickets
+    .filter(ticket => !movedIds.has(ticket.id))
+    .map(describe)
+    .sort((a, b) => b.ageHours - a.ageHours)
+    .slice(0, 15);
+
+  const urgent = openTickets
+    .filter(ticket => ['Urgent', 'High'].includes(String(ticket.priority || '')))
+    .map(describe)
+    .sort((a, b) => b.ageHours - a.ageHours)
+    .slice(0, 15);
+
+  const unassigned = openTickets.filter(t => !t.assignedAgent).map(describe).slice(0, 15);
+
+  return {
+    ok: true,
+    window: { hours: windowHours, since: since.toISOString() },
+    summary: {
+      openTickets: openTickets.length,
+      touchedInWindow: movedIds.size,
+      statusMoves: statusMoves.length,
+      createdInWindow: events.filter(e => e.eventType === 'ticket_created').length,
+      resolvedInWindow: statusMoves.filter(e => e.newValue === 'Resolved').length,
+      stuck: openTickets.filter(t => !movedIds.has(t.id)).length,
+      unassigned: openTickets.filter(t => !t.assignedAgent).length
+    },
+    moved: moved.slice(0, 25),
+    stuck,
+    urgent,
+    unassigned
+  };
+}
 app.get('/api/mcp/tickets', requireApiToken, mcpApiLimiter, async (req, res) => {
   const tickets = await mcpListTickets(req.query);
   res.json({ tickets });
@@ -5069,11 +6267,70 @@ function buildKanbanMcpServer(apiUser, { McpServer, z }) {
         status: z.enum(TICKET_STATUS_ENUM).optional(),
         assignedAgent: z.string().optional().describe('Agent trigram to assign, or empty string to unassign'),
         csAgent: z.string().optional().describe('CS owner trigram, or empty string to clear'),
-        priority: z.enum(['Low', 'Normal', 'High', 'Urgent']).optional()
+        priority: z.enum(['Low', 'Normal', 'Medium', 'High', 'Urgent']).optional().describe('The board writes Medium/High/Low in practice; Normal and Urgent are accepted for compatibility.')
       }
     },
     async ({ ticketId, ...fields }) => {
       try { return mcpTextResult(await mcpUpdateTicket(apiUser, ticketId, fields)); } catch (error) { return mcpErrorResult(error); }
+    }
+  );
+
+  server.registerTool(
+    'propose_reply',
+    {
+      title: 'Propose a reply to the client',
+      description: 'Write a suggested reply and attach it to the ticket for an agent to review. This does NOT email anyone - the draft lands on the ticket as a proposed reply, and an agent chooses whether to send it. Use this instead of claiming a reply was sent.',
+      inputSchema: {
+        ticketId: z.number().int().positive().describe('The internalId from list_tickets/get_ticket - not the #-prefixed ticketNumber shown on the board.'),
+        text: z.string().min(1).max(8000).describe('The proposed reply, as plain text. Write it as the agent would send it to the client.')
+      }
+    },
+    async ({ ticketId, text }) => {
+      try { return mcpTextResult(await mcpProposeReply(apiUser, ticketId, text)); } catch (error) { return mcpErrorResult(error); }
+    }
+  );
+
+  server.registerTool(
+    'suggest_template',
+    {
+      title: 'Find a message template for a ticket',
+      description: 'Match a ticket against the team\'s shared message templates and return the best fits, with each [bracketed] placeholder pre-filled from the ticket where the ticket can answer it. Placeholders listed under "unfilled" are the ones a person still has to supply.',
+      inputSchema: {
+        ticketId: z.number().int().positive().describe('The internalId from list_tickets/get_ticket.'),
+        limit: z.number().int().min(1).max(5).optional()
+      }
+    },
+    async ({ ticketId, limit }) => {
+      try { return mcpTextResult(await mcpSuggestTemplate(ticketId, limit)); } catch (error) { return mcpErrorResult(error); }
+    }
+  );
+
+  server.registerTool(
+    'find_duplicates',
+    {
+      title: 'Find likely duplicates of a ticket',
+      description: 'Look for other tickets from the same sender, near the same date, with a similar subject. Returns candidates with a confidence score. It does not mark anything - report the ticket numbers and let an agent confirm on the board.',
+      inputSchema: {
+        ticketId: z.number().int().positive().describe('The internalId from list_tickets/get_ticket.'),
+        limit: z.number().int().min(1).max(10).optional()
+      }
+    },
+    async ({ ticketId, limit }) => {
+      try { return mcpTextResult(await mcpFindDuplicates(ticketId, limit)); } catch (error) { return mcpErrorResult(error); }
+    }
+  );
+
+  server.registerTool(
+    'shift_handover',
+    {
+      title: 'Summarise the shift for handover',
+      description: 'What moved, what is stuck, and what the next shift must not drop. Reads the ticket event log over the last N hours. Use it to write a handover note at the end of a shift.',
+      inputSchema: {
+        hours: z.number().int().min(1).max(168).optional().describe('How far back to look. Defaults to 12.')
+      }
+    },
+    async ({ hours }) => {
+      try { return mcpTextResult(await mcpShiftHandover(hours)); } catch (error) { return mcpErrorResult(error); }
     }
   );
 
@@ -5135,7 +6392,10 @@ const LIVE_SYNC_FIELDS = [
   'ticketPriority', 'ticketCategory', 'ticketSubtype', 'ticketJira',
   'ticketHubspotId', 'ticketArchived', 'ticketResolutionMeta',
   'ticketHasNewReply', 'ticketNumbers', 'ticketComments', 'ticketCreatedBy',
-  'ticketDuplicateOf'
+  // A snooze hides the ticket for everyone, so every open board has to hear
+  // about it immediately - otherwise one agent parks a ticket and another is
+  // still looking at it.
+  'ticketDuplicateOf', 'ticketSnooze'
 ];
 
 function sseFrame(rev, type, data) {
@@ -6874,8 +8134,12 @@ app.post('/api/mcp-proxy', requireAuth, async (req, res) => {
     if (!tool) return res.status(400).json({ isError: true, error: 'missing_tool' });
 
     if (tool.includes('outlook_email_search')) {
+      // Authorization before any work: checking after the token fetch meant an
+      // unauthorized mailbox still triggered a Graph round trip, and any error
+      // there answered the request before the check was ever reached.
+      const mailbox = resolveReadableMailbox(args?.mailboxOwnerEmail);
+      if (!mailbox) return res.status(403).json({ isError: true, error: 'mailbox_not_allowed' });
       const token = await graphDelegatedToken(req);
-      const mailbox = args?.mailboxOwnerEmail || SUPPORT_MAILBOX;
       const top = Math.min(Math.max(Number(args?.limit || 20), 1), 200);
       const select = '$select=id,subject,bodyPreview,from,toRecipients,ccRecipients,receivedDateTime,webLink,conversationId,internetMessageId';
       const orderBy = '$orderby=receivedDateTime desc';
@@ -6889,7 +8153,10 @@ app.post('/api/mcp-proxy', requireAuth, async (req, res) => {
       const idMatch = rawUri.match(/mail:\/\/\/messages\/([^?]+)/);
       const msgId = idMatch?.[1];
       const ownerMatch = rawUri.match(/[?&]owner=([^&]+)/);
-      const mailbox = ownerMatch?.[1] ? decodeURIComponent(ownerMatch[1]) : SUPPORT_MAILBOX;
+      // Same hole as the search branch above, reached through the URI instead
+      // of the body.
+      const mailbox = resolveReadableMailbox(ownerMatch?.[1] ? decodeURIComponent(ownerMatch[1]) : SUPPORT_MAILBOX);
+      if (!mailbox) return res.status(403).json({ isError: true, error: 'mailbox_not_allowed' });
       if (!msgId) return res.status(400).json({ isError: true, error: 'missing_message_id' });
       const msg = await graphGetResilient(`/users/${encodeURIComponent(mailbox)}/messages/${encodeURIComponent(msgId)}?$select=body,bodyPreview,hasAttachments`, req);
       // hasAttachments is false when a message carries ONLY inline images.
@@ -7068,6 +8335,48 @@ function qtDetectInHtml(html) {
   return { detected: false, confidence: 'high', marker: null, via: null, src: null };
 }
 
+const dnsPromises = require('dns').promises;
+
+// Every address a hostname resolves to has to be public - a name with one
+// public A record and one pointing at 127.0.0.1 is a rebinding attempt, and
+// taking the first answer would let it through half the time.
+async function qtResolvesToPublicHost(hostname) {
+  const host = String(hostname || '').toLowerCase().replace(/^\[|\]$/g, '');
+  if (!host) return false;
+  if (qtIsBlockedHost(host)) return false;
+  // A literal IP is already what it resolves to.
+  if (/^[0-9.]+$/.test(host) || host.includes(':')) return !qtIsBlockedHost(host);
+  try {
+    const records = await dnsPromises.lookup(host, { all: true });
+    if (!records.length) return false;
+    return records.every(record => !qtIsBlockedHost(record.address));
+  } catch (_) {
+    // Unresolvable is not reachable either; let the fetch report it.
+    return true;
+  }
+}
+
+const QT_MAX_REDIRECTS = 5;
+
+// fetch() with the redirects taken one at a time, checking the destination
+// before each hop instead of trusting the first URL and looking away.
+async function qtFetchGuarded(startUrl, init) {
+  let current = startUrl;
+  for (let hop = 0; hop <= QT_MAX_REDIRECTS; hop++) {
+    const parsed = new URL(current);
+    if (!/^https?:$/.test(parsed.protocol)) throw Object.assign(new Error('blocked_scheme'), { qtBlocked: true });
+    if (!(await qtResolvesToPublicHost(parsed.hostname))) throw Object.assign(new Error('blocked_host'), { qtBlocked: true });
+
+    const res = await fetch(current, { ...init, redirect: 'manual' });
+    if (![301, 302, 303, 307, 308].includes(res.status)) return { res, finalUrl: current };
+
+    const location = res.headers.get('location');
+    if (!location) return { res, finalUrl: current };
+    current = new URL(location, current).toString();
+  }
+  throw Object.assign(new Error('too_many_redirects'), { qtBlocked: true });
+}
+
 async function qtCheckUrl(rawUrl) {
   const url = qtNormalizeUrl(rawUrl);
   const started = Date.now();
@@ -7076,8 +8385,7 @@ async function qtCheckUrl(rawUrl) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), QT_FETCH_TIMEOUT_MS);
   try {
-    const res = await fetch(url, {
-      redirect: 'follow',
+    const { res, finalUrl: reachedUrl } = await qtFetchGuarded(url, {
       signal: controller.signal,
       headers: {
         // Some sites serve a stripped page to non-browser agents.
@@ -7090,7 +8398,7 @@ async function qtCheckUrl(rawUrl) {
     return {
       input: rawUrl,
       url,
-      finalUrl: res.url || url,
+      finalUrl: reachedUrl || res.url || url,
       httpStatus: res.status,
       status: res.ok ? 'ok' : 'http_error',
       detected: hit.detected,
@@ -7103,6 +8411,18 @@ async function qtCheckUrl(rawUrl) {
     };
   } catch (error) {
     const aborted = error?.name === 'AbortError';
+    // A blocked destination is reported as its own status rather than as a
+    // network failure, so "this URL redirects somewhere internal" does not read
+    // as "that site is down".
+    if (error?.qtBlocked) {
+      return {
+        input: rawUrl, url, status: 'blocked', detected: false, confidence: 'low',
+        error: error.message === 'blocked_host'
+          ? 'That address resolves to a private or internal host, so it was not fetched.'
+          : error.message === 'too_many_redirects' ? 'Too many redirects.' : 'Blocked URL scheme.',
+        ms: Date.now() - started
+      };
+    }
     return {
       input: rawUrl, url, status: aborted ? 'timeout' : 'fetch_error',
       detected: false, confidence: 'low',
