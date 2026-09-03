@@ -677,6 +677,62 @@ Runs cost money and are started by a button, so they have their own rate limit
 refusal arrives as a normal 200 with `stop_reason: "refusal"` and is reported as
 a refusal, not as empty output.
 
+## The SLA clock
+
+An SLA counts **08:00-12:00 and 14:00-17:00 on weekdays** - seven hours a day,
+not twenty-four and not the nine between the first and last. The lunch gap
+matters: counting through it made a ticket that arrived at 11:50 look an hour
+older by 14:00 than the work anyone could have done on it.
+
+On top of the business hours, the clock only runs while the ticket's **assigned
+agent is logged in and not on a break**. An unassigned ticket says so rather
+than showing a countdown nobody is working against.
+
+The same rule is implemented twice on purpose - `businessMsInRange` in
+`server.js` for the KPI dashboard, and its twin in `index.html` for the badges -
+so both sides of the app agree. Change one and change the other.
+
+### Breaks
+
+| | | |
+| --- | --- | --- |
+| `SHIFT_BREAK_MS` | 15 minutes | How long a break lasts. |
+| `SHIFT_BREAK_COOLDOWN_MS` | 2 hours | How long until the next one. |
+
+A break **ends by itself** after fifteen minutes. That is enforced on read
+rather than by a timer: a break that was started and never ended is treated as
+having ended fifteen minutes after it began, so an agent who closes the laptop
+mid-break does not get an open-ended pause on their SLA clock. Coming back early
+is always allowed and simply shortens it.
+
+The cooldown is measured from the **start** of the last break, not its end -
+from the end, someone could take fifteen minutes, come back, and be eligible
+again two hours later having actually paused twice in that window. While it is
+running the button is greyed and counts down; the server refuses a second break
+with `429 break_cooldown` regardless of what the button says.
+
+### A reply restarts the clock
+
+Every new message in a ticket's thread resets its SLA. The commitment is a
+response time, not a lifetime: a conversation that has been going back and forth
+for a week should be measured from its last reply, not from the day it arrived.
+
+The board records that moment per ticket, and it is mirrored into
+`Ticket.slaResetAt` so the KPI dashboard measures the same thing the badges do -
+otherwise the same ticket reads breached in one place and on track in the other.
+Null means never replied to, and the clock runs from `createdAt`.
+
+**This needs `prisma migrate deploy`** - unlike the other recent tables, a
+Prisma-selected column cannot be added with runtime DDL. Prisma validates a
+`select` against its own generated schema, so the column has to be in
+`schema.prisma` and the client regenerated (`prisma generate`), both of which
+are in the repo. Deploying the code without running the migration leaves the KPI
+dashboard returning 500.
+
+A ticket sitting in **Waiting on Contact** that gets a genuine client reply
+moves itself to **Waiting on Us** and starts counting again - that stage move
+already existed; what is new is that the clock restarts with it.
+
 ## Important security note
 
 

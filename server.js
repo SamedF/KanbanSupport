@@ -1297,14 +1297,69 @@ function shiftAgentFromRequest(req, bodyAgent) {
   return null;
 }
 
+/* A break is fifteen minutes, and there is one every two hours.
+
+   Enforced on read rather than by a timer: a break that was started and never
+   ended is simply treated as having ended fifteen minutes after it began, so
+   an agent who closes the laptop mid-break does not get an open-ended pause on
+   their SLA clock. The cooldown is measured from the START of the last break -
+   from the end would let someone take fifteen minutes, come back, and be
+   eligible again two hours later having actually paused twice in that window. */
+const SHIFT_BREAK_MS = Number(process.env.SHIFT_BREAK_MS || 15 * 60 * 1000);
+const SHIFT_BREAK_COOLDOWN_MS = Number(process.env.SHIFT_BREAK_COOLDOWN_MS || 2 * 60 * 60 * 1000);
+
+// The moment a break actually finished, capped at its fifteen minutes.
+function breakEndMs(b, now = Date.now()) {
+  const start = Number(b?.start || 0);
+  if (!start) return 0;
+  const cap = start + SHIFT_BREAK_MS;
+  const ended = (b.end === null || b.end === undefined) ? now : Number(b.end);
+  return Math.min(ended, cap);
+}
+// Closes any break that has run past its cap, so the stored history matches
+// what the clock already assumes.
+function capExpiredBreaks(rec, now = Date.now()) {
+  let changed = false;
+  (rec?.sessions || []).forEach(session => {
+    (session.breaks || []).forEach(b => {
+      if ((b.end === null || b.end === undefined) && Number(b.start || 0) + SHIFT_BREAK_MS <= now) {
+        b.end = Number(b.start) + SHIFT_BREAK_MS;
+        changed = true;
+      }
+    });
+  });
+  return changed;
+}
+function lastBreakStart(rec) {
+  let latest = 0;
+  (rec?.sessions || []).forEach(session => {
+    (session.breaks || []).forEach(b => { latest = Math.max(latest, Number(b.start || 0)); });
+  });
+  return latest;
+}
+// How long until this agent may take another break. 0 means now.
+function breakCooldownRemaining(rec, now = Date.now()) {
+  const last = lastBreakStart(rec);
+  if (!last) return 0;
+  return Math.max(0, (last + SHIFT_BREAK_COOLDOWN_MS) - now);
+}
+
 function shiftSnapshotFor(code) {
   const rec = shiftStore.agents[code];
   if (!rec) return { agent: code, onShift: false, onBreak: false, sessions: [] };
+  const now = Date.now();
+  capExpiredBreaks(rec, now);
   const last = rec.sessions[rec.sessions.length - 1];
+  const openBreak = last && last.end === null ? last.breaks.find(b => b.end === null) : null;
   return {
     agent: code,
     onShift: !!(last && last.end === null),
-    onBreak: !!(last && last.end === null && last.breaks.some(b => b.end === null)),
+    onBreak: !!openBreak,
+    // What the button needs to draw itself without knowing the rules.
+    breakEndsAt: openBreak ? Number(openBreak.start) + SHIFT_BREAK_MS : 0,
+    breakMs: SHIFT_BREAK_MS,
+    cooldownMs: SHIFT_BREAK_COOLDOWN_MS,
+    cooldownRemainingMs: breakCooldownRemaining(rec, now),
     lastSeen: rec.lastSeen || 0,
     sessions: rec.sessions
   };
@@ -1346,6 +1401,42 @@ function isWeekendDate(date) {
 // Milliseconds of [from,to) landing on a weekday. Walks day by day via setDate
 // rather than adding a fixed 86400000 so a daylight-saving change cannot drift
 // the day boundaries.
+/* The hours the SLA clock actually runs.
+
+   08:00-12:00 and 14:00-17:00, weekdays: seven hours a day, not twenty-four and
+   not the nine between the first and last. The lunch gap matters - counting
+   through it made a ticket that arrived at 11:50 look an hour older by 14:00
+   than the work anyone could have done on it.
+
+   Walked a day at a time with setHours rather than by adding 86400000, so a
+   daylight-saving change moves the window with the clock instead of shifting it
+   by an hour. */
+const BUSINESS_WINDOWS = [[8, 0, 12, 0], [14, 0, 17, 0]];
+const BUSINESS_MS_PER_DAY = BUSINESS_WINDOWS.reduce((total, [sh, sm, eh, em]) => total + ((eh * 60 + em) - (sh * 60 + sm)) * 60000, 0);
+function businessMsInRange(from, to) {
+  if (!(to > from)) return 0;
+  let total = 0;
+  const cursor = new Date(from);
+  cursor.setHours(0, 0, 0, 0);
+  while (cursor.getTime() < to) {
+    const next = new Date(cursor);
+    next.setDate(next.getDate() + 1);
+    next.setHours(0, 0, 0, 0);
+    if (!isWeekendDate(cursor)) {
+      for (const [sh, sm, eh, em] of BUSINESS_WINDOWS) {
+        const windowStart = new Date(cursor); windowStart.setHours(sh, sm, 0, 0);
+        const windowEnd = new Date(cursor); windowEnd.setHours(eh, em, 0, 0);
+        const start = Math.max(windowStart.getTime(), from);
+        const end = Math.min(windowEnd.getTime(), to);
+        if (end > start) total += end - start;
+      }
+    }
+    cursor.setTime(next.getTime());
+  }
+  return total;
+}
+// Superseded by businessMsInRange - kept because the shift report still counts
+// presence in whole weekdays, which is a different question from SLA time.
 function weekdayMsInRange(from, to) {
   if (!(to > from)) return 0;
   let total = 0;
@@ -1378,11 +1469,11 @@ function shiftElapsedMs(fromMs, toMs, agentCode) {
     const start = Math.max(Number(s.start || 0), fromMs);
     const end = Math.min(s.end === null || s.end === undefined ? now : Number(s.end), toMs);
     if (!(end > start)) return;
-    let worked = weekdayMsInRange(start, end);
+    let worked = businessMsInRange(start, end);
     (s.breaks || []).forEach((b) => {
       const bs = Math.max(Number(b.start || 0), start);
-      const be = Math.min(b.end === null || b.end === undefined ? now : Number(b.end), end);
-      if (be > bs) worked -= weekdayMsInRange(bs, be);
+      const be = Math.min(breakEndMs(b, now), end);
+      if (be > bs) worked -= businessMsInRange(bs, be);
     });
     total += Math.max(0, worked);
   });
@@ -1398,8 +1489,13 @@ function shiftElapsedMs(fromMs, toMs, agentCode) {
 //                     "4h left" for a ticket nobody owns would be a fiction, so
 //                     these are counted and reported separately rather than
 //                     folded into compliance.
+
 function ticketSlaSnapshot(ticket, now = Date.now()) {
-  const createdMs = ticket?.createdAt ? new Date(ticket.createdAt).getTime() : NaN;
+  const arrivedMs = ticket?.createdAt ? new Date(ticket.createdAt).getTime() : NaN;
+  const resetMs = ticket?.slaResetAt ? new Date(ticket.slaResetAt).getTime() : NaN;
+  // The later of the two: a thread that has been replied to is measured from
+  // its last reply, an untouched one from when it arrived. Mirrors the board.
+  const createdMs = Number.isFinite(resetMs) && (!Number.isFinite(arrivedMs) || resetMs > arrivedMs) ? resetMs : arrivedMs;
   const targetHours = slaTargetHoursFor(ticket?.priority);
   const targetMs = targetHours * 3600000;
   const resolved = normalizeDbStatusForBoard(ticket?.status) === 'res';
@@ -2849,8 +2945,7 @@ function refreshDataHygieneCache(token) {
 }
 
 
-async function upsertBoardTicketsToDatabase(state, req) {
-  if (!state || typeof state !== 'object') return { count: 0 };
+async function upsertBoardTicketsToDatabase(state, req) {  if (!state || typeof state !== 'object') return { count: 0 };
 
   const allTickets = Array.isArray(state.allTickets) ? state.allTickets : [];
   const ticketState = state.ticketState || {};
@@ -2865,6 +2960,10 @@ async function upsertBoardTicketsToDatabase(state, req) {
   const ticketDuplicateOf = state.ticketDuplicateOf || {};
   const ticketHubspotId = state.ticketHubspotId || {};
   const ticketComments = state.ticketComments || {};
+  // When each ticket's SLA clock was last restarted by a reply. Written by the
+  // board; mirrored into the row so the KPI dashboard measures the same thing
+  // the badges do.
+  const ticketSlaResetAt = state.ticketSlaResetAt || {};
 
   const externalIds = [...new Set(allTickets.filter(t => t && t.id).map(t => String(t.id)))];
   // Fetch every existing ticket (and its comments) in one round trip instead of
@@ -2895,6 +2994,7 @@ async function upsertBoardTicketsToDatabase(state, req) {
     const assignedAgent = SUPPORT_AGENT_CODES.has(rawAssignedAgent) ? rawAssignedAgent : null;
     const csAgent = CS_AGENT_CODES.has(rawCsAgent) ? rawCsAgent : (CS_AGENT_CODES.has(rawAssignedAgent) ? rawAssignedAgent : null);
     const createdAt = safeDateForDb(email.receivedDateTime || ticketCreatedAt[externalId]) || new Date();
+    const slaResetAt = safeDateForDb(Number(ticketSlaResetAt[externalId] || 0) || null);
     const body = String(email.bodyPreview || email.preview || email.summary || email.body || email.text || '').trim() || null;
     const companyName = extractCompanyNameFromEmail(senderEmail);
     const existingTicket = existingByExternalId.get(externalId) || null;
@@ -2939,7 +3039,8 @@ async function upsertBoardTicketsToDatabase(state, req) {
       && existingTicket.hubspotTicketId === hubspotTicketId
       && existingTicket.jiraTicketKey === jiraTicketKey
       && existingTicket.duplicateOfExternalId === duplicateOfExternalId
-      && existingTicket.body === body;
+      && existingTicket.body === body
+      && Number(existingTicket.slaResetAt ? new Date(existingTicket.slaResetAt).getTime() : 0) === Number(slaResetAt ? slaResetAt.getTime() : 0);
 
     if (fieldsUnchanged && !newComments.length) continue;
 
@@ -2966,6 +3067,7 @@ async function upsertBoardTicketsToDatabase(state, req) {
         body,
         emailRaw: email,
         createdAt,
+        slaResetAt,
         resolvedAt: resolvedAtForDb
       },
       update: {
@@ -2985,6 +3087,7 @@ async function upsertBoardTicketsToDatabase(state, req) {
         duplicateOfExternalId,
         body,
         emailRaw: email,
+        slaResetAt,
         resolvedAt: resolvedAtForDb,
         // Leave untouched (undefined) while staying Resolved - the atomic
         // claim above owns setting it. Reset to null on leaving Resolved so
@@ -3496,9 +3599,22 @@ app.post('/api/shift/break', requireAuth, (req, res) => {
   const rec = shiftAgentRecord(code);
   rec.lastSeen = now;
   const session = openShiftSession(rec, now);
+  capExpiredBreaks(rec, now);
   const openBreak = session.breaks.find(b => b.end === null);
-  if (openBreak) openBreak.end = now;
-  else session.breaks.push({ start: now, end: null });
+  if (openBreak) {
+    // Coming back early is always allowed; the cap only ever shortens a break.
+    openBreak.end = Math.min(now, Number(openBreak.start) + SHIFT_BREAK_MS);
+  } else {
+    const remaining = breakCooldownRemaining(rec, now);
+    if (remaining > 0) {
+      return res.status(429).json({
+        error: 'break_cooldown',
+        cooldownRemainingMs: remaining,
+        ...shiftSnapshotFor(code)
+      });
+    }
+    session.breaks.push({ start: now, end: null });
+  }
   persistShiftStore();
   return res.json({ ok: true, ...shiftSnapshotFor(code) });
 });
@@ -4042,10 +4158,10 @@ const KPI_TICKET_SELECT = {
   duplicateOfExternalId: true,
   createdAt: true,
   updatedAt: true,
-  resolvedAt: true
+  resolvedAt: true,
+  slaResetAt: true
 };
-async function loadKpiWorkingSet(req) {
-  const bounds = kpiDateBounds(req.query.range);
+async function loadKpiWorkingSet(req) {  const bounds = kpiDateBounds(req.query.range);
   const role = normalizeRole(req.session.role) || 'support';
   const username = String(req.session.username || '').trim().toUpperCase();
   const team = String(req.query.team || 'all').trim().toLowerCase();
@@ -4944,6 +5060,78 @@ app.get('/api/insights/board-at', requireAuth, async (req, res) => {
 });
 
 // --- One ticket's timeline -------------------------------------------------
+/* Graph's message list, reduced to what the board renders. Separated from the
+   handler so the parts that can be got wrong - dropping drafts, ordering by
+   time, tolerating the fields Graph omits - are testable without a mailbox. */
+function shapeThreadMessages(value) {
+  return (value || [])
+    .filter(m => !m.isDraft)
+    .map(m => ({
+      id: m.id,
+      subject: m.subject || '',
+      from: m.from?.emailAddress?.address || '',
+      fromName: m.from?.emailAddress?.name || '',
+      to: (m.toRecipients || []).map(r => r.emailAddress?.address).filter(Boolean),
+      cc: (m.ccRecipients || []).map(r => r.emailAddress?.address).filter(Boolean),
+      receivedDateTime: m.receivedDateTime || m.sentDateTime || null,
+      bodyType: m.body?.contentType === 'text' ? 'text' : 'html',
+      body: m.body?.content || '',
+      preview: m.bodyPreview || '',
+      hasAttachments: !!m.hasAttachments,
+      webLink: m.webLink || ''
+    }))
+    .sort((a, b) => new Date(a.receivedDateTime || 0) - new Date(b.receivedDateTime || 0));
+}
+
+/* The whole conversation, not just the newest message.
+
+   A ticket is a thread, but the board only ever fetched one message from it -
+   whichever reply arrived last. Everything before that was only readable in the
+   quoted text the client's mail app happened to include, which is inconsistent,
+   often truncated, and gone entirely when someone replies without quoting. An
+   agent picking up a ticket mid-conversation could not see what had been said.
+
+   Graph groups a thread by conversationId, so this asks for every message
+   carrying the ticket's, oldest first. The bodies come back as the senders
+   wrote them and are sanitised on the client by the same allowlist the single
+   message goes through - see emSanitizeEmailHtml.
+
+   Only messages count: Graph returns drafts in a conversation too, and a
+   half-written reply sitting in someone's Drafts is not part of what was said. */
+app.get('/api/tickets/:externalId/thread', requireAuth, async (req, res) => {
+  try {
+    const externalId = String(req.params.externalId || '').trim();
+    if (!externalId) return res.status(400).json({ error: 'missing_ticket' });
+
+    // The conversation id is on the ticket's stored raw mail; the client can
+    // also pass it directly for a ticket the database has not caught up with.
+    let conversationId = String(req.query.conversationId || '').trim();
+    if (!conversationId) {
+      const row = await prisma.ticket.findUnique({ where: { externalId }, select: { emailRaw: true } }).catch(() => null);
+      const raw = (row?.emailRaw && typeof row.emailRaw === 'object') ? row.emailRaw : {};
+      conversationId = String(raw.conversationId || '').trim();
+    }
+    if (!conversationId) return res.json({ ok: true, externalId, messages: [], note: 'no_conversation_id' });
+
+    const select = '$select=id,subject,bodyPreview,body,from,toRecipients,ccRecipients,receivedDateTime,sentDateTime,webLink,isDraft,hasAttachments,conversationId';
+    // Escape the quote Graph delimits the filter with, or an id containing one
+    // would break the query rather than simply not matching.
+    const filter = `$filter=conversationId eq '${conversationId.replace(/'/g, "''")}'`;
+    const data = await graphGetResilient(
+      `/users/${encodeURIComponent(SUPPORT_MAILBOX)}/messages?${filter}&${select}&$orderby=receivedDateTime asc&$top=50`,
+      req
+    );
+
+    const messages = shapeThreadMessages(data?.value);
+
+    return res.json({ ok: true, externalId, conversationId, total: messages.length, messages });
+  } catch (error) {
+    const detail = String(error?.message || error);
+    console.error('Ticket thread failed:', detail);
+    return res.status(502).json({ error: 'thread_failed', message: detail.slice(0, 300) });
+  }
+});
+
 app.get('/api/tickets/:externalId/timeline', requireAuth, async (req, res) => {
   try {
     const externalId = String(req.params.externalId || '').trim();
@@ -7147,7 +7335,9 @@ const LIVE_SYNC_FIELDS = [
   // A snooze hides the ticket for everyone, so every open board has to hear
   // about it immediately - otherwise one agent parks a ticket and another is
   // still looking at it.
-  'ticketDuplicateOf', 'ticketSnooze'
+  // A reply restarts the SLA clock, and every open board has to agree about
+  // when - otherwise one tab shows a badge as breached and another does not.
+  'ticketDuplicateOf', 'ticketSnooze', 'ticketSlaResetAt'
 ];
 
 function sseFrame(rev, type, data) {

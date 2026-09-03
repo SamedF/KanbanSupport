@@ -4970,6 +4970,58 @@ th {
 .pj-copy { font-size:10px; padding:2px 9px; }
 .pj-result-body { padding:12px; white-space:pre-wrap; word-break:break-word; max-height:480px; overflow:auto; color:var(--text,#0f172a); }
 
+
+/* A break that is on cooldown stays visible and greyed - hiding it would just
+   raise the question of where it went. */
+#break-btn.cooling {
+  opacity: .5;
+  cursor: not-allowed;
+  filter: grayscale(1);
+}
+
+
+/* ===== The conversation in a ticket ======================================= */
+.em-thread-list { padding: 0 18px; max-height: 46vh; overflow-y: auto; }
+.emt-bar {
+  display: flex; align-items: center; gap: 10px;
+  padding: 9px 0; font-size: 12px; color: var(--muted, #64748b);
+  border-bottom: 1px solid var(--border, #e2e8f0); margin-bottom: 8px;
+}
+.emt-bar strong { color: var(--text, #0f172a); }
+.emt-all { margin-left: auto; font-size: 10.5px; padding: 2px 9px; }
+.emt-note { padding: 10px 0; font-size: 11.5px; color: var(--muted, #64748b); }
+.emt-err { color: var(--amber-800, #92400e); }
+
+.emt-msg {
+  border: 1px solid var(--border, #e2e8f0); border-radius: 10px;
+  margin-bottom: 7px; overflow: hidden; background: var(--surface, #fff);
+  border-left: 3px solid var(--emt-accent, #94a3b8);
+}
+/* Who said it, at a glance: the client on one side, us on the other. */
+.emt-them { --emt-accent: var(--indigo-500, #6366f1); }
+.emt-us { --emt-accent: var(--emerald-500, #10b981); background: var(--surface-soft, #f8fafc); }
+.emt-head {
+  display: flex; align-items: center; gap: 9px; width: 100%;
+  padding: 8px 11px; border: 0; background: transparent; cursor: pointer; text-align: left;
+}
+.emt-who { font-size: 12px; font-weight: 700; color: var(--text, #0f172a); }
+.emt-badge {
+  font-size: 9px; font-weight: 800; text-transform: uppercase; letter-spacing: .05em;
+  padding: 1px 6px; border-radius: 999px;
+  background: var(--surface-muted, #f1f5f9); color: var(--muted, #64748b);
+}
+.emt-them .emt-badge { background: var(--indigo-50, #eef2ff); color: var(--indigo-800, #3730a3); }
+.emt-us .emt-badge { background: var(--emerald-50, #ecfdf5); color: var(--emerald-700, #047857); }
+.emt-when { font-size: 10.5px; color: var(--muted, #64748b); }
+.emt-clip { font-size: 9px; color: var(--muted, #64748b); border: 1px solid var(--border, #e2e8f0); border-radius: 999px; padding: 0 6px; }
+.emt-index { margin-left: auto; font-size: 10px; color: var(--muted-light, #94a3b8); font-variant-numeric: tabular-nums; }
+.emt-preview {
+  padding: 0 11px 9px; font-size: 11.5px; color: var(--muted, #64748b);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.emt-body { padding: 4px 11px 11px; font-size: 12.5px; line-height: 1.55; overflow-x: auto; }
+.emt-body img { max-width: 100%; height: auto; }
+
 </style>
 </head>
 <body>
@@ -5526,7 +5578,8 @@ th {
 <div id="toast"></div>
 
 <!-- Email modal -->
-<div class="modal-bg" id="email-modal"><div class="modal"><div class="modal-head"><h2 id="em-title"></h2><button class="modal-close-x" data-close="email-modal"></button></div><div class="modal-meta-bar" id="em-meta"></div><div class="tr-bar" id="em-tr-bar"></div><div class="modal-body-scroll" id="em-body"></div>
+<div class="modal-bg" id="email-modal"><div class="modal"><div class="modal-head"><h2 id="em-title"></h2><button class="modal-close-x" data-close="email-modal"></button></div><div class="modal-meta-bar" id="em-meta"></div><div class="tr-bar" id="em-tr-bar"></div><div class="em-thread-list" id="em-thread"></div>
+<div class="modal-body-scroll" id="em-body"></div>
 <div class="em-context" id="em-context"></div>
 <!-- Replying to the client, without leaving the board. Collapsed until the
      Reply button is pressed: the modal's first job is still reading the
@@ -6035,6 +6088,11 @@ function findExistingTicketForEmail(emailObj){const probe={id:'__probe__',email:
   const probeTs=Date.parse(emailObj?.receivedDateTime||'');
   for(const ticket of allTickets){const existingKeys=buildTicketThreadKeys(ticket,{allowSubjectFallback:true,forceSubjectFallback:true,requireReplyLikeSubject:false});if(!existingKeys.some(key=>fallbackKeys.includes(key)))continue;if(Number.isFinite(probeTs)){const existingTs=Date.parse(ticket?.email?.receivedDateTime||ticketCreatedAt[ticket.id]||'');if(Number.isFinite(existingTs)&&Math.abs(probeTs-existingTs)>THREAD_FALLBACK_MAX_GAP_DAYS*86400000)continue;}return ticket;}return null;}
 function mergeEmailIntoExistingTicket(ticket,emailObj,subtypeId){if(!ticket||!ticket.id||!emailObj)return false;ticket.email={...ticket.email,...emailObj};const ce=getClientEmail(emailObj);if(ce)ticketClientEmail[ticket.id]=ce;const csFromSender=csAgentFromSenderEmail(emailObj.sender);if(csFromSender&&!ticketCSOwner[ticket.id])ticketCSOwner[ticket.id]=csFromSender;const st=SUBTYPE_BY_ID[subtypeId]||null;if(!ticketSubtype[ticket.id]&&st)ticketSubtype[ticket.id]=st.id;if(!ticketPriority[ticket.id]&&st)ticketPriority[ticket.id]=st.priority;ticketHasNewReply[ticket.id]=true;
+  // Any new message in the loop restarts the clock - the client's reply and
+  // ours both. Stamped from the message's own timestamp where there is one, so
+  // a reply picked up by a late poll does not lose the minutes in between.
+  const replyAt=Date.parse(emailObj.receivedDateTime||'')||Date.now();
+  ticketSlaResetAt[ticket.id]=replyAt;
   // The ticket's support agent was assigned by workload balancing, but if a
   // DIFFERENT support agent is the one actually replying to the client in
   // the email loop, the ticket should follow the real handling agent
@@ -6076,6 +6134,14 @@ let manualSupportOverride={};
 let manualCSOverride={}; // ticketId -> true once CS owner was set by an explicit human action (manual ticket creation, or the manual-ticket edit modal) - protects it from being silently overwritten by the HubSpot-company-derived default the same way manualSupportOverride protects the support agent
 let ticketCSOwner={};
 let ticketCreatedAt={};
+/* ticketId -> when the SLA clock was last restarted.
+
+   Every new message in a thread resets it. The commitment is a response time,
+   not a lifetime: once someone writes again the question is how long THAT waits,
+   and a ticket that has been going back and forth for a week should not show as
+   permanently breached because of when it first arrived. getSLAStatus counts
+   from here when it is set, and from the ticket's creation when it is not. */
+let ticketSlaResetAt={};
 let ticketCreatedBy={}; // ticketId -> creator's agent code, set once at manual-ticket creation - gates who can use the Edit Manual Ticket action
 let ticketNumbers={};
 let ticketNumberCounter=0;
@@ -6489,7 +6555,7 @@ function buildStatePayload(reason){
     allTickets,
     seenIds:Object.keys(seen),
     ticketState,ticketStageTouchedAt,ticketAssigneeTouchedAt,ticketAssigneeBy,ticketHasNewReply,ticketResolutionMeta,ticketArchived,ticketPriority,ticketCategory,ticketSubtype,ticketAssignee,ticketAssignmentMode,manualSupportOverride,manualCSOverride,ticketCSOwner,ticketComments,ticketClientEmail,ticketCreatedAt,ticketCreatedBy,ticketNumbers,ticketNumberCounter,ticketJira,ticketDuplicateOf,ticketHubspotId,
-    ticketSnooze,wipLimits,savedViews,
+    ticketSnooze,ticketSlaResetAt,wipLimits,savedViews,
     spamSenders:[...spamSenders],hsCache,domainCompanyCache,readMentions:[...readMentions],jiraAlerts,readJiraAlerts:[...readJiraAlerts],jiraStatusSnapshot,companyCustomProps,companyProfiles,companiesViewType,companyNetworkCache,companyFilters,coOwnerMappings,actionHistory,
     _meta:{clientSavedAt:now,clientVersion:stateVersion,clientId:LIVE_CLIENT_ID}
   };
@@ -6754,7 +6820,7 @@ function liveSyncTargets(){
   return {ticketState,ticketStageTouchedAt,ticketAssigneeTouchedAt,ticketAssignee,ticketCSOwner,ticketAssignmentMode,
     manualSupportOverride,manualCSOverride,ticketPriority,ticketCategory,ticketSubtype,
     ticketJira,ticketDuplicateOf,ticketHubspotId,ticketArchived,ticketResolutionMeta,ticketHasNewReply,
-    ticketNumbers,ticketComments,ticketCreatedBy,ticketSnooze};
+    ticketNumbers,ticketComments,ticketCreatedBy,ticketSnooze,ticketSlaResetAt};
 }
 function setLiveIndicator(state,detail){
   const el=document.getElementById('live-indicator');
@@ -6943,6 +7009,9 @@ async function loadState(){
   if(s.ticketComments)Object.assign(ticketComments,s.ticketComments);
   if(s.ticketClientEmail)Object.assign(ticketClientEmail,s.ticketClientEmail);
   if(s.ticketCreatedAt)Object.assign(ticketCreatedAt,s.ticketCreatedAt);
+  if(s.ticketSlaResetAt&&typeof s.ticketSlaResetAt==='object'){
+    Object.entries(s.ticketSlaResetAt).forEach(([k,v])=>{const at=Number(v||0);if(k&&at>0)ticketSlaResetAt[k]=at;});
+  }
   if(s.ticketCreatedBy&&typeof s.ticketCreatedBy==='object')Object.assign(ticketCreatedBy,s.ticketCreatedBy);
   if(s.ticketNumbers&&typeof s.ticketNumbers==='object')Object.entries(s.ticketNumbers).forEach(([k,v])=>{const n=Number(v||0);if(k&&n>0)ticketNumbers[k]=n;});
   ticketNumberCounter=Math.max(ticketNumberCounter,Number(s.ticketNumberCounter||0),...Object.values(ticketNumbers).map(v=>Number(v)||0),0);
@@ -7051,6 +7120,40 @@ let shiftAgents={},shiftMe=null,shiftTracked=false,shiftOnBreak=false,shiftLoade
 const SHIFT_HEARTBEAT_MS=60000;
 
 function isWeekendDay(d){const day=d.getDay();return day===0||day===6;}
+/* The hours the SLA clock actually runs.
+
+   08:00-12:00 and 14:00-17:00, weekdays: seven hours a day, not twenty-four and
+   not the nine between the first and last. The lunch gap matters - counting
+   through it made a ticket that arrived at 11:50 look an hour older by 14:00
+   than the work anyone could have done on it.
+
+   Walked a day at a time with setHours rather than by adding 86400000, so a
+   daylight-saving change moves the window with the clock instead of shifting it
+   by an hour. */
+const BUSINESS_WINDOWS = [[8, 0, 12, 0], [14, 0, 17, 0]];
+const BUSINESS_MS_PER_DAY = BUSINESS_WINDOWS.reduce((total, [sh, sm, eh, em]) => total + ((eh * 60 + em) - (sh * 60 + sm)) * 60000, 0);
+function businessMsInRange(from, to) {
+  if (!(to > from)) return 0;
+  let total = 0;
+  const cursor = new Date(from);
+  cursor.setHours(0, 0, 0, 0);
+  while (cursor.getTime() < to) {
+    const next = new Date(cursor);
+    next.setDate(next.getDate() + 1);
+    next.setHours(0, 0, 0, 0);
+    if (!isWeekendDay(cursor)) {
+      for (const [sh, sm, eh, em] of BUSINESS_WINDOWS) {
+        const windowStart = new Date(cursor); windowStart.setHours(sh, sm, 0, 0);
+        const windowEnd = new Date(cursor); windowEnd.setHours(eh, em, 0, 0);
+        const start = Math.max(windowStart.getTime(), from);
+        const end = Math.min(windowEnd.getTime(), to);
+        if (end > start) total += end - start;
+      }
+    }
+    cursor.setTime(next.getTime());
+  }
+  return total;
+}
 // Milliseconds of [from,to) that land on a weekday. Walks day by day via
 // setDate so daylight-saving transitions cannot drift the boundaries the way
 // adding a fixed 86400000 would.
@@ -7073,6 +7176,21 @@ function weekdayMsInRange(from,to){
   }
   return total;
 }
+// A break is capped at fifteen minutes however it was left. Mirrors the
+// server's breakEndMs so a badge cannot disagree with the KPI dashboard.
+let shiftBreakMs=15*60*1000;
+let shiftBreakCooldownMs=2*60*60*1000;
+let shiftBreakEndsAt=0;
+let shiftCooldownRemainingMs=0;
+// When the numbers above were last handed to us, so they can be counted down
+// between polls instead of jumping.
+let shiftRulesAt=0;
+function clientBreakEndMs(b,now){
+  const start=Number(b?.start||0);
+  if(!start)return 0;
+  const ended=(b.end===null||b.end===undefined)?now:Number(b.end);
+  return Math.min(ended,start+shiftBreakMs);
+}
 // Worked milliseconds for one agent within [fromMs,toMs): their shift sessions,
 // clipped to weekdays, minus any break that overlaps.
 function shiftElapsedMs(fromMs,toMs,agentCode){
@@ -7084,11 +7202,11 @@ function shiftElapsedMs(fromMs,toMs,agentCode){
     const start=Math.max(Number(s.start||0),fromMs);
     const end=Math.min(s.end===null||s.end===undefined?now:Number(s.end),toMs);
     if(!(end>start))return;
-    let worked=weekdayMsInRange(start,end);
+    let worked=businessMsInRange(start,end);
     (s.breaks||[]).forEach(b=>{
       const bs=Math.max(Number(b.start||0),start);
-      const be=Math.min(b.end===null||b.end===undefined?now:Number(b.end),end);
-      if(be>bs)worked-=weekdayMsInRange(bs,be);
+      const be=Math.min(clientBreakEndMs(b,now),end);
+      if(be>bs)worked-=businessMsInRange(bs,be);
     });
     total+=Math.max(0,worked);
   });
@@ -7105,6 +7223,7 @@ async function refreshShiftState(){
     shiftMe=out?.me||null;
     shiftTracked=!!shiftMe;
     const mine=shiftMe?shiftAgents[shiftMe]:null;
+    absorbBreakRules(mine);
     shiftOnBreak=!!mine?.onBreak;
     shiftLoaded=true;
     updateBreakButton();
@@ -7126,14 +7245,40 @@ async function toggleShiftBreak(){
   try{
     const res=await fetch('/api/shift/break',{method:'POST',headers:{'Content-Type':'application/json'},
       credentials:'include',body:JSON.stringify({agent:currentUser()})});
+    const out=await res.json().catch(()=>null);
+    // The server refuses a second break inside the cooldown. Say so rather
+    // than appearing to do nothing.
+    if(res.status===429){
+      absorbBreakRules(out);
+      updateBreakButton();
+      showToast('Next break available in '+fmtDuration(shiftCooldownRemainingMs),'warn');
+      return;
+    }
     if(!res.ok)return;
-    const out=await res.json();
     if(out?.agent)shiftAgents[out.agent]={...(shiftAgents[out.agent]||{}),...out};
+    absorbBreakRules(out);
     shiftOnBreak=!!out?.onBreak;
     updateBreakButton();
     refreshSLABadges();
     showToast(shiftOnBreak?'On break - SLA timers paused':'Back on shift - SLA timers running',shiftOnBreak?'warn':'ok');
   }catch(_){}
+}
+// The server owns the two rules; the button only reflects what it was told.
+function absorbBreakRules(snapshot){
+  if(!snapshot)return;
+  if(Number(snapshot.breakMs)>0)shiftBreakMs=Number(snapshot.breakMs);
+  if(Number(snapshot.cooldownMs)>0)shiftBreakCooldownMs=Number(snapshot.cooldownMs);
+  shiftBreakEndsAt=Number(snapshot.breakEndsAt||0);
+  shiftCooldownRemainingMs=Number(snapshot.cooldownRemainingMs||0);
+  shiftRulesAt=boardNow();
+}
+// Counted down locally between polls so the button does not sit stale for a
+// minute after a break ends.
+function breakCooldownLeft(){
+  return Math.max(0,shiftCooldownRemainingMs-Math.max(0,boardNow()-shiftRulesAt));
+}
+function breakTimeLeft(){
+  return shiftBreakEndsAt?Math.max(0,shiftBreakEndsAt-boardNow()):0;
 }
 function updateBreakButton(){
   const btn=document.getElementById('break-btn');
@@ -7148,10 +7293,22 @@ function updateBreakButton(){
   }
   btn.classList.remove('off-shift');
   btn.classList.toggle('on-break',shiftOnBreak);
-  btn.textContent=shiftOnBreak?'On break - resume':'Take a break';
-  btn.title=shiftOnBreak
-    ?'You are on break. SLA timers on your tickets are paused. Click to resume.'
-    :'Pause your shift. SLA timers on your tickets stop until you come back.';
+  const cooling=!shiftOnBreak&&breakCooldownLeft()>0;
+  // Greyed rather than hidden: an agent needs to see that the break exists and
+  // when it comes back, not wonder where the button went.
+  btn.classList.toggle('cooling',cooling);
+  btn.disabled=cooling;
+  if(shiftOnBreak){
+    const left=breakTimeLeft();
+    btn.textContent=left?'On break - '+fmtDuration(left)+' left':'On break - resume';
+    btn.title='You are on break. SLA timers on your tickets are paused, and the break ends by itself after '+fmtDuration(shiftBreakMs)+'. Click to come back early.';
+  }else if(cooling){
+    btn.textContent='Break in '+fmtDuration(breakCooldownLeft());
+    btn.title='One break every '+fmtDuration(shiftBreakCooldownMs)+'. The next one is available in '+fmtDuration(breakCooldownLeft())+'.';
+  }else{
+    btn.textContent='Take a break';
+    btn.title='Pause your shift for '+fmtDuration(shiftBreakMs)+'. SLA timers on your tickets stop until you come back, and the break ends by itself.';
+  }
 }
 
 //  SLA
@@ -7170,9 +7327,12 @@ function getSLAStatus(id){
   // breaching twice.
   if(isDuplicateTicket(id))return null;
   const st=SUBTYPE_BY_ID[ticketSubtype[id]||''];
-  const createdMs=new Date(createdAt).getTime();
+  // The later of the two: a thread that has been replied to is measured from
+  // the last reply, an untouched one from when it arrived.
+  const createdMs=Math.max(new Date(createdAt).getTime(), Number(ticketSlaResetAt[id] || 0));
   const wallElapsed=Date.now()-createdMs;
-  const wallText=fmtDuration(wallElapsed)+' since received';
+  const resetAt=Number(ticketSlaResetAt[id]||0)>new Date(createdAt).getTime()?Number(ticketSlaResetAt[id]):0;
+  const wallText=fmtDuration(wallElapsed)+(resetAt?' since the last reply':' since received');
   if(st?.tier==='Paused')return{text:'Paused (awaiting hotel)',cls:'sla-warn',overdue:false,wallText,shiftMs:0};
   const pr=ticketPriority[id]||st?.priority||'Medium';
   const hrs=(SLA_HOURS[pr]||st?.responseHours||24);
@@ -7192,19 +7352,30 @@ function getSLAStatus(id){
   const remaining=slaMs-elapsed;
   const shiftText=fmtDuration(elapsed)+' worked ('+agent+')';
   if(remaining<=0){
-    return{text:fmtDuration(Math.abs(remaining))+' overdue',cls:'sla-breach',overdue:true,wallText,shiftText,shiftMs:elapsed};
+    return{text:fmtDuration(Math.abs(remaining))+' overdue',cls:'sla-breach',overdue:true,wallText,shiftText,shiftMs:elapsed,resetAt};
   }
   const pct=remaining/slaMs;
   const cls=pct>0.5?'sla-ok':pct>0.25?'sla-warn':'sla-urgent';
-  return{text:fmtDuration(remaining)+' left',cls,overdue:false,wallText,shiftText,shiftMs:elapsed};
+  return{text:fmtDuration(remaining)+' left',cls,overdue:false,wallText,shiftText,shiftMs:elapsed,resetAt};
 }
 function slaTooltip(status){
   if(!status)return'';
   return[status.shiftText?'Shift time: '+status.shiftText:'Shift clock not running',
     'Wall clock: '+(status.wallText||''),
-    'SLA counts only the assigned agent’s logged-in time, excluding breaks and weekends.'].join('\n');
+    ...(status.resetAt?['Clock restarted by the reply on '+fmtDate(new Date(status.resetAt).toISOString())]:[]),
+    'SLA runs 08:00-12:00 and 14:00-17:00 on weekdays, and only while the assigned agent is logged in and not on a break.'].join('\n');
 }
-function refreshSLABadges(){document.querySelectorAll('[data-sla-id]').forEach(el=>{const id=el.dataset.slaId;const status=getSLAStatus(id);if(!status){el.style.display='none';return;}el.style.display='';el.textContent=' '+status.text;el.className='sla-badge '+status.cls;el.title=slaTooltip(status);});}
+// The break countdown and its cooldown both tick down between polls, and the
+// SLA badges already refresh every minute - so they ride along rather than
+// adding a second timer.
+function refreshBreakState(){
+  updateBreakButton();
+  // The server ends a break by itself after fifteen minutes. Once the local
+  // countdown reaches zero, pull the real state rather than waiting out the
+  // five-minute poll showing a break that is over.
+  if(shiftOnBreak&&shiftBreakEndsAt&&breakTimeLeft()<=0)refreshShiftState();
+}
+function refreshSLABadges(){refreshBreakState();document.querySelectorAll('[data-sla-id]').forEach(el=>{const id=el.dataset.slaId;const status=getSLAStatus(id);if(!status){el.style.display='none';return;}el.style.display='';el.textContent=' '+status.text;el.className='sla-badge '+status.cls;el.title=slaTooltip(status);});}
 async function syncTicketStatusToHubspot(ticketId,newCol){const hsId=ticketHubspotId[ticketId];if(!hsId)return{ok:false,reason:'missing_hubspot_ticket_id'};try{const res=await fetch(`/api/hubspot/tickets/${encodeURIComponent(hsId)}/status`,{method:'PATCH',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({kanbanStatus:HUBSPOT_STATUS_BY_STAGE[newCol]||'new'})});const out=await res.json().catch(()=>({}));if(!res.ok)return{ok:false,reason:'api_error',error:String(out?.error||res.status)};return{ok:true};}catch(e){return{ok:false,reason:'network_error',error:String(e?.message||e)};}}
 
 //  Spam 
@@ -12892,6 +13063,120 @@ function emSanitizeEmailHtml(html) {
   return template.innerHTML;
 }
 
+
+/* ===========================================================================
+   The conversation, not just the last message
+   ---------------------------------------------------------------------------
+   The modal used to render one message: whichever reply arrived most recently.
+   Everything said before it was only visible in whatever quoted text the
+   sender's mail client happened to include - inconsistent, usually truncated,
+   and absent entirely when someone replies without quoting.
+
+   This fetches every message carrying the ticket's conversation id and stacks
+   them oldest first, with the newest expanded. Each body goes through the same
+   allowlist sanitiser as the single message did: they are still strangers'
+   HTML, and there are now more of them.
+   =========================================================================== */
+
+let emThread = { state: 'idle', messages: [] };
+let emThreadOpen = new Set();   // message ids the agent has expanded
+
+function emResetThread(){
+  emThread = { state: 'idle', messages: [] };
+  emThreadOpen = new Set();
+}
+
+async function emLoadThread(ticket){
+  if(!ticket||emThread.state==='loading')return;
+  const id=ticket.id;
+  emThread={state:'loading',messages:[]};
+  renderEmThread();
+  try{
+    const conversationId=String(ticket.email?.conversationId||'').trim();
+    const url='/api/tickets/'+encodeURIComponent(id)+'/thread'+(conversationId?'?conversationId='+encodeURIComponent(conversationId):'');
+    const res=await fetch(url,{credentials:'include'});
+    const data=await res.json();
+    // A slow fetch must not paint one ticket's conversation over another's.
+    if(!emCurrentTicket||emCurrentTicket.id!==id)return;
+    if(data?.error){emThread={state:'error',messages:[],message:data.message||data.error};}
+    else{
+      emThread={state:'done',messages:data.messages||[],note:data.note||''};
+      // The newest is the one being answered, so it starts open; the rest are
+      // collapsed to their first line so a long thread stays readable.
+      const last=emThread.messages[emThread.messages.length-1];
+      if(last)emThreadOpen.add(last.id);
+    }
+  }catch(error){
+    if(!emCurrentTicket||emCurrentTicket.id!==id)return;
+    emThread={state:'error',messages:[],message:String(error?.message||error)};
+  }
+  renderEmThread();
+}
+
+function emThreadWho(msg){
+  const address=String(msg.from||'').toLowerCase();
+  const internal=isInternalEmailAddress(address);
+  return {
+    label: msg.fromName || senderName(msg.from) || msg.from || 'Unknown',
+    address,
+    internal,
+    side: internal ? 'us' : 'them'
+  };
+}
+
+function emThreadMessageHtml(msg,index,total){
+  const who=emThreadWho(msg);
+  const open=emThreadOpen.has(msg.id);
+  const when=msg.receivedDateTime?fmtDate(msg.receivedDateTime):'';
+  return `<article class="emt-msg emt-${who.side}${open?' open':''}">
+    <button class="emt-head" data-emt-toggle="${esc(msg.id)}">
+      <span class="emt-who">${esc(who.label)}</span>
+      <span class="emt-badge">${who.internal?'us':'client'}</span>
+      <span class="emt-when">${esc(when)}</span>
+      ${msg.hasAttachments?'<span class="emt-clip" title="Has attachments">attachment</span>':''}
+      <span class="emt-index">${index+1}/${total}</span>
+    </button>
+    ${open
+      ? `<div class="emt-body">${emSanitizeEmailHtml(msg.bodyType==='text'?('<div style="white-space:pre-wrap">'+esc(msg.body)+'</div>'):msg.body)}</div>`
+      : `<div class="emt-preview">${esc(String(msg.preview||'').slice(0,180))}</div>`}
+  </article>`;
+}
+
+function renderEmThread(){
+  const host=document.getElementById('em-thread');
+  if(!host)return;
+  if(emThread.state==='idle'){host.innerHTML='';return;}
+  if(emThread.state==='loading'){host.innerHTML='<div class="emt-note"><span class="spinner-sm"></span> Loading the rest of the conversation…</div>';return;}
+  if(emThread.state==='error'){
+    host.innerHTML=`<div class="emt-note emt-err">Could not load the conversation: ${esc(emThread.message||'')}. The message below is the latest one.</div>`;
+    return;
+  }
+  const list=emThread.messages||[];
+  if(list.length<=1){
+    // Nothing gained by drawing a thread of one - the body below already is it.
+    host.innerHTML=list.length===1?'':'<div class="emt-note">No earlier messages in this conversation.</div>';
+    return;
+  }
+  host.innerHTML=`<div class="emt-bar"><strong>${list.length} messages</strong> in this conversation
+      <button class="btn-out emt-all" id="emt-expand">${emThreadOpen.size>=list.length?'Collapse all':'Expand all'}</button></div>`
+    +list.map((m,i)=>emThreadMessageHtml(m,i,list.length)).join('');
+
+  host.querySelectorAll('[data-emt-toggle]').forEach(btn=>btn.addEventListener('click',()=>{
+    const id=btn.dataset.emtToggle;
+    if(emThreadOpen.has(id))emThreadOpen.delete(id);else emThreadOpen.add(id);
+    renderEmThread();
+  }));
+  host.querySelector('#emt-expand')?.addEventListener('click',()=>{
+    if(emThreadOpen.size>=list.length)emThreadOpen=new Set();
+    else emThreadOpen=new Set(list.map(m=>m.id));
+    renderEmThread();
+  });
+  // Images inside the thread come from the mail store the same way the single
+  // message's do, and the same broken-image handling applies.
+  host.querySelectorAll('img').forEach(img=>img.addEventListener('error',()=>emReplaceBrokenImage(img)));
+  emSweepBrokenImages(host);
+}
+
 function renderEmailBodyWithImages(body,images){
   const list=Array.isArray(images)?images:[];
   // Keyed on contentId alone, not on isInline: what decides whether an image
@@ -13980,7 +14265,11 @@ async function openEmailModal(ticket){
   // "Seen before" is the panel worth paying for up front - it is the one that
   // changes what the agent writes. History waits until it is opened.
   emResetContext(ticket);
+  emResetThread();
   emLoadSimilar(id);
+  // The rest of the conversation, which used to be invisible unless the sender
+  // happened to quote it.
+  emLoadThread(ticket);
   // Any translation belongs to the message that was open before. Clear it
   // first, so nothing from the previous ticket can be reverted into this one.
   trResetEmailState(id);
