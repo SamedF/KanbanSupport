@@ -5638,6 +5638,307 @@ app.get('/api/quinta/properties', requireAuth, async (req, res) => {
 });
 
 
+// ---------------------------------------------------------------------------
+// Projects
+//
+// The team's Claude projects, runnable from the board.
+//
+// Why they are held here rather than read from Claude: there is no API for
+// claude.ai Projects. The Admin API covers members, invites, workspaces, API
+// keys, rate limits, service accounts, WIF and CMEK; for a claude.ai
+// organisation it is narrower still - members, invites, groups, custom roles,
+// spend limits. A project's name, description and instructions are not
+// retrievable by any of them. So the board keeps its own registry, and an admin
+// pastes the instructions in once.
+//
+// What that buys, and it is the point of the feature: each project declares its
+// own inputs, so the board can render a real form for it instead of a chat box,
+// and run it against the API without anyone leaving the board.
+// ---------------------------------------------------------------------------
+const PROJECT_SCOPES = new Set(['mine', 'org', 'shared']);
+const PROJECT_FIELD_TYPES = new Set(['text', 'textarea', 'number', 'select', 'url']);
+const PROJECT_MODEL = String(process.env.PROJECT_MODEL || 'claude-opus-5').trim();
+// Runs cost money and are started by a button, so they get their own ceiling
+// rather than sharing the general API limiter.
+const projectRunLimiter = rateLimit({ windowMs: 60 * 1000, max: 10, standardHeaders: true, legacyHeaders: false });
+
+async function ensureProjectTable() {
+  await prisma.$executeRaw`
+    CREATE TABLE IF NOT EXISTS "ClaudeProject" (
+      "id" SERIAL PRIMARY KEY,
+      "slug" TEXT NOT NULL UNIQUE,
+      "name" TEXT NOT NULL,
+      "description" TEXT,
+      "scope" TEXT NOT NULL DEFAULT 'org',
+      "owner" TEXT,
+      "instructions" TEXT,
+      "inputs" JSONB NOT NULL DEFAULT '[]'::jsonb,
+      "model" TEXT,
+      "accent" TEXT,
+      "pinned" BOOLEAN NOT NULL DEFAULT false,
+      "createdBy" TEXT,
+      "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+  `;
+  await prisma.$executeRaw`CREATE INDEX IF NOT EXISTS "ClaudeProject_scope_idx" ON "ClaudeProject"("scope")`;
+}
+
+/* The projects already in use, with the inputs each one asks for in its own
+   description. Seeded once, on an empty table, so the panel opens with the real
+   catalogue rather than a blank page and an "add your first project" prompt.
+   Instructions are left empty on purpose - only the people who wrote each
+   project can supply those, and a guessed system prompt would be worse than an
+   honest gap. Until one is filled in, the project says so and cannot be run. */
+const PROJECT_SEED = [
+  {
+    slug: 'q-seo-implementation', name: 'Q-SEO Implementation', scope: 'org', owner: 'you', accent: 'indigo', pinned: true,
+    description: 'Implementation steps for Q-SEO on a hotel site, for the stack the site actually runs on.',
+    inputs: [
+      { key: 'websiteUrl', label: 'Website URL', type: 'url', required: true, placeholder: 'https://hotel.example' },
+      { key: 'accountId', label: 'Quinta account ID', type: 'text', required: true },
+      { key: 'licenseKey', label: 'License key', type: 'text', required: true },
+      { key: 'serverLanguage', label: 'Server language', type: 'select', required: true, options: ['Node.js', 'Python', 'PHP'] }
+    ]
+  },
+  {
+    slug: 'q-share-mapping', name: 'Q-Share Mapping', scope: 'org', owner: 'you', accent: 'teal', pinned: true,
+    description: 'Q-Share mapping files for hotel webmasters, from a website URL and a teamId.',
+    inputs: [
+      { key: 'websiteUrl', label: 'Website URL', type: 'url', required: true, placeholder: 'https://hotel.example' },
+      { key: 'teamId', label: 'Team ID', type: 'text', required: true, placeholder: '401' }
+    ]
+  },
+  {
+    slug: 'global-check-agent', name: 'Global Check Agent V0.3', scope: 'org', owner: 'JAT Quinta', accent: 'amber',
+    description: 'Full check for one hotel. The name must match the one on the Dashboard exactly.',
+    inputs: [
+      { key: 'hotelName', label: 'Hotel name', type: 'text', required: true, help: 'Must match the name on the Dashboard.' },
+      { key: 'qtId', label: 'QT ID', type: 'text', required: true },
+      { key: 'officialUrl', label: "Hotel's official URL", type: 'url', required: true }
+    ]
+  },
+  {
+    slug: 'q-sync-check', name: 'Q-sync Check', scope: 'org', owner: 'Vincent', accent: 'violet',
+    description: 'Confirms Q-data is set correctly before Q-Sync is launched. Takes one or more hotel IDs.',
+    inputs: [
+      { key: 'hotelIds', label: 'Hotel IDs', type: 'textarea', required: true, placeholder: '401\n252\n19919', help: 'One per line, or comma separated.' }
+    ]
+  },
+  {
+    slug: 'b-signature-mcp', name: 'B Signature MCP', scope: 'mine', owner: 'you', accent: 'rose',
+    description: 'Q-MCP assistant for the six B Signature properties.',
+    inputs: [
+      { key: 'question', label: 'What do you need?', type: 'textarea', required: true, placeholder: 'Ask about any of the six B Signature properties…' }
+    ]
+  },
+  {
+    slug: 'quinta-onboarding-agent', name: 'Quinta Onboarding Agent V2', scope: 'org', owner: 'Quinta', accent: 'emerald',
+    description: 'Walks a new property through onboarding.',
+    inputs: [
+      { key: 'hotelName', label: 'Hotel name', type: 'text', required: true },
+      { key: 'notes', label: 'Anything specific to this onboarding', type: 'textarea', required: false }
+    ]
+  },
+  {
+    slug: 'qa-audit-conversation', name: 'QA AUDIT - Check Conversation', scope: 'org', owner: 'Quinta', accent: 'slate',
+    description: 'Audits a bot conversation for quality issues.',
+    inputs: [
+      { key: 'conversation', label: 'Conversation', type: 'textarea', required: true, placeholder: 'Paste the conversation transcript…' },
+      { key: 'hotelName', label: 'Hotel', type: 'text', required: false }
+    ]
+  }
+];
+
+async function seedProjectsIfEmpty() {
+  await ensureProjectTable();
+  const rows = await prisma.$queryRaw`SELECT count(*)::int AS n FROM "ClaudeProject"`;
+  if ((Array.isArray(rows) ? rows[0]?.n : 0) > 0) return 0;
+  for (const p of PROJECT_SEED) {
+    await prisma.$executeRaw`
+      INSERT INTO "ClaudeProject" ("slug","name","description","scope","owner","instructions","inputs","accent","pinned","createdBy","updatedAt")
+      VALUES (${p.slug}, ${p.name}, ${p.description || ''}, ${p.scope}, ${p.owner || ''}, ${''},
+              ${JSON.stringify(p.inputs || [])}::jsonb, ${p.accent || 'slate'}, ${!!p.pinned}, ${'seed'}, CURRENT_TIMESTAMP)
+      ON CONFLICT ("slug") DO NOTHING
+    `;
+  }
+  return PROJECT_SEED.length;
+}
+
+function normalizeProjectInputs(raw) {
+  const list = Array.isArray(raw) ? raw : [];
+  return list.slice(0, 20).map((field, index) => {
+    const key = String(field?.key || `field${index + 1}`).trim().replace(/[^A-Za-z0-9_]/g, '').slice(0, 40) || `field${index + 1}`;
+    const type = PROJECT_FIELD_TYPES.has(String(field?.type)) ? String(field.type) : 'text';
+    return {
+      key,
+      label: String(field?.label || key).slice(0, 120),
+      type,
+      required: !!field?.required,
+      placeholder: String(field?.placeholder || '').slice(0, 200),
+      help: String(field?.help || '').slice(0, 300),
+      options: type === 'select' ? (Array.isArray(field?.options) ? field.options.map(o => String(o).slice(0, 80)).slice(0, 30) : []) : []
+    };
+  });
+}
+
+function projectRow(row, { includeInstructions = false } = {}) {
+  return {
+    id: row.id,
+    slug: row.slug,
+    name: row.name,
+    description: row.description || '',
+    scope: row.scope || 'org',
+    owner: row.owner || '',
+    inputs: Array.isArray(row.inputs) ? row.inputs : [],
+    model: row.model || PROJECT_MODEL,
+    accent: row.accent || 'slate',
+    pinned: !!row.pinned,
+    // Whether the project can actually be run yet. An empty instruction set is
+    // the normal state for a freshly seeded project, not an error.
+    ready: !!String(row.instructions || '').trim(),
+    updatedAt: row.updatedAt,
+    ...(includeInstructions ? { instructions: row.instructions || '' } : {})
+  };
+}
+
+app.get('/api/projects', requireAuth, async (req, res) => {
+  try {
+    await seedProjectsIfEmpty();
+    const rows = await prisma.$queryRaw`SELECT * FROM "ClaudeProject" ORDER BY "pinned" DESC, "updatedAt" DESC`;
+    const isAdmin = isAdminRole(req.session.role);
+    const list = (Array.isArray(rows) ? rows : []).map(r => projectRow(r, { includeInstructions: isAdmin }));
+    return res.json({ ok: true, canEdit: isAdmin, model: PROJECT_MODEL, configured: !!String(process.env.ANTHROPIC_API_KEY || '').trim(), rows: list });
+  } catch (error) {
+    console.error('Project list failed:', error?.message || error);
+    return res.status(500).json({ error: 'project_list_failed' });
+  }
+});
+
+app.post('/api/projects', requireAdmin, async (req, res) => {
+  try {
+    await ensureProjectTable();
+    const name = String(req.body?.name || '').trim();
+    if (!name) return res.status(400).json({ error: 'name_required' });
+    const slug = (String(req.body?.slug || name).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'project').slice(0, 60);
+    const scope = PROJECT_SCOPES.has(String(req.body?.scope)) ? String(req.body.scope) : 'org';
+    const inputs = normalizeProjectInputs(req.body?.inputs);
+    await prisma.$executeRaw`
+      INSERT INTO "ClaudeProject" ("slug","name","description","scope","owner","instructions","inputs","model","accent","pinned","createdBy","updatedAt")
+      VALUES (${slug}, ${name}, ${String(req.body?.description || '').slice(0, 600)}, ${scope}, ${String(req.body?.owner || '').slice(0, 80)},
+              ${String(req.body?.instructions || '')}, ${JSON.stringify(inputs)}::jsonb, ${String(req.body?.model || '').trim() || null},
+              ${String(req.body?.accent || 'slate')}, ${!!req.body?.pinned}, ${String(req.session.username || '')}, CURRENT_TIMESTAMP)
+      ON CONFLICT ("slug") DO UPDATE SET
+        "name" = EXCLUDED."name", "description" = EXCLUDED."description", "scope" = EXCLUDED."scope",
+        "owner" = EXCLUDED."owner", "instructions" = EXCLUDED."instructions", "inputs" = EXCLUDED."inputs",
+        "model" = EXCLUDED."model", "accent" = EXCLUDED."accent", "pinned" = EXCLUDED."pinned",
+        "updatedAt" = CURRENT_TIMESTAMP
+    `;
+    return res.json({ ok: true, slug });
+  } catch (error) {
+    console.error('Project save failed:', error?.message || error);
+    return res.status(500).json({ error: 'project_save_failed' });
+  }
+});
+
+app.delete('/api/projects/:id', requireAdmin, async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: 'invalid_id' });
+    await prisma.$executeRaw`DELETE FROM "ClaudeProject" WHERE "id" = ${id}`;
+    return res.json({ ok: true });
+  } catch (error) {
+    console.error('Project delete failed:', error?.message || error);
+    return res.status(500).json({ error: 'project_delete_failed' });
+  }
+});
+
+/* Running one.
+
+   The project's instructions become the system prompt and the form values
+   become the message, so the model gets the same brief it would have been given
+   in Claude - just assembled by the board instead of typed into a chat.
+
+   Streamed server-side and awaited whole: these produce long answers, and a
+   non-streaming request of this size is what trips an HTTP timeout. The
+   response is returned complete rather than forwarded to the browser as it
+   arrives - a progress stream would be nicer and is a clean follow-up, but it
+   is not what makes the feature work. */
+app.post('/api/projects/:id/run', requireAuth, projectRunLimiter, async (req, res) => {
+  const started = Date.now();
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: 'invalid_id' });
+    const apiKey = String(process.env.ANTHROPIC_API_KEY || '').trim();
+    if (!apiKey) return res.status(503).json({ error: 'not_configured', message: 'ANTHROPIC_API_KEY is not set on this deployment, so the board cannot run a project.' });
+
+    const rows = await prisma.$queryRaw`SELECT * FROM "ClaudeProject" WHERE "id" = ${id} LIMIT 1`;
+    const project = Array.isArray(rows) ? rows[0] : null;
+    if (!project) return res.status(404).json({ error: 'project_not_found' });
+
+    const instructions = String(project.instructions || '').trim();
+    if (!instructions) {
+      return res.status(409).json({
+        error: 'project_not_ready',
+        message: `"${project.name}" has no instructions yet. Claude does not expose a project's instructions through any API, so an admin has to paste them in once before it can run here.`
+      });
+    }
+
+    const fields = Array.isArray(project.inputs) ? project.inputs : [];
+    const values = (req.body?.values && typeof req.body.values === 'object') ? req.body.values : {};
+    const missing = fields.filter(f => f.required && !String(values[f.key] ?? '').trim()).map(f => f.label);
+    if (missing.length) return res.status(400).json({ error: 'missing_inputs', message: `Fill in: ${missing.join(', ')}.` });
+
+    const brief = fields
+      .map(f => ({ label: f.label, value: String(values[f.key] ?? '').trim() }))
+      .filter(entry => entry.value)
+      .map(entry => `${entry.label}: ${entry.value}`)
+      .join('\n');
+
+    const client = new Anthropic({ apiKey, maxRetries: 2 });
+    const stream = client.messages.stream({
+      model: String(project.model || PROJECT_MODEL),
+      max_tokens: 32_000,
+      system: [{ type: 'text', text: instructions, cache_control: { type: 'ephemeral' } }],
+      thinking: { type: 'adaptive' },
+      output_config: { effort: 'high' },
+      messages: [{ role: 'user', content: [{ type: 'text', text: brief || 'Run this project.' }] }]
+    });
+    const message = await stream.finalMessage();
+
+    // A policy decline arrives as a normal 200 with this stop reason, so it has
+    // to be checked before the content is read or the panel shows an empty box.
+    if (message.stop_reason === 'refusal') {
+      return res.status(200).json({
+        ok: false, refused: true,
+        message: 'Claude declined to run this one. Rephrase the inputs, or check the project instructions.',
+        category: message.stop_details?.category || null
+      });
+    }
+
+    const text = (message.content || []).filter(b => b.type === 'text').map(b => b.text).join('\n').trim();
+
+    return res.json({
+      ok: true,
+      project: { id: project.id, name: project.name },
+      text,
+      usage: {
+        inputTokens: message.usage?.input_tokens ?? null,
+        outputTokens: message.usage?.output_tokens ?? null,
+        cacheRead: message.usage?.cache_read_input_tokens ?? null
+      },
+      ms: Date.now() - started
+    });
+  } catch (error) {
+    const detail = String(error?.message || error);
+    console.error('Project run failed:', detail);
+    if (error instanceof Anthropic.AuthenticationError) return res.status(502).json({ error: 'auth_failed', message: "The server's Anthropic API key was rejected." });
+    if (error instanceof Anthropic.RateLimitError) return res.status(429).json({ error: 'rate_limited', message: 'Anthropic is rate limiting this key right now. Try again shortly.' });
+    if (error instanceof Anthropic.APIConnectionError) return res.status(504).json({ error: 'unreachable', message: 'Could not reach the Anthropic API.' });
+    return res.status(502).json({ error: 'project_run_failed', message: detail.slice(0, 300) });
+  }
+});
+
 app.get('/api/insights/languages', requireAuth, async (req, res) => {
   try {
     const rows = await prisma.ticketTranslation.findMany({

@@ -619,6 +619,64 @@ clears that token's cache immediately.
   under *Raw profile* rather than dropped, so a field this board was not written
   for is still visible to the agent.
 
+## Projects
+
+QT-Tools → **Projects** is the team's Claude projects, runnable from the board:
+tabs for Your projects / Organization / Shared with you, a search box, and a
+card per project that expands into **a form built from that project's own
+inputs** — Q-SEO Implementation asks for a URL, account ID, license key and a
+server-language dropdown; Q-Share Mapping asks for a URL and a teamId.
+
+Pressing Run sends the project's instructions as the system prompt and the form
+values as the message, and shows the answer in place with timing and token
+usage.
+
+### Why the catalogue lives here and not in Claude
+
+**There is no API for claude.ai Projects.** The Admin API covers members,
+invites, workspaces, API keys, rate limits, service accounts, WIF and CMEK; for
+a claude.ai organisation it is narrower still — members, invites, groups, custom
+roles, spend limits. A project's name, description and instructions are not
+retrievable through any of them, so the board cannot sync that grid and keeps
+its own registry in `ClaudeProject`, created on first use with
+`CREATE TABLE IF NOT EXISTS` (no migration step).
+
+The table is seeded once, on an empty table, with the projects already in use
+and the inputs each one names. **Instructions are deliberately left empty**:
+only the people who wrote each project can supply those, and a guessed system
+prompt would be worse than an honest gap. Until one is filled in the card reads
+*Needs setup* and Run is disabled.
+
+### What has to be configured
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `ANTHROPIC_API_KEY` | unset | Required. Without it the panel lists projects but nothing can be run, and says so. |
+| `PROJECT_MODEL` | `claude-opus-5` | Model used for a run, unless a project overrides it. |
+
+Then, per project: **Edit → paste the instructions → Save**. Admins only.
+
+Inputs are defined as JSON on the same editor, and that is what generates the
+form:
+
+    [{"key":"websiteUrl","label":"Website URL","type":"url","required":true},
+     {"key":"serverLanguage","label":"Server language","type":"select",
+      "required":true,"options":["Node.js","Python","PHP"]}]
+
+Types: `text`, `textarea`, `number`, `url`, `select`.
+
+### Runs
+
+Streamed server-side and awaited whole — these produce long answers, and a
+non-streaming request of that size is what trips an HTTP timeout. The response
+comes back complete rather than token by token; forwarding the stream to the
+browser would be nicer and is a clean follow-up.
+
+Runs cost money and are started by a button, so they have their own rate limit
+(10 per minute per board) rather than sharing the general API limiter. A policy
+refusal arrives as a normal 200 with `stop_reason: "refusal"` and is reported as
+a refusal, not as empty output.
+
 ## Important security note
 
 

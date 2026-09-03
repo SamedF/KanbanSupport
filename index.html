@@ -4902,6 +4902,74 @@ th {
   color:var(--amber-800,#92400e); border-radius:9px; padding:9px 11px;
 }
 
+
+/* ===== Projects ============================================================ */
+.pj-head { display:flex; align-items:flex-start; justify-content:space-between; gap:16px; flex-wrap:wrap; margin-bottom:14px; }
+.pj-title { font-family:Caladea,serif; font-size:26px; color:var(--text,#0f172a); }
+.pj-subtitle { font-size:11px; color:var(--muted,#64748b); margin-top:3px; }
+.pj-controls { display:flex; align-items:center; gap:9px; flex-wrap:wrap; }
+.pj-search { min-width:230px; }
+.pj-loading, .pj-empty { padding:40px 10px; text-align:center; color:var(--muted,#64748b); font-size:13px; }
+.pj-error-box { padding:14px; border-radius:10px; font-size:13px; background:var(--red-50,#fef2f2); border:1px solid var(--red-200,#fecaca); color:var(--red-700,#b91c1c); }
+
+.pj-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(330px,1fr)); gap:12px; align-items:start; padding-bottom:30px; }
+.pj-card {
+  border:1px solid var(--border,#e2e8f0); border-radius:14px; background:var(--surface,#fff);
+  overflow:hidden; transition:box-shadow .15s ease, border-color .15s ease;
+}
+.pj-card:hover { border-color:var(--border-strong,#cbd5e1); box-shadow:0 4px 14px rgba(15,23,42,.06); }
+.pj-card.open { grid-column:1 / -1; border-color:var(--indigo-400,#818cf8); box-shadow:0 8px 26px rgba(15,23,42,.10); }
+.pj-card-head { display:block; width:100%; text-align:left; border:0; background:transparent; cursor:pointer; padding:14px 16px; border-left:3px solid var(--pj-accent,#94a3b8); }
+.pj-card-title { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.pj-name { font-size:14px; font-weight:700; color:var(--text,#0f172a); }
+.pj-pin, .pj-nodraft {
+  font-size:9px; font-weight:800; text-transform:uppercase; letter-spacing:.05em;
+  padding:2px 7px; border-radius:999px;
+  background:var(--surface-muted,#f1f5f9); color:var(--muted,#64748b);
+}
+.pj-nodraft { background:var(--amber-50,#fffbeb); color:var(--amber-800,#92400e); border:1px solid var(--amber-300,#fcd34d); }
+.pj-desc { font-size:12px; color:var(--text-soft,#334155); margin-top:5px; line-height:1.5; }
+.pj-meta { font-size:10.5px; color:var(--muted,#64748b); margin-top:7px; }
+
+.pj-accent-indigo { --pj-accent:var(--indigo-600,#4f46e5); }
+.pj-accent-teal { --pj-accent:#0d9488; }
+.pj-accent-amber { --pj-accent:var(--amber-500,#f59e0b); }
+.pj-accent-violet { --pj-accent:#7c3aed; }
+.pj-accent-rose { --pj-accent:#e11d48; }
+.pj-accent-emerald { --pj-accent:#059669; }
+.pj-accent-slate { --pj-accent:#64748b; }
+
+.pj-body { padding:4px 16px 16px; border-top:1px solid var(--border,#e2e8f0); }
+.pj-field { display:block; margin:12px 0; }
+.pj-field > span { display:block; font-size:11.5px; font-weight:600; color:var(--text-soft,#334155); margin-bottom:5px; }
+.pj-field > span em { font-weight:400; font-style:normal; color:var(--muted,#64748b); }
+.pj-field .form-input { width:100%; }
+.pj-req { font-weight:400; font-size:10px; color:var(--muted,#64748b); }
+.pj-help { display:block; font-size:10.5px; color:var(--muted,#64748b); margin-top:4px; line-height:1.45; }
+.pj-help code, .pj-warn code { background:var(--surface-muted,#f1f5f9); border-radius:4px; padding:0 4px; font-size:10.5px; }
+.pj-textarea { min-height:84px; resize:vertical; font-family:inherit; }
+.pj-mono { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:11.5px; }
+.pj-actions { display:flex; align-items:center; gap:9px; margin-top:14px; flex-wrap:wrap; }
+.pj-model { font-size:10px; color:var(--muted,#64748b); margin-left:auto; font-variant-numeric:tabular-nums; }
+.pj-warn {
+  border:1px solid var(--amber-300,#fcd34d); background:var(--amber-50,#fffbeb);
+  color:var(--amber-800,#92400e); border-radius:9px; padding:9px 11px; font-size:11.5px; line-height:1.5; margin:12px 0;
+}
+.pj-warn-top { margin:0 0 14px; max-width:760px; }
+
+.pj-result { margin-top:14px; border-radius:10px; font-size:12.5px; line-height:1.6; }
+.pj-running { padding:12px; color:var(--muted,#64748b); background:var(--surface-soft,#f8fafc); border:1px solid var(--border,#e2e8f0); }
+.pj-error { padding:12px; background:var(--red-50,#fef2f2); border:1px solid var(--red-200,#fecaca); color:var(--red-700,#b91c1c); }
+.pj-ok { border:1px solid var(--border,#e2e8f0); background:var(--surface-soft,#f8fafc); overflow:hidden; }
+.pj-result-head {
+  display:flex; align-items:center; gap:10px; padding:8px 12px;
+  border-bottom:1px solid var(--border,#e2e8f0); background:var(--surface,#fff); font-size:11px; color:var(--muted,#64748b);
+}
+.pj-result-head strong { color:var(--text,#0f172a); font-size:12px; }
+.pj-result-head span { flex:1; }
+.pj-copy { font-size:10px; padding:2px 9px; }
+.pj-result-body { padding:12px; white-space:pre-wrap; word-break:break-word; max-height:480px; overflow:auto; color:var(--text,#0f172a); }
+
 </style>
 </head>
 <body>
@@ -4999,7 +5067,8 @@ th {
       </div>
       <div class="crm-nav-section" aria-label="QT-Tools">
         <div class="crm-nav-section-title">QT-Tools</div>
-        <button class="crm-nav-btn" id="quinta-view-btn"> Quinta Properties</button>
+        <button class="crm-nav-btn" id="projects-view-btn"> Projects</button>
+        <button class="crm-nav-btn" id="quinta-view-btn"> Quinta Hotels</button>
         <button class="crm-nav-btn" id="qt-seize-view-btn"> QT Seize</button>
         <!-- Admin only: hidden by syncRoleRestrictedControls, and the endpoint
              behind it is requireAdmin, so hiding the button is presentation
@@ -5159,6 +5228,29 @@ th {
     </table>
   </div>
 </div>
+<div id="projects-view" style="display:none;min-height:calc(100dvh - 175px);padding:var(--content-pad);">
+  <div id="projects-body"></div>
+</div>
+<div class="modal-bg" id="projects-editor"><div class="modal" style="max-width:720px;">
+  <div class="modal-head"><h2 id="pj-editor-title">Project</h2><button class="modal-close-x" data-close="projects-editor"></button></div>
+  <div class="modal-body-scroll" style="padding:14px 18px;">
+    <p class="pj-help" style="margin-top:0;">Claude has no API that lists projects or hands over their instructions, so the board keeps its own copy. Paste the project's instructions here once and it becomes runnable.</p>
+    <label class="pj-field"><span>Name</span><input class="form-input" id="pj-e-name" type="text" autocomplete="off"></label>
+    <label class="pj-field"><span>Slug <em>(leave blank to derive from the name)</em></span><input class="form-input" id="pj-e-slug" type="text" autocomplete="off"></label>
+    <label class="pj-field"><span>Description</span><input class="form-input" id="pj-e-desc" type="text" autocomplete="off"></label>
+    <label class="pj-field"><span>Owner</span><input class="form-input" id="pj-e-owner" type="text" autocomplete="off"></label>
+    <label class="pj-field"><span>Tab</span><select class="form-input" id="pj-e-scope"><option value="mine">Your projects</option><option value="org">Organization</option><option value="shared">Shared with you</option></select></label>
+    <label class="pj-field"><span>Instructions <em>(the project's system prompt)</em></span><textarea class="form-input pj-textarea" id="pj-e-instructions" rows="8" spellcheck="false"></textarea></label>
+    <label class="pj-field"><span>Inputs <em>(JSON — this is what generates the form)</em></span><textarea class="form-input pj-textarea pj-mono" id="pj-e-inputs" rows="8" spellcheck="false"></textarea>
+      <span class="pj-help">Each entry: <code>{"key":"websiteUrl","label":"Website URL","type":"url","required":true}</code>. Types: text, textarea, number, url, select (with <code>"options":[…]</code>).</span></label>
+  </div>
+  <div class="modal-actions">
+    <button class="btn-out" id="pj-e-delete" style="display:none;color:var(--red-600);">Delete</button>
+    <span style="flex:1"></span>
+    <button class="btn-out" data-close="projects-editor">Cancel</button>
+    <button class="btn-primary" id="pj-e-save">Save</button>
+  </div>
+</div></div>
 <div id="quinta-view" style="display:none;min-height:calc(100dvh - 175px);padding:var(--content-pad);">
   <div id="quinta-body"></div>
 </div>
@@ -7131,6 +7223,7 @@ function setSideNavActive(mode){
   document.getElementById('insights-view-btn')?.classList.toggle('active',mode==='insights');
   document.getElementById('qt-seize-view-btn')?.classList.toggle('active',mode==='qtSeize');
   document.getElementById('quinta-view-btn')?.classList.toggle('active',mode==='quinta');
+  document.getElementById('projects-view-btn')?.classList.toggle('active',mode==='projects');
   document.getElementById('assignlog-view-btn')?.classList.toggle('active',mode==='assignlog');
   document.getElementById('qt-detect-view-btn')?.classList.toggle('active',mode==='qtDetect');
 }
@@ -7197,6 +7290,7 @@ function restoreLastWorkspaceSession(){
   if(mode==='assignlog')return showAssignLogView();
   if(mode==='insights')return showInsightsView();
   if(mode==='quinta')return showQuintaView();
+  if(mode==='projects')return showProjectsView();
   // showQtDetectView falls back to the board itself if the user is not an
   // admin, so a stale saved session cannot strand them on a hidden view.
   if(mode==='qtDetect')return showQtDetectView();
@@ -7812,7 +7906,7 @@ document.getElementById('emt-submit').addEventListener('click',async()=>{
 });
 
 //  View switching
-function hidePrimaryViews(){stopKpiAutoRefresh();document.getElementById('main-board').style.display='none';document.getElementById('spam-view').classList.remove('active');document.getElementById('archive-view').classList.remove('active');document.getElementById('companies-view').style.display='none';document.getElementById('kpi-view').style.display='none';document.getElementById('insights-view').style.display='none';document.getElementById('quinta-view').style.display='none';document.getElementById('qt-seize-view').style.display='none';document.getElementById('assignlog-view').style.display='none';document.getElementById('qt-detect-view').style.display='none';}
+function hidePrimaryViews(){stopKpiAutoRefresh();document.getElementById('main-board').style.display='none';document.getElementById('spam-view').classList.remove('active');document.getElementById('archive-view').classList.remove('active');document.getElementById('companies-view').style.display='none';document.getElementById('kpi-view').style.display='none';document.getElementById('insights-view').style.display='none';document.getElementById('quinta-view').style.display='none';document.getElementById('projects-view').style.display='none';document.getElementById('qt-seize-view').style.display='none';document.getElementById('assignlog-view').style.display='none';document.getElementById('qt-detect-view').style.display='none';}
 function showBoardView(){viewMode='board';setBoardChromeVisible(true);hidePrimaryViews();document.getElementById('main-board').style.display='flex';setSideNavActive('board');saveLastWorkspaceSession('board');renderBoard();}
 function showSpamView(){viewMode='spam';setBoardChromeVisible(true);hidePrimaryViews();document.getElementById('spam-view').classList.add('active');setSideNavActive('spam');saveLastWorkspaceSession('spam');renderSpamView();}
 function showArchiveView(){viewMode='archive';setBoardChromeVisible(true);hidePrimaryViews();document.getElementById('archive-view').classList.add('active');setSideNavActive('archive');saveLastWorkspaceSession('archive');renderArchiveView();}
@@ -8693,7 +8787,263 @@ function renderQuintaView(){
 
 document.getElementById('quinta-view-btn')?.addEventListener('click',()=>{if(viewMode==='quinta')showBoardView();else showQuintaView();});
 
-function renderActiveView(){if(viewMode==='board')renderBoard();else if(viewMode==='spam')renderSpamView();else if(viewMode==='archive')renderArchiveView();else if(viewMode==='kpi')renderKpiView();else if(viewMode==='assignlog')renderAssignLogView();else if(viewMode==='insights')renderInsightsView();else if(viewMode==='quinta')renderQuintaView();else if(viewMode==='qtSeize')return;else renderCompaniesView();}
+/* ===========================================================================
+   Projects
+   ---------------------------------------------------------------------------
+   The team's Claude projects, runnable from the board.
+
+   These are not documents - each one is a small agent with a fixed set of
+   inputs ("website URL + account ID + license key + server language"). So the
+   panel does not show a chat box: it reads each project's declared inputs and
+   renders the form that fits it, then runs it against the API and shows the
+   answer in place.
+
+   The catalogue lives in the board, not in Claude, because Claude has no API
+   that lists projects or hands over their instructions. See the server module.
+   =========================================================================== */
+
+let projectsState = { state: 'idle', rows: [], canEdit: false, configured: false, model: '' };
+let projectsTab = 'all';
+let projectsQuery = '';
+let projectOpen = null;      // slug of the project whose form is showing
+let projectValues = {};      // slug -> { fieldKey: value }
+let projectResult = {};      // slug -> { running, text, error, usage, ms }
+let projectEditorOpen = false;
+
+function showProjectsView(){
+  viewMode='projects';
+  setBoardChromeVisible(false);
+  hidePrimaryViews();
+  document.getElementById('projects-view').style.display='block';
+  setSideNavActive('projects');
+  saveLastWorkspaceSession('projects');
+  renderProjectsView();
+  if(projectsState.state==='idle')loadProjects();
+}
+
+async function loadProjects(){
+  projectsState={...projectsState,state:'loading'};renderProjectsView();
+  try{
+    const res=await fetch('/api/projects',{credentials:'include'});
+    const data=await res.json();
+    projectsState=data?.error
+      ?{state:'error',rows:[],canEdit:false,configured:false,message:data.message||data.error}
+      :{state:'done',rows:data.rows||[],canEdit:!!data.canEdit,configured:!!data.configured,model:data.model||''};
+  }catch(error){
+    projectsState={state:'error',rows:[],canEdit:false,configured:false,message:String(error?.message||error)};
+  }
+  renderProjectsView();
+}
+
+function projectMatches(p){
+  const q=projectsQuery.trim().toLowerCase();
+  if(projectsTab!=='all'&&p.scope!==projectsTab)return false;
+  if(!q)return true;
+  return [p.name,p.description,p.owner,...(p.inputs||[]).map(f=>f.label)]
+    .some(v=>String(v||'').toLowerCase().includes(q));
+}
+
+function projectFieldHtml(slug,field){
+  const value=esc(String(projectValues[slug]?.[field.key]??''));
+  const req=field.required?' <span class="pj-req">required</span>':'';
+  const common=`id="pjf-${esc(slug)}-${esc(field.key)}" data-pj-field="${esc(field.key)}" data-pj-slug="${esc(slug)}"`;
+  let control;
+  if(field.type==='textarea')control=`<textarea class="form-input pj-textarea" ${common} placeholder="${esc(field.placeholder||'')}">${value}</textarea>`;
+  else if(field.type==='select')control=`<select class="form-input" ${common}><option value="">Choose…</option>${(field.options||[]).map(o=>`<option value="${esc(o)}"${String(projectValues[slug]?.[field.key]||'')===o?' selected':''}>${esc(o)}</option>`).join('')}</select>`;
+  else control=`<input class="form-input" ${common} type="${field.type==='number'?'number':'text'}" value="${value}" placeholder="${esc(field.placeholder||'')}" autocomplete="off" spellcheck="false">`;
+  return `<label class="pj-field">
+    <span>${esc(field.label)}${req}</span>
+    ${control}
+    ${field.help?`<span class="pj-help">${esc(field.help)}</span>`:''}
+  </label>`;
+}
+
+function projectResultHtml(slug){
+  const r=projectResult[slug];
+  if(!r)return '';
+  if(r.running)return '<div class="pj-result pj-running"><span class="spinner"></span> Running… this can take a minute on a long job.</div>';
+  if(r.error)return `<div class="pj-result pj-error">${esc(r.error)}</div>`;
+  if(!r.text)return '';
+  const meta=[r.ms?`${(r.ms/1000).toFixed(1)}s`:'',r.usage?.outputTokens?`${r.usage.outputTokens} output tokens`:''].filter(Boolean).join(' · ');
+  return `<div class="pj-result pj-ok">
+    <div class="pj-result-head"><strong>Result</strong><span>${esc(meta)}</span>
+      <button class="btn-out pj-copy" data-pj-copy="${esc(slug)}">Copy</button></div>
+    <div class="pj-result-body">${esc(r.text)}</div>
+  </div>`;
+}
+
+function projectCardHtml(p){
+  const open=projectOpen===p.slug;
+  const fields=p.inputs||[];
+  return `<div class="pj-card pj-accent-${esc(p.accent||'slate')}${open?' open':''}">
+    <button class="pj-card-head" data-pj-open="${esc(p.slug)}">
+      <div class="pj-card-title">
+        <span class="pj-name">${esc(p.name)}</span>
+        ${p.pinned?'<span class="pj-pin" title="Pinned">Pinned</span>':''}
+        ${p.ready?'':'<span class="pj-nodraft" title="No instructions saved yet">Needs setup</span>'}
+      </div>
+      <div class="pj-desc">${esc(p.description||'')}</div>
+      <div class="pj-meta">${esc(p.owner?('by '+p.owner):'')}${fields.length?` · ${fields.length} input${fields.length===1?'':'s'}`:''}</div>
+    </button>
+    ${open?`<div class="pj-body">
+      ${p.ready?'':`<div class="pj-warn">Claude does not expose a project's instructions through any API, so this one cannot run until an admin pastes them in.${projectsState.canEdit?' Use <strong>Edit</strong> below.':''}</div>`}
+      ${fields.length?fields.map(f=>projectFieldHtml(p.slug,f)).join(''):'<p class="pj-help">This project takes no inputs.</p>'}
+      <div class="pj-actions">
+        <button class="btn-primary" data-pj-run="${esc(p.slug)}"${(!p.ready||!projectsState.configured||projectResult[p.slug]?.running)?' disabled':''}>Run</button>
+        ${projectsState.canEdit?`<button class="btn-out" data-pj-edit="${esc(p.slug)}">Edit</button>`:''}
+        <span class="pj-model">${esc(p.model||projectsState.model||'')}</span>
+      </div>
+      ${projectResultHtml(p.slug)}
+    </div>`:''}
+  </div>`;
+}
+
+async function runProject(slug){
+  const p=projectsState.rows.find(x=>x.slug===slug);
+  if(!p)return;
+  projectResult[slug]={running:true};renderProjectsView();
+  try{
+    const res=await fetch(`/api/projects/${p.id}/run`,{
+      method:'POST',credentials:'include',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({values:projectValues[slug]||{}})
+    });
+    const data=await res.json();
+    if(!res.ok||data.ok===false){
+      projectResult[slug]={error:data?.message||data?.error||`HTTP ${res.status}`};
+    }else{
+      projectResult[slug]={text:data.text||'(no output)',usage:data.usage,ms:data.ms};
+    }
+  }catch(error){
+    projectResult[slug]={error:String(error?.message||error)};
+  }
+  renderProjectsView();
+}
+
+/* The editor. Instructions are the thing that cannot be fetched from Claude, so
+   this exists mainly to paste them in - and to let an admin describe a
+   project's inputs, which is what generates its form. */
+function openProjectEditor(slug){
+  const p=slug?projectsState.rows.find(x=>x.slug===slug):null;
+  document.getElementById('pj-editor-title').textContent=p?`Edit ${p.name}`:'New project';
+  document.getElementById('pj-e-name').value=p?.name||'';
+  document.getElementById('pj-e-slug').value=p?.slug||'';
+  document.getElementById('pj-e-desc').value=p?.description||'';
+  document.getElementById('pj-e-owner').value=p?.owner||'';
+  document.getElementById('pj-e-scope').value=p?.scope||'org';
+  document.getElementById('pj-e-instructions').value=p?.instructions||'';
+  document.getElementById('pj-e-inputs').value=JSON.stringify(p?.inputs||[],null,2);
+  document.getElementById('pj-e-delete').style.display=p?'':'none';
+  document.getElementById('pj-e-delete').dataset.pjId=p?.id||'';
+  document.getElementById('projects-editor').classList.add('open');
+  projectEditorOpen=true;
+}
+
+async function saveProjectEditor(){
+  let inputs=[];
+  try{inputs=JSON.parse(document.getElementById('pj-e-inputs').value||'[]');}
+  catch(_){return showToast('The inputs box is not valid JSON');}
+  const body={
+    name:document.getElementById('pj-e-name').value,
+    slug:document.getElementById('pj-e-slug').value,
+    description:document.getElementById('pj-e-desc').value,
+    owner:document.getElementById('pj-e-owner').value,
+    scope:document.getElementById('pj-e-scope').value,
+    instructions:document.getElementById('pj-e-instructions').value,
+    inputs
+  };
+  try{
+    const res=await fetch('/api/projects',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    const data=await res.json();
+    if(!res.ok)throw new Error(data?.message||data?.error||('HTTP '+res.status));
+    document.getElementById('projects-editor').classList.remove('open');
+    projectEditorOpen=false;
+    showToast('Saved','ok');
+    await loadProjects();
+  }catch(error){showToast('Could not save: '+String(error?.message||error));}
+}
+
+async function deleteProjectFromEditor(){
+  const id=document.getElementById('pj-e-delete').dataset.pjId;
+  if(!id)return;
+  if(!confirm('Remove this project from the board? The project in Claude is untouched.'))return;
+  await fetch(`/api/projects/${id}`,{method:'DELETE',credentials:'include'});
+  document.getElementById('projects-editor').classList.remove('open');
+  projectEditorOpen=false;
+  await loadProjects();
+}
+
+function renderProjectsView(){
+  const host=document.getElementById('projects-body');
+  if(!host)return;
+  const s=projectsState;
+
+  const tabs=[['all','All'],['mine','Your projects'],['org','Organization'],['shared','Shared with you']];
+  const header=`<div class="pj-head">
+      <div><div class="pj-title">Projects</div>
+        <div class="pj-subtitle">Your Claude projects, run from the board${s.model?` · ${esc(s.model)}`:''}</div></div>
+      <div class="pj-controls">
+        <input class="filter-sel pj-search" id="pj-search" type="text" placeholder="Search projects…" value="${esc(projectsQuery)}" autocomplete="off">
+        ${s.canEdit?'<button class="btn-primary" id="pj-new">New project</button>':''}
+        <button class="btn-out" id="pj-refresh">Refresh</button>
+      </div>
+    </div>
+    <div class="ins-tabs">${tabs.map(([k,l])=>`<button class="ins-tab${projectsTab===k?' active':''}" data-pj-tab="${k}">${esc(l)}</button>`).join('')}</div>`;
+
+  if(s.state==='loading'||s.state==='idle'){host.innerHTML=header+'<div class="pj-loading"><span class="spinner"></span> Loading projects…</div>';return;}
+  if(s.state==='error'){host.innerHTML=header+`<div class="pj-error-box">Could not load projects: ${esc(s.message||'')}</div>`;return;}
+
+  const rows=s.rows.filter(projectMatches);
+  const notConfigured=!s.configured
+    ? '<div class="pj-warn pj-warn-top">No <code>ANTHROPIC_API_KEY</code> is set on this deployment, so nothing can be run from here yet.</div>'
+    : '';
+  const grid=rows.length
+    ? `<div class="pj-grid">${rows.map(projectCardHtml).join('')}</div>`
+    : `<div class="pj-empty">${projectsQuery?'Nothing matches that search.':'No projects in this tab.'}</div>`;
+
+  host.innerHTML=header+notConfigured+grid;
+
+  host.querySelectorAll('[data-pj-tab]').forEach(b=>b.addEventListener('click',()=>{projectsTab=b.dataset.pjTab;renderProjectsView();}));
+  host.querySelector('#pj-refresh')?.addEventListener('click',loadProjects);
+  host.querySelector('#pj-new')?.addEventListener('click',()=>openProjectEditor(null));
+  host.querySelectorAll('[data-pj-open]').forEach(b=>b.addEventListener('click',()=>{
+    const slug=b.dataset.pjOpen;
+    projectOpen=projectOpen===slug?null:slug;
+    renderProjectsView();
+  }));
+  host.querySelectorAll('[data-pj-field]').forEach(el=>el.addEventListener('input',e=>{
+    const slug=e.target.dataset.pjSlug,key=e.target.dataset.pjField;
+    projectValues[slug]=projectValues[slug]||{};
+    projectValues[slug][key]=e.target.value;
+  }));
+  host.querySelectorAll('[data-pj-run]').forEach(b=>b.addEventListener('click',()=>runProject(b.dataset.pjRun)));
+  host.querySelectorAll('[data-pj-edit]').forEach(b=>b.addEventListener('click',()=>openProjectEditor(b.dataset.pjEdit)));
+  host.querySelectorAll('[data-pj-copy]').forEach(b=>b.addEventListener('click',()=>{
+    const text=projectResult[b.dataset.pjCopy]?.text||'';
+    navigator.clipboard?.writeText(text).then(()=>showToast('Copied','ok'),()=>showToast('Could not copy'));
+  }));
+  // Re-rendering the panel on every keystroke would drop focus, so the search
+  // box only redraws the grid beneath it.
+  const search=host.querySelector('#pj-search');
+  if(search)search.addEventListener('input',e=>{
+    projectsQuery=e.target.value;
+    const filtered=s.rows.filter(projectMatches);
+    const gridEl=host.querySelector('.pj-grid')||host.querySelector('.pj-empty');
+    if(!gridEl)return;
+    const replacement=document.createElement('div');
+    replacement.innerHTML=filtered.length?`<div class="pj-grid">${filtered.map(projectCardHtml).join('')}</div>`:`<div class="pj-empty">Nothing matches that search.</div>`;
+    gridEl.replaceWith(replacement.firstElementChild);
+    host.querySelectorAll('[data-pj-open]').forEach(b=>b.addEventListener('click',()=>{
+      projectOpen=projectOpen===b.dataset.pjOpen?null:b.dataset.pjOpen;renderProjectsView();
+    }));
+  });
+}
+
+document.getElementById('projects-view-btn')?.addEventListener('click',()=>{if(viewMode==='projects')showBoardView();else showProjectsView();});
+document.getElementById('pj-e-save')?.addEventListener('click',saveProjectEditor);
+document.getElementById('pj-e-delete')?.addEventListener('click',deleteProjectFromEditor);
+
+function renderActiveView(){if(viewMode==='board')renderBoard();else if(viewMode==='spam')renderSpamView();else if(viewMode==='archive')renderArchiveView();else if(viewMode==='kpi')renderKpiView();else if(viewMode==='assignlog')renderAssignLogView();else if(viewMode==='insights')renderInsightsView();else if(viewMode==='quinta')renderQuintaView();else if(viewMode==='projects')renderProjectsView();else if(viewMode==='qtSeize')return;else renderCompaniesView();}
 
 // ---------------------------------------------------------------------------
 // Assignment Log
