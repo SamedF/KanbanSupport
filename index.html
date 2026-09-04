@@ -2799,6 +2799,32 @@ header {
   background: var(--primary-dark);
 }
 
+/* Destructive confirmations. Fixed hex rather than the red-600 token, which
+   lightens in the dark theme and would leave white text on a pale button. */
+.btn-danger {
+  font-size: 12px;
+  padding: 7px 15px;
+  border-radius: 11px;
+  cursor: pointer;
+  font-weight: 800;
+  transition: all .15s ease;
+  border: none;
+  background: #dc2626;
+  color: #fff;
+}
+
+.btn-danger:hover {
+  background: #b91c1c;
+}
+
+.confirm-message {
+  padding: 16px 20px;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--slate-600);
+  white-space: pre-line;
+}
+
 .form-field {
   display: flex;
   flex-direction: column;
@@ -5678,6 +5704,13 @@ th {
 <div class="modal-bg" id="kpi-tickets-modal"><div class="modal" style="max-width:640px;"><div class="modal-head"><h2 id="kpi-tickets-title"></h2><button class="modal-close-x" data-close="kpi-tickets-modal"></button></div><div class="modal-body-scroll" id="kpi-tickets-list"></div><div class="modal-actions"><button class="btn-out" data-close="kpi-tickets-modal">Close</button></div></div></div>
 <!-- Bulk triage: appears only when something is selected. -->
 <div class="selection-bar" id="selection-bar"></div>
+<!-- Confirmations for destructive board actions. Deliberately not window.confirm
+     - see confirmAction(). -->
+<div class="modal-bg" id="confirm-modal"><div class="modal" style="max-width:420px;">
+  <div class="modal-head"><h2 id="confirm-title">Are you sure?</h2></div>
+  <div class="confirm-message" id="confirm-message"></div>
+  <div class="modal-actions"><button class="btn-out" id="confirm-cancel">Cancel</button><button class="btn-primary" id="confirm-ok">Confirm</button></div>
+</div></div>
 <!-- Undo lives apart from the ordinary toast because it needs a button. -->
 <div class="undo-toast" id="undo-toast"></div>
 <!-- Command palette (Ctrl/Cmd + K) -->
@@ -9042,7 +9075,19 @@ document.getElementById('pj-e-save')?.addEventListener('click',saveProjectEditor
 document.getElementById('pj-e-delete')?.addEventListener('click',deleteProjectFromEditor);
 document.getElementById('claude-connect-save')?.addEventListener('click',saveClaudeConnection);
 
-function renderActiveView(){if(viewMode==='board')renderBoard();else if(viewMode==='spam')renderSpamView();else if(viewMode==='archive')renderArchiveView();else if(viewMode==='kpi')renderKpiView();else if(viewMode==='assignlog')renderAssignLogView();else if(viewMode==='insights')renderInsightsView();else if(viewMode==='projects')renderProjectsView();else if(viewMode==='qtSeize')return;else renderCompaniesView();}
+// A render that throws used to fail silently: the click that asked for it -
+// selecting a card, finishing a bulk action - appeared to do nothing at all,
+// and the board looked frozen with nothing to report. Say so instead, and
+// leave the detail in the console where it can be read back.
+function renderActiveView(){
+  try{
+    renderActiveViewInner();
+  }catch(error){
+    console.error('renderActiveView failed',error);
+    showToast('Could not redraw the board - see the browser console','warn');
+  }
+}
+function renderActiveViewInner(){if(viewMode==='board')renderBoard();else if(viewMode==='spam')renderSpamView();else if(viewMode==='archive')renderArchiveView();else if(viewMode==='kpi')renderKpiView();else if(viewMode==='assignlog')renderAssignLogView();else if(viewMode==='insights')renderInsightsView();else if(viewMode==='projects')renderProjectsView();else if(viewMode==='qtSeize')return;else renderCompaniesView();}
 
 // ---------------------------------------------------------------------------
 // Assignment Log
@@ -11494,8 +11539,20 @@ function makeCard(ticket,isNew=false){
       </div>
     </div>
     ${inlineSectionHtml}`;
+  // The whole card is draggable, so a mousedown on any control inside it - a
+  // category select, the agent picker, Archive - arms a drag the browser then
+  // has to be talked out of. Worse, a control that opens a dialog or removes
+  // its own card mid-gesture leaves that armed drag with nothing to finish
+  // against, and the board stops accepting clicks until a reload. Disarm the
+  // drag for any gesture that starts on a control, and re-arm it after.
+  const armDrag=ev=>{div.draggable=!ev.target?.closest?.('button,select,a,textarea,input,label,.agent-assign-menu');};
+  const rearmDrag=()=>{div.draggable=true;};
+  div.addEventListener('pointerdown',armDrag);
+  div.addEventListener('mousedown',armDrag);
+  div.addEventListener('pointerup',rearmDrag);
+  div.addEventListener('mouseup',rearmDrag);
   div.addEventListener('dragstart',e=>{e.dataTransfer.setData('ticketId',id);setTimeout(()=>div.classList.add('dragging'),0);});
-  div.addEventListener('dragend',()=>div.classList.remove('dragging'));
+  div.addEventListener('dragend',()=>{div.classList.remove('dragging');rearmDrag();});
   div.querySelector('[data-pr]').addEventListener('click',e=>{e.stopPropagation();ticketPriority[id]=nextPriority(priority);saveState();renderBoard();});
   const agentWrap=div.querySelector('[data-agent-menu]');
   div.querySelector('[data-agent-trigger]').addEventListener('click',e=>{
@@ -11564,7 +11621,21 @@ function makeCard(ticket,isNew=false){
   div.querySelector('[data-oe]').addEventListener('click',ev=>{ev.stopPropagation();clearNewReplyGlow(id);openEmailModal(ticket);});
   div.querySelector('[data-edit-manual]')?.addEventListener('click',ev=>{ev.stopPropagation();openEditManualModal(ticket);});
   div.querySelectorAll('[data-dup-open]').forEach(btn=>btn.addEventListener('click',ev=>{ev.preventDefault();ev.stopPropagation();openDuplicateModal(id);}));
-  div.querySelector('[data-archive]')?.addEventListener('click',ev=>{ev.stopPropagation();if(!confirm('Archive this ticket?'))return;ticketArchived[id]={archivedAt:Date.now(),archivedBy:currentUser(),reason:'manual'};saveState('ticket_archived_manual');renderBoard();updateArchiveBadge();showToast('Ticket archived','ok');});
+  div.querySelector('[data-archive]')?.addEventListener('click',async ev=>{
+    ev.stopPropagation();
+    const answer=await confirmAction('Archive this ticket? It leaves the board and can be restored from the Archive view.',
+      {title:'Archive ticket',confirmLabel:'Archive',danger:true});
+    if(!answer)return;
+    if(isArchivedTicket(id))return;
+    ticketArchived[id]={archivedAt:Date.now(),archivedBy:currentUser(),reason:'manual'};
+    // A card that is leaving the board must leave the selection with it, so the
+    // bulk bar never counts a ticket nobody can see.
+    selectedTickets.delete(id);
+    if(lastSelectedId===id)lastSelectedId=null;
+    if(focusedCardId===id)focusedCardId=null;
+    saveState('ticket_archived_manual');
+    renderBoard();updateArchiveBadge();showToast('Ticket archived','ok');
+  });
   div.querySelector('[data-inline-toggle]')?.addEventListener('click',ev=>{ev.stopPropagation();inlineCommentOpen[id]=!inlineOpen;if(inlineCommentOpen[id]){markAlertFeedReadForTicket(id,currentUser());clearNewReplyGlow(id);}renderBoard();});
   div.querySelector('[data-inline-bell]')?.addEventListener('click',ev=>{ev.stopPropagation();inlineCommentOpen[id]=true;markAlertFeedReadForTicket(id,currentUser());clearNewReplyGlow(id);renderBoard();});
   div.querySelector('[data-inline-modal]')?.addEventListener('click',ev=>{ev.stopPropagation();clearNewReplyGlow(id);openComModal(ticket);});
@@ -12100,6 +12171,58 @@ function showUndoToast(label){
   host._timer=setTimeout(()=>host.classList.remove('show'),12000);
 }
 
+/* --- Confirmations --------------------------------------------------------
+   window.confirm() blocks the page in a nested event loop, in the middle of a
+   click whose handler then re-renders the board and destroys its own button on
+   the way out. That is the flow behind "archive a ticket and the board stops
+   letting me select anything until I reload": a gesture half-finished inside a
+   blocked event loop leaves the browser holding state - a pointer press, an
+   armed drag on the card the button sits in - that the page never gets the
+   events to unwind.
+
+   An in-app modal resolves a promise instead. The click that opened it has
+   already finished dispatching, nothing is blocked, and Escape or the backdrop
+   cancels. Keydown is bound in the capture phase so Enter and Escape answer
+   the dialog rather than reaching the board's own shortcuts. */
+function confirmAction(message,{title='Are you sure?',confirmLabel='Confirm',cancelLabel='Cancel',danger=false}={}){
+  const bg=document.getElementById('confirm-modal');
+  const titleEl=document.getElementById('confirm-title');
+  const messageEl=document.getElementById('confirm-message');
+  const ok=document.getElementById('confirm-ok');
+  const cancel=document.getElementById('confirm-cancel');
+  // Never leave a destructive action unconfirmable if the markup is missing.
+  if(!bg||!ok||!cancel||!messageEl)return Promise.resolve(window.confirm(message));
+  if(titleEl)titleEl.textContent=title;
+  messageEl.textContent=message;
+  ok.textContent=confirmLabel;
+  cancel.textContent=cancelLabel;
+  ok.className=danger?'btn-danger':'btn-primary';
+  bg.classList.add('open');
+  return new Promise(resolve=>{
+    const done=answer=>{
+      bg.classList.remove('open');
+      ok.removeEventListener('click',onOk);
+      cancel.removeEventListener('click',onCancel);
+      bg.removeEventListener('click',onBackdrop);
+      document.removeEventListener('keydown',onKey,true);
+      resolve(answer);
+    };
+    const onOk=e=>{e.stopPropagation();done(true);};
+    const onCancel=e=>{e.stopPropagation();done(false);};
+    const onBackdrop=e=>{if(e.target===bg)done(false);};
+    const onKey=e=>{
+      if(e.key==='Escape'){e.preventDefault();e.stopPropagation();done(false);}
+      else if(e.key==='Enter'){e.preventDefault();e.stopPropagation();done(true);}
+    };
+    ok.addEventListener('click',onOk);
+    cancel.addEventListener('click',onCancel);
+    bg.addEventListener('click',onBackdrop);
+    document.addEventListener('keydown',onKey,true);
+    // After the class change, so the button is focusable when it is focused.
+    setTimeout(()=>{try{ok.focus();}catch(_){}},0);
+  });
+}
+
 /* --- Bulk actions --------------------------------------------------------- */
 
 // Captures the fields an action is about to overwrite, for exactly the tickets
@@ -12187,11 +12310,18 @@ async function bulkSnooze(until){
 async function bulkArchive(){
   const ids=selectionList();
   if(!ids.length)return;
-  if(!confirm(`Archive ${ids.length} ticket${ids.length===1?'':'s'}?`))return;
-  const before=captureTicketState(ids,['archived']);
+  const answer=await confirmAction(
+    `Archive ${ids.length} ticket${ids.length===1?'':'s'}? They leave the board and can be restored from the Archive view.`,
+    {title:`Archive ${ids.length} ticket${ids.length===1?'':'s'}`,confirmLabel:'Archive',danger:true});
+  if(!answer)return;
+  // The board may have moved on while the dialog was open - another session's
+  // patch, a poll, an expiring snooze. Only archive what is still selectable.
+  const stillThere=selectionList().filter(id=>ids.includes(id));
+  if(!stillThere.length)return showToast('Those tickets are no longer on the board');
+  const before=captureTicketState(stillThere,['archived']);
   const now=Date.now();
-  ids.forEach(id=>{ticketArchived[id]={archivedAt:now,archivedBy:currentUser(),reason:'manual'};});
-  pushUndo(`Archived ${ids.length} ticket${ids.length===1?'':'s'}`,()=>restoreTicketState(before,['archived']));
+  stillThere.forEach(id=>{ticketArchived[id]={archivedAt:now,archivedBy:currentUser(),reason:'manual'};});
+  pushUndo(`Archived ${stillThere.length} ticket${stillThere.length===1?'':'s'}`,()=>restoreTicketState(before,['archived']));
   clearSelection();renderActiveView();
   await saveState('bulk_archive');
 }
@@ -12449,6 +12579,20 @@ document.addEventListener('keydown',async e=>{
   }
 });
 
+// One malformed ticket used to take the whole render with it: the columns are
+// emptied before they are refilled, so a throw halfway through left the board
+// half-drawn AND skipped everything after the loop - the badges, and
+// renderSelectionBar(), which is why selection could appear to die with no
+// visible error. A card that cannot be built is now dropped and reported.
+function safeCard(ticket){
+  try{
+    return makeCard(ticket);
+  }catch(error){
+    console.error('Could not render ticket '+ticket?.id,error);
+    return null;
+  }
+}
+
 function renderBoard(){
   closeAllAgentMenus();
   closeSnoozeMenu();
@@ -12484,7 +12628,7 @@ function renderBoard(){
       const el=document.getElementById('col-'+col);
       el.innerHTML='';
       if(!tickets.length)el.innerHTML=`<div class="empty"><div class="empty-icon">${COL_EMPTY_ICONS[col]}</div>No tickets</div>`;
-      else tickets.forEach(t=>el.appendChild(makeCard(t)));
+      else tickets.forEach(t=>{const card=safeCard(t);if(card)el.appendChild(card);});
       renderColumnHeader(col,tickets.length,column.querySelector('.col-header'));
     });
   }
@@ -12541,7 +12685,7 @@ function renderLaneBoard(visible){
         bodyEl.className='col-body';
         bodyEl.dataset.col=col;
         if(!colTickets.length)bodyEl.innerHTML='<div class="empty empty-slim"></div>';
-        else colTickets.forEach(t=>bodyEl.appendChild(makeCard(t)));
+        else colTickets.forEach(t=>{const card=safeCard(t);if(card)bodyEl.appendChild(card);});
         bindColumnDropTarget(bodyEl);
         column.appendChild(bodyEl);
         body.appendChild(column);
@@ -12682,6 +12826,16 @@ function bindColumnDropTarget(col){
   });
 }
 document.querySelectorAll('.col-body').forEach(bindColumnDropTarget);
+
+// A drag that ends anywhere other than on a column - cancelled with Escape,
+// dropped outside the board, or interrupted by the card being re-rendered
+// underneath it - never reaches dragleave or drop, so the highlight and the
+// half-transparent card would stay behind. Swept from the document, where the
+// end of a drag is always heard.
+['dragend','drop'].forEach(ev=>document.addEventListener(ev,()=>{
+  document.querySelectorAll('.card.dragging').forEach(c=>{c.classList.remove('dragging');c.draggable=true;});
+  document.querySelectorAll('.col-body.drag-over').forEach(c=>c.classList.remove('drag-over'));
+}));
 document.querySelectorAll('[data-close]').forEach(b=>{b.addEventListener('click',()=>document.getElementById(b.dataset.close).classList.remove('open'));});
 document.querySelectorAll('.modal-bg').forEach(bg=>{bg.addEventListener('click',e=>{if(e.target===bg)bg.classList.remove('open');});});
 
