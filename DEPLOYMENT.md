@@ -570,7 +570,8 @@ server-language dropdown; Q-Share Mapping asks for a URL and a teamId.
 
 Pressing Run sends the project's instructions as the system prompt and the form
 values as the message, and shows the answer in place with timing and token
-usage.
+usage. The answer opens a thread: **Ask a follow-up** keeps going against the
+same project without going back to the form.
 
 ### Why the catalogue lives here and not in Claude
 
@@ -594,6 +595,32 @@ prompt would be worse than an honest gap. Until one is filled in the card reads
 | --- | --- | --- |
 | `ANTHROPIC_API_KEY` | unset | Required. Without it the panel lists projects but nothing can be run, and says so. |
 | `PROJECT_MODEL` | `claude-opus-5` | Model used for a run, unless a project overrides it. |
+| `CLAUDE_CREDENTIAL_SECRET` | falls back to `SESSION_SECRET` | Wraps each agent's Compliance Access Key before it is stored. See below. |
+
+`ANTHROPIC_API_KEY` is read from the environment on every run and is never sent
+to the browser — the panel is told only whether one is set.
+
+### The Compliance Access Key is encrypted at rest
+
+The key an agent pastes into **Connect Claude** is the one Anthropic credential
+that cannot live in the environment: each agent supplies their own, so it has to
+be persisted. It is wrapped with AES-256-GCM before it goes into
+`OAuthToken.accessToken`, so a database dump — a backup, a restored snapshot, a
+support export — does not hand over a key that can read the organisation's
+Claude projects.
+
+The wrapping key is derived from `CLAUDE_CREDENTIAL_SECRET`, or from
+`SESSION_SECRET` when that is unset, so an existing deployment needs no new
+configuration. Two consequences worth knowing:
+
+- **Rotating either secret makes stored keys unreadable.** The connection then
+  reports itself as disconnected and the agent pastes theirs again. That is the
+  correct outcome for a rotated secret, not a failure.
+- **A key stored before this shipped is still plaintext and is still read.**
+  Upgrading disconnects nobody; the next connect or sync rewrites it wrapped.
+
+Only the Claude provider goes through this. HubSpot and M365 tokens are stored
+exactly as they were.
 
 Then, per project: **Edit → paste the instructions → Save**. Admins only.
 
@@ -617,6 +644,23 @@ Runs cost money and are started by a button, so they have their own rate limit
 (10 per minute per board) rather than sharing the general API limiter. A policy
 refusal arrives as a normal 200 with `stop_reason: "refusal"` and is reported as
 a refusal, not as empty output.
+
+### Follow-ups
+
+`POST /api/projects/:id/chat` continues a thread that Run started. It is the
+same request as a run with a different message list — the project's instructions
+stay the cached system prompt on every turn, so turn nine still answers as that
+project rather than drifting into a general chat.
+
+The transcript is held in the browser and replayed on each request rather than
+stored: a project thread is a working session, not a record the board owes
+anyone, which means no new table and nothing to prune. It is still checked like
+any other untrusted input — roles must be `user` or `assistant`, they must
+alternate, the first must be the project's own answer and the last the question
+being asked, at most 40 turns of 20,000 characters each. Past that the panel
+says to run the project again rather than silently truncating the history.
+
+Follow-ups share the run limiter, because they cost the same money.
 
 ## The SLA clock
 

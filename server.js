@@ -5553,6 +5553,58 @@ function claudeConnectionProvider(userId) {
   return `claude-compliance:${Number(userId)}`;
 }
 
+// The Compliance Access Key is the one Anthropic credential that cannot live in
+// the environment: every agent pastes their own, so it has to be persisted. It
+// is encrypted at rest rather than written into OAuthToken.accessToken in the
+// clear, so a database dump - a backup, a restored snapshot, a support export -
+// does not hand over a key that can read the organisation's Claude projects.
+//
+// The wrapping key is derived from CLAUDE_CREDENTIAL_SECRET, falling back to
+// SESSION_SECRET so an existing deployment needs no new configuration. Rotating
+// either one makes stored keys unreadable, and the connection reports itself as
+// disconnected until the agent pastes theirs again - which is the correct
+// outcome for a rotated secret, not a failure.
+const CLAUDE_CREDENTIAL_PREFIX = 'encv1:';
+function claudeCredentialKey() {
+  const secret = String(process.env.CLAUDE_CREDENTIAL_SECRET || process.env.SESSION_SECRET || '').trim();
+  if (!secret) return null;
+  return crypto.createHash('sha256').update(`claude-credential:${secret}`).digest();
+}
+function encryptClaudeCredential(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  const key = claudeCredentialKey();
+  // No secret configured: storing it unwrapped is what this deployment already
+  // did, and refusing to connect would be a worse trade than a logged warning.
+  if (!key) {
+    console.warn('Claude credential stored unencrypted: set CLAUDE_CREDENTIAL_SECRET or SESSION_SECRET.');
+    return raw;
+  }
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+  const body = Buffer.concat([cipher.update(raw, 'utf8'), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return `${CLAUDE_CREDENTIAL_PREFIX}${iv.toString('base64url')}.${tag.toString('base64url')}.${body.toString('base64url')}`;
+}
+function decryptClaudeCredential(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  // A key stored before this shipped is still plaintext. Read it, so upgrading
+  // does not silently disconnect everyone; the next write wraps it.
+  if (!raw.startsWith(CLAUDE_CREDENTIAL_PREFIX)) return raw;
+  const key = claudeCredentialKey();
+  if (!key) return '';
+  try {
+    const [ivPart, tagPart, bodyPart] = raw.slice(CLAUDE_CREDENTIAL_PREFIX.length).split('.');
+    const decipher = crypto.createDecipheriv('aes-256-gcm', key, Buffer.from(ivPart, 'base64url'));
+    decipher.setAuthTag(Buffer.from(tagPart, 'base64url'));
+    return Buffer.concat([decipher.update(Buffer.from(bodyPart, 'base64url')), decipher.final()]).toString('utf8');
+  } catch (_) {
+    // Wrong key, or a tampered row. Either way there is no credential to use.
+    return '';
+  }
+}
+
 function maskSecret(value) {
   const raw = String(value || '').trim();
   if (!raw) return '';
@@ -5582,7 +5634,19 @@ function claudeConnectionStatusFromTokens(tokens) {
 
 async function getClaudeConnectionForRequest(req) {
   if (!req.session?.userId) return null;
-  return getStoredOAuthTokens(claudeConnectionProvider(req.session.userId));
+  const tokens = await getStoredOAuthTokens(claudeConnectionProvider(req.session.userId));
+  if (!tokens) return null;
+  return { ...tokens, accessToken: decryptClaudeCredential(tokens.accessToken) };
+}
+
+// Every write of the Claude credential goes through here, so nothing can put a
+// plaintext key back into the table by taking the shorter path.
+async function setClaudeConnection(userId, { credential, metadata }) {
+  await setStoredOAuthTokens(claudeConnectionProvider(userId), {
+    accessToken: encryptClaudeCredential(credential),
+    expiresAt: null,
+    metadata: metadata || undefined
+  });
 }
 
 function claudeComplianceHeaders(credential, mode) {
@@ -5713,11 +5777,7 @@ async function syncClaudeProjectsForRequest(req) {
   const projects = await fetchClaudeProjects(credential, { userEmail: meta.userEmail || '' });
   for (const project of projects) await upsertSyncedClaudeProject(project, req);
   const nextMeta = { ...meta, lastSyncAt: new Date().toISOString(), lastProjectCount: projects.length, lastError: '' };
-  await setStoredOAuthTokens(claudeConnectionProvider(req.session.userId), {
-    accessToken: credential,
-    expiresAt: null,
-    metadata: nextMeta
-  });
+  await setClaudeConnection(req.session.userId, { credential, metadata: nextMeta });
   return { count: projects.length, lastSyncAt: nextMeta.lastSyncAt };
 }
 
@@ -5783,9 +5843,8 @@ app.post('/api/claude/connection', requireAuth, projectRunLimiter, async (req, r
     const userEmail = normalizeEmailForDb(req.body?.userEmail || '');
     const authMode = normalizeClaudeAuthMode(req.body?.authMode, credential);
 
-    await setStoredOAuthTokens(claudeConnectionProvider(req.session.userId), {
-      accessToken: credential,
-      expiresAt: null,
+    await setClaudeConnection(req.session.userId, {
+      credential,
       metadata: { userEmail, authMode, connectedAt: new Date().toISOString(), lastSyncAt: null, lastProjectCount: 0, lastError: '' }
     });
 
@@ -5798,9 +5857,8 @@ app.post('/api/claude/connection', requireAuth, projectRunLimiter, async (req, r
     const existing = await getClaudeConnectionForRequest(req).catch(() => null);
     const meta = (existing?.metadata && typeof existing.metadata === 'object' && !Array.isArray(existing.metadata)) ? existing.metadata : {};
     if (existing?.accessToken) {
-      await setStoredOAuthTokens(claudeConnectionProvider(req.session.userId), {
-        accessToken: existing.accessToken,
-        expiresAt: null,
+      await setClaudeConnection(req.session.userId, {
+        credential: existing.accessToken,
         metadata: { ...meta, lastError: detail.slice(0, 300) }
       }).catch(() => null);
     }
@@ -5823,9 +5881,8 @@ app.post('/api/claude/sync-projects', requireAuth, projectRunLimiter, async (req
     const existing = await getClaudeConnectionForRequest(req).catch(() => null);
     const meta = (existing?.metadata && typeof existing.metadata === 'object' && !Array.isArray(existing.metadata)) ? existing.metadata : {};
     if (existing?.accessToken) {
-      await setStoredOAuthTokens(claudeConnectionProvider(req.session.userId), {
-        accessToken: existing.accessToken,
-        expiresAt: null,
+      await setClaudeConnection(req.session.userId, {
+        credential: existing.accessToken,
         metadata: { ...meta, lastError: detail.slice(0, 300) }
       }).catch(() => null);
     }
@@ -5896,61 +5953,99 @@ app.delete('/api/projects/:id', requireAdmin, async (req, res) => {
    response is returned complete rather than forwarded to the browser as it
    arrives - a progress stream would be nicer and is a clean follow-up, but it
    is not what makes the feature work. */
-app.post('/api/projects/:id/run', requireAuth, projectRunLimiter, async (req, res) => {
-  const started = Date.now();
-  try {
-    const id = Number(req.params.id);
-    if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: 'invalid_id' });
-    const apiKey = String(process.env.ANTHROPIC_API_KEY || '').trim();
-    if (!apiKey) return res.status(503).json({ error: 'not_configured', message: 'ANTHROPIC_API_KEY is not set on this deployment, so the board cannot run a project.' });
+// A run and a follow-up are the same request with a different message list, so
+// they share everything from the model down: the project's instructions as a
+// cached system prompt, adaptive thinking, and the refusal check that has to
+// happen before the content is read.
+const PROJECT_CHAT_MAX_TURNS = 40;
+const PROJECT_CHAT_MAX_CHARS = 20_000;
 
-    const rows = await prisma.$queryRaw`SELECT * FROM "ClaudeProject" WHERE "id" = ${id} LIMIT 1`;
-    const project = Array.isArray(rows) ? rows[0] : null;
-    if (!project) return res.status(404).json({ error: 'project_not_found' });
+function projectBriefFromValues(project, values) {
+  const fields = Array.isArray(project.inputs) ? project.inputs : [];
+  const supplied = (values && typeof values === 'object') ? values : {};
+  const missing = fields.filter(f => f.required && !String(supplied[f.key] ?? '').trim()).map(f => f.label);
+  const brief = fields
+    .map(f => ({ label: f.label, value: String(supplied[f.key] ?? '').trim() }))
+    .filter(entry => entry.value)
+    .map(entry => `${entry.label}: ${entry.value}`)
+    .join('\n');
+  return { brief, missing };
+}
 
-    const instructions = String(project.instructions || '').trim();
-    if (!instructions) {
-      return res.status(409).json({
-        error: 'project_not_ready',
-        message: `"${project.name}" has no instructions yet. Claude does not expose a project's instructions through any API, so an admin has to paste them in once before it can run here.`
-      });
-    }
+// The transcript arrives from the browser rather than a table: a project thread
+// is a working session, not a record the board owes anyone, and keeping it out
+// of Postgres means no new migration and nothing to prune. It is still checked
+// like any other untrusted input - roles, shape, length, and a ceiling on how
+// much history one request may replay.
+function normalizeProjectTurns(raw) {
+  if (raw === undefined || raw === null) return { turns: [] };
+  if (!Array.isArray(raw)) return { error: 'Conversation history must be a list of turns.' };
+  if (raw.length > PROJECT_CHAT_MAX_TURNS) {
+    return { error: `This thread is too long to continue (${raw.length} turns, limit ${PROJECT_CHAT_MAX_TURNS}). Run the project again to start a fresh one.` };
+  }
+  const turns = [];
+  for (const entry of raw) {
+    const role = String(entry?.role || '').trim();
+    const content = String(entry?.content || '').trim();
+    if (role !== 'user' && role !== 'assistant') return { error: 'Every turn must be from the user or the assistant.' };
+    if (!content) return { error: 'A turn cannot be empty.' };
+    if (content.length > PROJECT_CHAT_MAX_CHARS) return { error: 'One of the turns is too long to send.' };
+    if (turns.length && turns[turns.length - 1].role === role) return { error: 'Turns have to alternate between the user and the assistant.' };
+    turns.push({ role, content });
+  }
+  if (turns.length) {
+    if (turns[0].role !== 'assistant') return { error: "A follow-up has to start from the project's first answer." };
+    if (turns[turns.length - 1].role !== 'user') return { error: 'The last turn has to be the question being asked.' };
+  }
+  return { turns };
+}
 
-    const fields = Array.isArray(project.inputs) ? project.inputs : [];
-    const values = (req.body?.values && typeof req.body.values === 'object') ? req.body.values : {};
-    const missing = fields.filter(f => f.required && !String(values[f.key] ?? '').trim()).map(f => f.label);
-    if (missing.length) return res.status(400).json({ error: 'missing_inputs', message: `Fill in: ${missing.join(', ')}.` });
+async function loadRunnableProject(id) {
+  const rows = await prisma.$queryRaw`SELECT * FROM "ClaudeProject" WHERE "id" = ${id} LIMIT 1`;
+  const project = Array.isArray(rows) ? rows[0] : null;
+  if (!project) return { status: 404, error: 'project_not_found' };
+  if (!String(project.instructions || '').trim()) {
+    return {
+      status: 409,
+      error: 'project_not_ready',
+      message: `"${project.name}" has no instructions yet. Claude does not expose a project's instructions through any API, so an admin has to paste them in once before it can run here.`
+    };
+  }
+  return { project };
+}
 
-    const brief = fields
-      .map(f => ({ label: f.label, value: String(values[f.key] ?? '').trim() }))
-      .filter(entry => entry.value)
-      .map(entry => `${entry.label}: ${entry.value}`)
-      .join('\n');
+async function callProjectModel(project, messages) {
+  const client = new Anthropic({ apiKey: String(process.env.ANTHROPIC_API_KEY || '').trim(), maxRetries: 2 });
+  // Streamed and awaited whole: these answers are long, and a non-streaming
+  // request of that size is what trips an HTTP timeout.
+  const stream = client.messages.stream({
+    model: String(project.model || PROJECT_MODEL),
+    max_tokens: 32_000,
+    system: [{ type: 'text', text: String(project.instructions || '').trim(), cache_control: { type: 'ephemeral' } }],
+    thinking: { type: 'adaptive' },
+    output_config: { effort: 'high' },
+    messages: messages.map(m => ({ role: m.role, content: [{ type: 'text', text: m.content }] }))
+  });
+  return stream.finalMessage();
+}
 
-    const client = new Anthropic({ apiKey, maxRetries: 2 });
-    const stream = client.messages.stream({
-      model: String(project.model || PROJECT_MODEL),
-      max_tokens: 32_000,
-      system: [{ type: 'text', text: instructions, cache_control: { type: 'ephemeral' } }],
-      thinking: { type: 'adaptive' },
-      output_config: { effort: 'high' },
-      messages: [{ role: 'user', content: [{ type: 'text', text: brief || 'Run this project.' }] }]
-    });
-    const message = await stream.finalMessage();
-
-    // A policy decline arrives as a normal 200 with this stop reason, so it has
-    // to be checked before the content is read or the panel shows an empty box.
-    if (message.stop_reason === 'refusal') {
-      return res.status(200).json({
+function projectRunResponse(message, project, started) {
+  // A policy decline arrives as a normal 200 with this stop reason, so it has
+  // to be checked before the content is read or the panel shows an empty box.
+  if (message.stop_reason === 'refusal') {
+    return {
+      status: 200,
+      body: {
         ok: false, refused: true,
         message: 'Claude declined to run this one. Rephrase the inputs, or check the project instructions.',
         category: message.stop_details?.category || null
-      });
-    }
-
-    const text = (message.content || []).filter(b => b.type === 'text').map(b => b.text).join('\n').trim();
-
-    return res.json({
+      }
+    };
+  }
+  const text = (message.content || []).filter(b => b.type === 'text').map(b => b.text).join('\n').trim();
+  return {
+    status: 200,
+    body: {
       ok: true,
       project: { id: project.id, name: project.name },
       text,
@@ -5960,15 +6055,61 @@ app.post('/api/projects/:id/run', requireAuth, projectRunLimiter, async (req, re
         cacheRead: message.usage?.cache_read_input_tokens ?? null
       },
       ms: Date.now() - started
-    });
+    }
+  };
+}
+
+function projectRunError(error, res) {
+  const detail = String(error?.message || error);
+  console.error('Project run failed:', detail);
+  if (error instanceof Anthropic.AuthenticationError) return res.status(502).json({ error: 'auth_failed', message: "The server's Anthropic API key was rejected." });
+  if (error instanceof Anthropic.RateLimitError) return res.status(429).json({ error: 'rate_limited', message: 'Anthropic is rate limiting this key right now. Try again shortly.' });
+  if (error instanceof Anthropic.APIConnectionError) return res.status(504).json({ error: 'unreachable', message: 'Could not reach the Anthropic API.' });
+  return res.status(502).json({ error: 'project_run_failed', message: detail.slice(0, 300) });
+}
+
+// Shared by /run and /chat: the only difference between them is whether any
+// turns follow the form brief.
+async function handleProjectRun(req, res, { withHistory }) {
+  const started = Date.now();
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: 'invalid_id' });
+    if (!String(process.env.ANTHROPIC_API_KEY || '').trim()) {
+      return res.status(503).json({ error: 'not_configured', message: 'ANTHROPIC_API_KEY is not set on this deployment, so the board cannot run a project.' });
+    }
+
+    const loaded = await loadRunnableProject(id);
+    if (!loaded.project) return res.status(loaded.status).json({ error: loaded.error, ...(loaded.message ? { message: loaded.message } : {}) });
+    const project = loaded.project;
+
+    const { brief, missing } = projectBriefFromValues(project, req.body?.values);
+    if (missing.length) return res.status(400).json({ error: 'missing_inputs', message: `Fill in: ${missing.join(', ')}.` });
+
+    const history = withHistory ? normalizeProjectTurns(req.body?.turns) : { turns: [] };
+    if (history.error) return res.status(400).json({ error: 'invalid_history', message: history.error });
+    if (withHistory && !history.turns.length) return res.status(400).json({ error: 'invalid_history', message: 'There is no question to answer yet.' });
+
+    const message = await callProjectModel(project, [
+      { role: 'user', content: brief || 'Run this project.' },
+      ...history.turns
+    ]);
+    const result = projectRunResponse(message, project, started);
+    return res.status(result.status).json(result.body);
   } catch (error) {
-    const detail = String(error?.message || error);
-    console.error('Project run failed:', detail);
-    if (error instanceof Anthropic.AuthenticationError) return res.status(502).json({ error: 'auth_failed', message: "The server's Anthropic API key was rejected." });
-    if (error instanceof Anthropic.RateLimitError) return res.status(429).json({ error: 'rate_limited', message: 'Anthropic is rate limiting this key right now. Try again shortly.' });
-    if (error instanceof Anthropic.APIConnectionError) return res.status(504).json({ error: 'unreachable', message: 'Could not reach the Anthropic API.' });
-    return res.status(502).json({ error: 'project_run_failed', message: detail.slice(0, 300) });
+    return projectRunError(error, res);
   }
+}
+
+app.post('/api/projects/:id/run', requireAuth, projectRunLimiter, async (req, res) => {
+  return handleProjectRun(req, res, { withHistory: false });
+});
+
+// Follow-ups on a project that has already been run. The project's instructions
+// stay the system prompt for every turn, so the thread keeps behaving like that
+// project rather than drifting into a general chat.
+app.post('/api/projects/:id/chat', requireAuth, projectRunLimiter, async (req, res) => {
+  return handleProjectRun(req, res, { withHistory: true });
 });
 
 app.get('/api/insights/languages', requireAuth, async (req, res) => {

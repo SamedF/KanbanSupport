@@ -4935,6 +4935,30 @@ th {
 .pj-copy { font-size:10px; padding:2px 9px; }
 .pj-result-body { padding:12px; white-space:pre-wrap; word-break:break-word; max-height:480px; overflow:auto; color:var(--text,#0f172a); }
 
+/* A project thread: the first answer, then whatever was asked of it after. */
+.pj-thread { margin-top:14px; display:flex; flex-direction:column; gap:10px; }
+.pj-turn { border-radius:10px; font-size:12.5px; line-height:1.6; overflow:hidden; }
+.pj-turn-claude { border:1px solid var(--border,#e2e8f0); background:var(--surface-soft,#f8fafc); }
+.pj-turn-you { border:1px solid var(--indigo-200,#c7d2fe); background:var(--indigo-50,#eef2ff); }
+.pj-turn-who {
+  display:flex; align-items:center; gap:9px; padding:8px 12px;
+  border-bottom:1px solid var(--border,#e2e8f0);
+  font-size:11px; font-weight:700; color:var(--muted,#64748b);
+}
+.pj-turn-you .pj-turn-who { border-bottom:0; padding-bottom:2px; color:var(--indigo-700,#4338ca); }
+.pj-turn-who strong { color:var(--text,#0f172a); font-size:12px; }
+.pj-turn-who span { flex:1; }
+.pj-turn-body { padding:12px; white-space:pre-wrap; word-break:break-word; max-height:480px; overflow:auto; color:var(--text,#0f172a); }
+.pj-followup { display:flex; flex-direction:column; gap:8px; }
+.pj-followup-input {
+  width:100%; resize:vertical; min-height:52px;
+  border:1px solid var(--border,#e2e8f0); border-radius:10px;
+  padding:9px 11px; font:inherit; font-size:12.5px; line-height:1.55;
+  background:var(--surface,#fff); color:var(--text,#0f172a);
+}
+.pj-followup-input:focus { outline:none; border-color:var(--indigo-600,#4f46e5); }
+.pj-followup-actions { display:flex; gap:8px; flex-wrap:wrap; }
+
 
 /* A break that is on cooldown stays visible and greyed - hiding it would just
    raise the question of where it went. */
@@ -8753,7 +8777,12 @@ let projectsTab = 'all';
 let projectsQuery = '';
 let projectOpen = null;      // slug of the project whose form is showing
 let projectValues = {};      // slug -> { fieldKey: value }
-let projectResult = {};      // slug -> { running, text, error, usage, ms }
+// slug -> { running, error, draft, turns:[{role,content,usage,ms}] }.
+// A project is a thread, not a single answer: the form starts it and the
+// follow-ups continue it, with the project's instructions still the system
+// prompt on every turn. The transcript lives here rather than in Postgres -
+// it is a working session, not a record the board owes anyone.
+let projectThread = {};
 let projectEditorOpen = false;
 
 function showProjectsView(){
@@ -8804,18 +8833,37 @@ function projectFieldHtml(slug,field){
   </label>`;
 }
 
-function projectResultHtml(slug){
-  const r=projectResult[slug];
-  if(!r)return '';
-  if(r.running)return '<div class="pj-result pj-running"><span class="spinner"></span> Running… this can take a minute on a long job.</div>';
-  if(r.error)return `<div class="pj-result pj-error">${esc(r.error)}</div>`;
-  if(!r.text)return '';
-  const meta=[r.ms?`${(r.ms/1000).toFixed(1)}s`:'',r.usage?.outputTokens?`${r.usage.outputTokens} output tokens`:''].filter(Boolean).join(' · ');
-  return `<div class="pj-result pj-ok">
-    <div class="pj-result-head"><strong>Result</strong><span>${esc(meta)}</span>
-      <button class="btn-out pj-copy" data-pj-copy="${esc(slug)}">Copy</button></div>
-    <div class="pj-result-body">${esc(r.text)}</div>
-  </div>`;
+function projectThreadHtml(slug){
+  const t=projectThread[slug];
+  if(!t)return '';
+  const turns=t.turns||[];
+  const parts=turns.map((turn,i)=>{
+    if(turn.role==='user'){
+      return `<div class="pj-turn pj-turn-you">
+        <div class="pj-turn-who">You asked</div>
+        <div class="pj-turn-body">${esc(turn.content)}</div>
+      </div>`;
+    }
+    const meta=[turn.ms?`${(turn.ms/1000).toFixed(1)}s`:'',turn.usage?.outputTokens?`${turn.usage.outputTokens} output tokens`:''].filter(Boolean).join(' · ');
+    return `<div class="pj-turn pj-turn-claude">
+      <div class="pj-turn-who"><strong>${i===0?'Result':'Claude'}</strong><span>${esc(meta)}</span>
+        <button class="btn-out pj-copy" data-pj-copy="${esc(slug)}" data-pj-turn="${i}">Copy</button></div>
+      <div class="pj-turn-body">${esc(turn.content)}</div>
+    </div>`;
+  });
+  if(t.running)parts.push('<div class="pj-result pj-running"><span class="spinner"></span> Working… this can take a minute on a long job.</div>');
+  if(t.error)parts.push(`<div class="pj-result pj-error">${esc(t.error)}</div>`);
+  // Nothing to follow up on until the project has answered once.
+  if(turns.length&&!t.running){
+    parts.push(`<div class="pj-followup">
+      <textarea class="pj-followup-input" data-pj-draft="${esc(slug)}" rows="2" placeholder="Ask a follow-up — Ctrl+Enter to send">${esc(t.draft||'')}</textarea>
+      <div class="pj-followup-actions">
+        <button class="btn-primary" data-pj-ask="${esc(slug)}">Ask</button>
+        <button class="btn-out" data-pj-reset="${esc(slug)}">Start over</button>
+      </div>
+    </div>`);
+  }
+  return parts.length?`<div class="pj-thread">${parts.join('')}</div>`:'';
 }
 
 function projectCardHtml(p){
@@ -8836,19 +8884,23 @@ function projectCardHtml(p){
       ${p.ready?'':`<div class="pj-warn">This project cannot run until its instructions are saved.${projectsState.canEdit?' Use <strong>Edit</strong> below.':''}</div>`}
       ${fields.length?fields.map(f=>projectFieldHtml(p.slug,f)).join(''):'<p class="pj-help">This project takes no inputs.</p>'}
       <div class="pj-actions">
-        <button class="btn-primary" data-pj-run="${esc(p.slug)}"${(!p.ready||!projectsState.configured||projectResult[p.slug]?.running)?' disabled':''}>Run</button>
+        <button class="btn-primary" data-pj-run="${esc(p.slug)}"${(!p.ready||!projectsState.configured||projectThread[p.slug]?.running)?' disabled':''}>${projectThread[p.slug]?.turns?.length?'Run again':'Run'}</button>
         ${projectsState.canEdit?`<button class="btn-out" data-pj-edit="${esc(p.slug)}">Edit</button>`:''}
         <span class="pj-model">${esc(p.model||projectsState.model||'')}</span>
       </div>
-      ${projectResultHtml(p.slug)}
+      ${projectThreadHtml(p.slug)}
     </div>`:''}
   </div>`;
 }
 
+// Run starts a fresh thread. Whatever was asked before belongs to the previous
+// set of inputs, so keeping it would only make the transcript lie.
 async function runProject(slug){
   const p=projectsState.rows.find(x=>x.slug===slug);
   if(!p)return;
-  projectResult[slug]={running:true};renderProjectsView();
+  projectThread[slug]={running:true,error:'',draft:'',turns:[]};
+  renderProjectsView();
+  const t=projectThread[slug];
   try{
     const res=await fetch(`/api/projects/${p.id}/run`,{
       method:'POST',credentials:'include',
@@ -8857,13 +8909,62 @@ async function runProject(slug){
     });
     const data=await res.json();
     if(!res.ok||data.ok===false){
-      projectResult[slug]={error:data?.message||data?.error||`HTTP ${res.status}`};
+      t.error=data?.message||data?.error||`HTTP ${res.status}`;
     }else{
-      projectResult[slug]={text:data.text||'(no output)',usage:data.usage,ms:data.ms};
+      t.turns=[{role:'assistant',content:data.text||'(no output)',usage:data.usage,ms:data.ms}];
     }
   }catch(error){
-    projectResult[slug]={error:String(error?.message||error)};
+    t.error=String(error?.message||error);
   }
+  t.running=false;
+  renderProjectsView();
+}
+
+// A follow-up replays the whole thread. The server puts the project's
+// instructions back in front of it, so turn nine still answers as that project
+// rather than drifting into a general chat.
+async function askProjectFollowUp(slug){
+  const p=projectsState.rows.find(x=>x.slug===slug);
+  const t=projectThread[slug];
+  if(!p||!t||t.running)return;
+  const question=String(t.draft||'').trim();
+  if(!question)return;
+  // The question joins the transcript before the request goes out, so the
+  // thread reads correctly while the answer is still being written.
+  t.turns=[...t.turns,{role:'user',content:question}];
+  t.draft='';t.running=true;t.error='';
+  renderProjectsView();
+  try{
+    const res=await fetch(`/api/projects/${p.id}/chat`,{
+      method:'POST',credentials:'include',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({
+        values:projectValues[slug]||{},
+        turns:t.turns.map(x=>({role:x.role,content:x.content}))
+      })
+    });
+    const data=await res.json();
+    if(!res.ok||data.ok===false){
+      // Put the question back in the box rather than leaving it stranded at the
+      // end of a thread it never got an answer to - sending again would
+      // otherwise replay it twice.
+      t.turns=t.turns.slice(0,-1);
+      t.draft=question;
+      t.error=data?.message||data?.error||`HTTP ${res.status}`;
+    }else{
+      t.turns=[...t.turns,{role:'assistant',content:data.text||'(no output)',usage:data.usage,ms:data.ms}];
+    }
+  }catch(error){
+    t.turns=t.turns.slice(0,-1);
+    t.draft=question;
+    t.error=String(error?.message||error);
+  }
+  t.running=false;
+  renderProjectsView();
+}
+
+function resetProjectThread(slug){
+  delete projectThread[slug];
   renderProjectsView();
 }
 
@@ -8993,6 +9094,44 @@ async function disconnectClaude(){
   }
 }
 
+// Bound after any redraw that replaces card nodes - the full render and the
+// search box's grid-only swap both go through here, so a filtered grid keeps
+// its Run buttons and its follow-up composer.
+function bindProjectCardHandlers(host){
+  host.querySelectorAll('[data-pj-open]').forEach(b=>b.addEventListener('click',()=>{
+    const slug=b.dataset.pjOpen;
+    projectOpen=projectOpen===slug?null:slug;
+    renderProjectsView();
+  }));
+  host.querySelectorAll('[data-pj-field]').forEach(el=>el.addEventListener('input',e=>{
+    const slug=e.target.dataset.pjSlug,key=e.target.dataset.pjField;
+    projectValues[slug]=projectValues[slug]||{};
+    projectValues[slug][key]=e.target.value;
+  }));
+  host.querySelectorAll('[data-pj-run]').forEach(b=>b.addEventListener('click',()=>runProject(b.dataset.pjRun)));
+  host.querySelectorAll('[data-pj-edit]').forEach(b=>b.addEventListener('click',()=>openProjectEditor(b.dataset.pjEdit)));
+  host.querySelectorAll('[data-pj-ask]').forEach(b=>b.addEventListener('click',()=>askProjectFollowUp(b.dataset.pjAsk)));
+  host.querySelectorAll('[data-pj-reset]').forEach(b=>b.addEventListener('click',()=>resetProjectThread(b.dataset.pjReset)));
+  // Kept out of the render loop on purpose: redrawing the panel on every
+  // keystroke would take the focus out of the box being typed into.
+  host.querySelectorAll('[data-pj-draft]').forEach(el=>{
+    el.addEventListener('input',e=>{
+      const thread=projectThread[e.target.dataset.pjDraft];
+      if(thread)thread.draft=e.target.value;
+    });
+    // Ctrl/Cmd+Enter sends and plain Enter is a newline: these are prompts, and
+    // a multi-line one should not need the mouse to survive.
+    el.addEventListener('keydown',e=>{
+      if((e.ctrlKey||e.metaKey)&&e.key==='Enter'){e.preventDefault();askProjectFollowUp(e.target.dataset.pjDraft);}
+    });
+  });
+  host.querySelectorAll('[data-pj-copy]').forEach(b=>b.addEventListener('click',()=>{
+    const turns=projectThread[b.dataset.pjCopy]?.turns||[];
+    const text=turns[Number(b.dataset.pjTurn)]?.content||'';
+    navigator.clipboard?.writeText(text).then(()=>showToast('Copied','ok'),()=>showToast('Could not copy'));
+  }));
+}
+
 function renderProjectsView(){
   const host=document.getElementById('projects-body');
   if(!host)return;
@@ -9037,22 +9176,7 @@ function renderProjectsView(){
   host.querySelector('#pj-claude-sync')?.addEventListener('click',syncClaudeProjects);
   host.querySelector('#pj-claude-disconnect')?.addEventListener('click',disconnectClaude);
   host.querySelector('#pj-new')?.addEventListener('click',()=>openProjectEditor(null));
-  host.querySelectorAll('[data-pj-open]').forEach(b=>b.addEventListener('click',()=>{
-    const slug=b.dataset.pjOpen;
-    projectOpen=projectOpen===slug?null:slug;
-    renderProjectsView();
-  }));
-  host.querySelectorAll('[data-pj-field]').forEach(el=>el.addEventListener('input',e=>{
-    const slug=e.target.dataset.pjSlug,key=e.target.dataset.pjField;
-    projectValues[slug]=projectValues[slug]||{};
-    projectValues[slug][key]=e.target.value;
-  }));
-  host.querySelectorAll('[data-pj-run]').forEach(b=>b.addEventListener('click',()=>runProject(b.dataset.pjRun)));
-  host.querySelectorAll('[data-pj-edit]').forEach(b=>b.addEventListener('click',()=>openProjectEditor(b.dataset.pjEdit)));
-  host.querySelectorAll('[data-pj-copy]').forEach(b=>b.addEventListener('click',()=>{
-    const text=projectResult[b.dataset.pjCopy]?.text||'';
-    navigator.clipboard?.writeText(text).then(()=>showToast('Copied','ok'),()=>showToast('Could not copy'));
-  }));
+  bindProjectCardHandlers(host);
   // Re-rendering the panel on every keystroke would drop focus, so the search
   // box only redraws the grid beneath it.
   const search=host.querySelector('#pj-search');
@@ -9064,9 +9188,7 @@ function renderProjectsView(){
     const replacement=document.createElement('div');
     replacement.innerHTML=filtered.length?`<div class="pj-grid">${filtered.map(projectCardHtml).join('')}</div>`:`<div class="pj-empty">Nothing matches that search.</div>`;
     gridEl.replaceWith(replacement.firstElementChild);
-    host.querySelectorAll('[data-pj-open]').forEach(b=>b.addEventListener('click',()=>{
-      projectOpen=projectOpen===b.dataset.pjOpen?null:b.dataset.pjOpen;renderProjectsView();
-    }));
+    bindProjectCardHandlers(host);
   });
 }
 
