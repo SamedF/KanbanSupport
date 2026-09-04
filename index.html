@@ -4760,8 +4760,9 @@ th {
   border: 1px solid var(--border-strong, #cbd5e1);
   box-shadow: 0 12px 34px rgba(15, 23, 42, .2);
   transition: bottom .18s ease; max-width: calc(100vw - 32px); flex-wrap: wrap;
+  pointer-events: none;
 }
-.selection-bar.show { bottom: 22px; }
+.selection-bar.show { bottom: 22px; pointer-events: auto; }
 .sel-count { font-size: 12px; font-weight: 800; color: var(--indigo-700, #4338ca); white-space: nowrap; }
 .sel-input { font-size: 12px; padding: 4px 8px; border: 1px solid var(--border, #e2e8f0); border-radius: 8px; background: var(--surface, #fff); color: var(--text, #0f172a); }
 .sel-spacer { flex: 1; min-width: 4px; }
@@ -8116,7 +8117,7 @@ document.getElementById('emt-submit').addEventListener('click',async()=>{
 });
 
 //  View switching
-function hidePrimaryViews(){stopKpiAutoRefresh();document.getElementById('main-board').style.display='none';document.getElementById('spam-view').classList.remove('active');document.getElementById('archive-view').classList.remove('active');document.getElementById('companies-view').style.display='none';document.getElementById('kpi-view').style.display='none';document.getElementById('insights-view').style.display='none';document.getElementById('projects-view').style.display='none';document.getElementById('qt-seize-view').style.display='none';document.getElementById('assignlog-view').style.display='none';document.getElementById('qt-detect-view').style.display='none';}
+function hidePrimaryViews(){stopKpiAutoRefresh();document.getElementById('main-board').style.display='none';document.getElementById('spam-view').classList.remove('active');document.getElementById('archive-view').classList.remove('active');document.getElementById('companies-view').style.display='none';document.getElementById('kpi-view').style.display='none';document.getElementById('insights-view').style.display='none';document.getElementById('projects-view').style.display='none';document.getElementById('qt-seize-view').style.display='none';document.getElementById('assignlog-view').style.display='none';document.getElementById('qt-detect-view').style.display='none';if(viewMode!=='board'){clearSelection();renderSelectionBar();}}
 function showBoardView(){viewMode='board';setBoardChromeVisible(true);hidePrimaryViews();document.getElementById('main-board').style.display='flex';setSideNavActive('board');saveLastWorkspaceSession('board');renderBoard();}
 function showSpamView(){viewMode='spam';setBoardChromeVisible(true);hidePrimaryViews();document.getElementById('spam-view').classList.add('active');setSideNavActive('spam');saveLastWorkspaceSession('spam');renderSpamView();}
 function showArchiveView(){viewMode='archive';setBoardChromeVisible(true);hidePrimaryViews();document.getElementById('archive-view').classList.add('active');setSideNavActive('archive');saveLastWorkspaceSession('archive');renderArchiveView();}
@@ -11912,9 +11913,25 @@ function renderColumnHeader(col,count,headerEl){
 
 const selectedTickets = new Set();
 let lastSelectedId = null;
+let visibleBoardTicketIds = new Set();
 
 function isSelected(id){return selectedTickets.has(id);}
-function selectionList(){return [...selectedTickets].filter(id=>allTickets.some(t=>t.id===id));}
+function selectionList(){
+  const visibleIds = viewMode==='board' ? visibleBoardTicketIds : null;
+  return [...selectedTickets].filter(id=>allTickets.some(t=>t.id===id)&&(!visibleIds||visibleIds.has(id)));
+}
+function pruneSelectionToVisible(){
+  if(viewMode!=='board'){
+    if(selectedTickets.size)clearSelection();
+    return;
+  }
+  let changed=false;
+  selectedTickets.forEach(id=>{
+    if(!visibleBoardTicketIds.has(id)){selectedTickets.delete(id);changed=true;}
+  });
+  if(lastSelectedId&&!visibleBoardTicketIds.has(lastSelectedId)){lastSelectedId=null;changed=true;}
+  return changed;
+}
 
 // Shift-click selects the run between the last click and this one, in the order
 // the column is actually displayed rather than the order allTickets happens to
@@ -11936,7 +11953,10 @@ function toggleTicketSelection(id,{range=false}={}){
 }
 function clearSelection(){selectedTickets.clear();lastSelectedId=null;}
 function selectAllVisible(){
+  clearSelection();
   document.querySelectorAll('.card[data-id]').forEach(el=>selectedTickets.add(el.dataset.id));
+  const ids=[...selectedTickets];
+  lastSelectedId=ids.length?ids[ids.length-1]:null;
 }
 
 /* --- Undo -----------------------------------------------------------------
@@ -12075,6 +12095,11 @@ async function bulkArchive(){
 function renderSelectionBar(){
   const bar=document.getElementById('selection-bar');
   if(!bar)return;
+  if(viewMode!=='board'){
+    bar.classList.remove('show');bar.innerHTML='';
+    return;
+  }
+  pruneSelectionToVisible();
   const ids=selectionList();
   if(!ids.length){bar.classList.remove('show');bar.innerHTML='';return;}
   const stageOpts=STAGES.map(c=>`<option value="${c}">${esc(COL_NAMES[c])}</option>`).join('');
@@ -12335,6 +12360,8 @@ function renderBoard(){
   document.getElementById('ticket-number-filter').value=activeTicketNumber;
   const agentFilter=enforcedAgentFilter();
   const visible=allTickets.filter(t=>ticketPassesBoardFilters(t,agentFilter));
+  visibleBoardTicketIds=new Set(visible.map(t=>t.id));
+  pruneSelectionToVisible();
 
   const laneBoard=document.getElementById('lane-board');
   const flatBoard=document.getElementById('main-board');
