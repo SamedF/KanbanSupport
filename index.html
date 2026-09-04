@@ -5949,14 +5949,18 @@ th {
 <!--  Jira link modal  -->
 <div class="modal-bg" id="jira-modal">
   <div class="modal" style="max-width:380px;">
-    <div class="modal-head"><h2> Link to Jira</h2><button class="modal-close-x" data-close="jira-modal"></button></div>
+    <div class="modal-head"><h2 id="jira-modal-title"> Link to Jira</h2><button class="modal-close-x" data-close="jira-modal"></button></div>
     <div style="padding:16px 18px;display:flex;flex-direction:column;gap:12px;">
       <div style="font-size:12px;color:var(--slate-500);line-height:1.4;" id="jira-ticket-title"></div>
+      <!-- What this ticket is linked to RIGHT NOW, and how to change it. Filled
+           by openJiraModal and hidden when there is no link: a wrong link is
+           only obvious next to the key it should have been. -->
+      <div id="jira-current" style="display:none;font-size:11px;line-height:1.45;color:var(--slate-700);background:var(--legacy-f8fbff);border:1px solid var(--blue-100);border-radius:10px;padding:10px;"></div>
       <div id="jira-connection-status" style="font-size:11px;color:var(--slate-500);background:var(--slate-50);border:1px solid var(--slate-200);border-radius:10px;padding:10px;">Checking Jira connection...</div>
       <div class="form-field">
-        <label>Jira ticket number</label>
+        <label id="jira-input-label">Jira ticket number</label>
         <input id="jira-input" class="form-input" type="text" placeholder="e.g. QT-1234" style="font-size:15px;font-weight:700;letter-spacing:.5px;text-transform:uppercase;"/>
-        <div style="font-size:10px;color:var(--slate-400);margin-top:3px;">Enter the issue key from your Jira project</div>
+        <div style="font-size:10px;color:var(--slate-400);margin-top:3px;" id="jira-input-hint">Enter the issue key from your Jira project</div>
       </div>
     </div>
     <div class="modal-actions">
@@ -7850,15 +7854,35 @@ document.getElementById('dup-unmark').addEventListener('click',async()=>{
 });
 document.getElementById('dup-input').addEventListener('keydown',e=>{if(e.key==='Enter')document.getElementById('dup-save').click();});
 
-//  Jira modal
+/*  Jira modal
+
+   Opens in one of two modes, because linking a ticket for the first time and
+   fixing a link that went to the wrong issue are different jobs. Everything
+   the second one needs used to be missing: the modal said "Link to Jira" and
+   its button said "Link" whether or not a link already existed, and nothing on
+   screen said which issue the ticket was on - so an agent who had just linked
+   QS-8385 by mistake had no way to see it, let alone re-point it. Linked mode
+   names the current key, says what will happen, and labels the button for
+   what it does: replace. */
 function openJiraModal(id){
   jiraTicketId=id;
   const ticket=allTickets.find(t=>t.id===id);
   const current=canonicalJiraKey(ticketJira[id])||'';
   if(current&&ticketJira[id]!==current)ticketJira[id]=current;
+  const linked=!!current;
   document.getElementById('jira-ticket-title').textContent=ticket?.email?.subject||'';
+  document.getElementById('jira-modal-title').textContent=linked?' Change Jira link':' Link to Jira';
+  const currentEl=document.getElementById('jira-current');
+  currentEl.style.display=linked?'':'none';
+  currentEl.innerHTML=linked
+    ?`<div>Linked to <strong style="color:var(--blue-700);font-size:13px;letter-spacing:.4px;">${esc(current)}</strong></div>
+      <div style="margin-top:5px;color:var(--slate-500);">Wrong issue? Put the right key in the box below and press <strong>Update link</strong>. <strong>Remove link</strong> takes it off this ticket entirely.</div>`
+    :'';
   const input=document.getElementById('jira-input');
   input.value=current;
+  document.getElementById('jira-input-label').textContent=linked?'Link it to this Jira ticket instead':'Jira ticket number';
+  document.getElementById('jira-input-hint').textContent=linked?'Replaces the key above - the link moves, the ticket stays put':'Enter the issue key from your Jira project';
+  document.getElementById('jira-save').textContent=linked?'Update link':' Link';
   const unlinkBtn=document.getElementById('jira-unlink');
   const openBtn=document.getElementById('jira-open-link');
   unlinkBtn.style.display=current?'':'none';
@@ -7866,7 +7890,10 @@ function openJiraModal(id){
   openBtn.onclick=()=>{if(current&&JIRA_URL)window.open(JIRA_URL+current,'_blank');};
   renderJiraConnectionStatus();
   document.getElementById('jira-modal').classList.add('open');
-  setTimeout(()=>input.focus(),100);
+  // Pre-selected rather than cleared when a link exists: the key stays readable
+  // and copyable, and typing still replaces it in one go. Clearing the box
+  // would make "I only came to look" end in an error toast.
+  setTimeout(()=>{input.focus();if(linked)input.select();},100);
 }
 /* Undo for a Jira link, so linking the wrong issue is one click to put back
    rather than a hunt through the modal for Remove link - which anyway could
@@ -11617,7 +11644,11 @@ function makeCard(ticket,isNew=false){
   const jiraStateHtml=jiraError
     ?`<div style="margin-top:4px;color:var(--amber-700);">Jira details unavailable</div><div style="margin-top:3px;color:var(--amber-800);white-space:normal;">${esc(jiraError.slice(0,180))}</div>`
     :(jiraInfo?.status?`<span style="font-weight:700;color:var(--slate-900);">${esc(jiraInfo.status)}</span>`:`<span style="color:var(--slate-400);">Loading...</span>`);
-  const jiraDetailsHtml=jiraKey?`<div style="margin-top:6px;padding:7px 8px;border:1px solid var(--blue-100);border-radius:10px;background:var(--legacy-f8fbff);font-size:10px;line-height:1.35;color:var(--slate-700);"><div style="display:flex;justify-content:space-between;gap:8px;align-items:center;"><strong style="color:var(--blue-700);">Jira</strong>${jiraStateHtml}</div>${jiraError?'':`<div style="margin-top:4px;">Assignee: <strong>${esc(jiraInfo?.assignee||'Unknown')}</strong></div><div>Reporter: <strong>${esc(jiraInfo?.reporter||'Unknown')}</strong></div><div style="margin-top:4px;">QT links: ${jiraLinkedHtml}</div><div style="margin-top:4px;">Comments:${jiraCommentHtml}</div>`}</div>`:'';
+  // Outside the jiraError branch below on purpose: a key typed wrong is one of
+  // the reasons Jira cannot return any details, so "Change Jira link" has to be
+  // there in exactly the state where the panel has nothing else to show.
+  const jiraEditRowHtml=`<div style="margin-top:6px;display:flex;justify-content:flex-end;"><button class="btn-out" data-jira-edit="${id}" title="Link this ticket to a different Jira issue" style="font-size:10px;padding:2px 8px;">Change Jira link</button></div>`;
+  const jiraDetailsHtml=jiraKey?`<div style="margin-top:6px;padding:7px 8px;border:1px solid var(--blue-100);border-radius:10px;background:var(--legacy-f8fbff);font-size:10px;line-height:1.35;color:var(--slate-700);"><div style="display:flex;justify-content:space-between;gap:8px;align-items:center;"><strong style="color:var(--blue-700);">Jira</strong>${jiraStateHtml}</div>${jiraError?'':`<div style="margin-top:4px;">Assignee: <strong>${esc(jiraInfo?.assignee||'Unknown')}</strong></div><div>Reporter: <strong>${esc(jiraInfo?.reporter||'Unknown')}</strong></div><div style="margin-top:4px;">QT links: ${jiraLinkedHtml}</div><div style="margin-top:4px;">Comments:${jiraCommentHtml}</div>`}${jiraEditRowHtml}</div>`:'';
   const hsTicketId=ticketHubspotId[id]||'';
   const inFlight=hubspotTicketSyncInFlight.has(id);
   if(inFlight){
@@ -11776,6 +11807,7 @@ function makeCard(ticket,isNew=false){
     applyTicketAgentSelection(id,agent,normalizeAgentCode(btn.dataset.agentPick));
   }));
     div.querySelector('[data-cat]').addEventListener('change',e=>{const newCat=e.target.value;ticketCategory[id]=newCat;if(newCat==='Spam'){const spamEmail=ticketClientEmail[id]||email.sender?.toLowerCase();if(spamEmail&&!isQuintaSender(spamEmail)){const rc=recordSpamSender(spamEmail);showToast(rc>1?` Spam recorded  ${rc} tickets marked`:' Spam sender recorded','spam-t');}}saveState();renderBoard();updateSpamBadge();});
+  div.querySelector('[data-jira-edit]')?.addEventListener('click',ev=>{ev.preventDefault();ev.stopPropagation();openJiraModal(id);});
   div.querySelector('[data-jira-open]').addEventListener('click',ev=>{ev.preventDefault();ev.stopPropagation();if(jiraKey&&JIRA_URL){window.open(`${JIRA_URL}${encodeURIComponent(jiraKey)}`,'_blank');return;}openJiraModal(id);});
   div.querySelector('[data-hs-open]')?.addEventListener('click',ev=>{ev.preventDefault();ev.stopPropagation();const hsId=ticketHubspotId[id];if(!hsId){showToast('Ticket not synced to HubSpot yet');return;}window.open(`https://app.hubspot.com/contacts/25445053/record/0-5/${encodeURIComponent(hsId)}`,'_blank');});
   div.querySelector('[data-hs-retry]')?.addEventListener('click',async ev=>{ev.preventDefault();ev.stopPropagation();const rs=await syncTicketToHubspot(ticket);if(rs?.ok&&ticketHubspotId[id]){window.open(`https://app.hubspot.com/contacts/25445053/record/0-5/${encodeURIComponent(ticketHubspotId[id])}`,'_blank');showToast('Ticket synced to HubSpot','ok');}else{const reason=rs?.reason||'unknown';if(reason==='missing_company_mapping')showToast('Cannot sync yet: this ticket has no mapped HubSpot company.');else if(reason==='missing_client_email')showToast('Cannot sync yet: no client email found for this ticket.');else if(reason==='api_error')showToast(`HubSpot sync failed: ${rs?.error||'api error'}`);else if(reason==='network_error')showToast(`HubSpot sync network error: ${rs?.error||'unknown'}`);else showToast('Unable to sync this ticket yet.');}renderBoard();});
