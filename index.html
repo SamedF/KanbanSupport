@@ -7868,6 +7868,33 @@ function openJiraModal(id){
   document.getElementById('jira-modal').classList.add('open');
   setTimeout(()=>input.focus(),100);
 }
+/* Undo for a Jira link, so linking the wrong issue is one click to put back
+   rather than a hunt through the modal for Remove link - which anyway could
+   only clear the link, never restore whichever key was there before.
+
+   It cannot be the usual "write the old value back into the local map and let
+   saveState carry it" restore: ticketJira is server-owned, and server.js drops
+   it from every board snapshot (keepServerOwned('ticketJira')) because a
+   snapshot cannot tell "this ticket has no link" from "my tab has not heard
+   about the link yet". So the undo goes back through the same endpoints the
+   link came from. previousKey empty means there was no link to go back to and
+   the undo is an unlink. */
+function jiraLinkUndo(id,previousKey){
+  return async()=>{
+    const out=previousKey?await apiLinkJiraTicket(id,previousKey):await apiUnlinkJiraTicket(id);
+    if(!out?.ok)throw new Error(out?.error||'Jira would not take the change back');
+    const stale=canonicalJiraKey(ticketJira[id]);
+    if(stale)delete jiraIssueCache[stale];
+    if(previousKey){
+      ticketJira[id]=canonicalJiraKey(out.jiraKey||previousKey)||previousKey;
+      if(out.issue?.key)jiraIssueCache[String(out.issue.key).trim().toUpperCase()]=out.issue;
+    }else{
+      delete ticketJira[id];
+    }
+    updateJiraBadge();
+    await refreshLinkedJiraIssues(true);
+  };
+}
 document.getElementById('jira-save').addEventListener('click',async()=>{
   if(!jiraTicketId)return;
   const raw=normalizeJiraInput(document.getElementById('jira-input').value);
@@ -7876,17 +7903,32 @@ document.getElementById('jira-save').addEventListener('click',async()=>{
     showToast('Use a Jira ticket like QS-8385 or paste a Jira ticket URL.');
     return;
   }
-  const out=await apiLinkJiraTicket(jiraTicketId,normalized);
+  const linkedId=jiraTicketId;
+  const previousKey=canonicalJiraKey(ticketJira[linkedId])||'';
+  if(previousKey===normalized){
+    document.getElementById('jira-modal').classList.remove('open');
+    showToast('Already linked to '+normalized);
+    return;
+  }
+  const out=await apiLinkJiraTicket(linkedId,normalized);
   if(!out?.ok){
     showToast(`Jira link failed: ${out?.error||'unknown error'}`);
     return;
   }
-  ticketJira[jiraTicketId]=canonicalJiraKey(out.jiraKey||normalized)||normalized;
+  ticketJira[linkedId]=canonicalJiraKey(out.jiraKey||normalized)||normalized;
   if(out.issue?.key)jiraIssueCache[out.issue.key]=out.issue;
+  pushUndo(
+    previousKey
+      ? `Relinked ${ticketDisplayNumber(linkedId)} to ${ticketJira[linkedId]} (was ${previousKey})`
+      : `Linked ${ticketDisplayNumber(linkedId)} to ${ticketJira[linkedId]}`,
+    jiraLinkUndo(linkedId,previousKey));
   saveState('jira_linked');
+  // Closed before Jira is asked for the issue's details, not after: the link is
+  // already made either way, and leaving a dimmed modal up for the round-trip
+  // only puts it between the reader and the undo toast that just went up.
+  document.getElementById('jira-modal').classList.remove('open');
   await refreshLinkedJiraIssues(true);
   renderBoard();updateJiraBadge();
-  document.getElementById('jira-modal').classList.remove('open');
   if(out.jiraLookupError){
     showToast(`Linked to ${(out.jiraKey||raw)} locally. Jira details could not be read yet.`,'ok');
   }else{
@@ -7895,14 +7937,19 @@ document.getElementById('jira-save').addEventListener('click',async()=>{
 });
 document.getElementById('jira-unlink').addEventListener('click',async()=>{
   if(!jiraTicketId)return;
-  const out=await apiUnlinkJiraTicket(jiraTicketId);
+  const unlinkedId=jiraTicketId;
+  const existing=ticketJira[unlinkedId];
+  const previousKey=canonicalJiraKey(existing)||'';
+  const out=await apiUnlinkJiraTicket(unlinkedId);
   if(!out?.ok){
     showToast(`Jira unlink failed: ${out?.error||'unknown error'}`);
     return;
   }
-  const existing=ticketJira[jiraTicketId];
   if(existing)delete jiraIssueCache[String(existing).trim().toUpperCase()];
-  delete ticketJira[jiraTicketId];
+  delete ticketJira[unlinkedId];
+  // Removing the right ticket's link by accident is the same mistake mirrored,
+  // and just as unrecoverable without the key in front of you.
+  if(previousKey)pushUndo(`Unlinked ${ticketDisplayNumber(unlinkedId)} from ${previousKey}`,jiraLinkUndo(unlinkedId,previousKey));
   saveState('jira_unlinked');renderBoard();updateJiraBadge();
   document.getElementById('jira-modal').classList.remove('open');
   showToast('Jira link removed');
@@ -12272,7 +12319,13 @@ async function performUndo(){
   const entry=undoStack.pop();
   if(!entry)return showToast('Nothing to undo');
   try{
-    entry.restore();
+    // Awaited: most restores are a synchronous write into the local maps that
+    // the saveState below carries, but a server-owned field cannot be undone
+    // that way and has to go back through its own endpoint - see
+    // jiraLinkUndo(). await on a non-promise is a no-op, so the sync ones are
+    // unaffected, and an async restore's failure lands in the catch instead of
+    // becoming an unhandled rejection behind a "Undone" toast that lied.
+    await entry.restore();
     renderActiveView();
     await saveState('undo');
     showToast('Undone: '+entry.label,'ok');
