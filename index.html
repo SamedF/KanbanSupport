@@ -4837,72 +4837,6 @@ th {
 .emc-suggest-current { font-size: 10px; color: var(--muted, #64748b); font-style: italic; }
 
 
-/* ===== Quinta properties panel ============================================ */
-.q-head { display:flex; align-items:flex-start; justify-content:space-between; gap:16px; flex-wrap:wrap; margin-bottom:14px; }
-.q-title { font-family:Caladea,serif; font-size:26px; color:var(--text,#0f172a); }
-.q-subtitle { font-size:11px; color:var(--muted,#64748b); margin-top:3px; }
-.q-controls { display:flex; align-items:center; gap:10px; }
-.q-body { padding-bottom:30px; }
-.q-lead { font-size:12px; color:var(--text-soft,#334155); margin-bottom:12px; line-height:1.5; }
-.q-loading, .q-empty { padding:34px 10px; text-align:center; color:var(--muted,#64748b); font-size:13px; line-height:1.6; }
-.q-error { padding:14px; border-radius:10px; font-size:13px; background:var(--red-50,#fef2f2); border:1px solid var(--red-200,#fecaca); color:var(--red-700,#b91c1c); }
-.q-muted { color:var(--muted,#64748b); font-style:italic; }
-.q-setup {
-  border:1px solid var(--amber-300,#fcd34d); background:var(--amber-50,#fffbeb);
-  color:var(--amber-800,#92400e); border-radius:12px; padding:16px 18px; font-size:13px; line-height:1.6; max-width:760px;
-}
-.q-setup code { background:var(--surface,#fff); border:1px solid var(--amber-300,#fcd34d); border-radius:5px; padding:1px 6px; font-size:12px; }
-.q-setup p { margin:8px 0 0; }
-.q-note { font-size:11.5px; opacity:.85; }
-.q-card { border:1px solid var(--border,#e2e8f0); border-radius:12px; background:var(--surface,#fff); padding:13px 15px; margin-bottom:10px; }
-.q-card-head { display:flex; align-items:flex-start; justify-content:space-between; gap:12px; }
-.q-name { font-size:14px; font-weight:700; color:var(--text,#0f172a); }
-.q-sub { font-size:11px; color:var(--muted,#64748b); margin-top:2px; }
-.q-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:10px 18px; margin-top:11px; }
-.q-label { display:block; font-size:9.5px; font-weight:800; text-transform:uppercase; letter-spacing:.05em; color:var(--muted,#64748b); margin-bottom:3px; }
-.q-pill { display:inline-block; margin:0 4px 4px 0; padding:1px 8px; border-radius:999px; font-size:10px; font-weight:600;
-  background:var(--indigo-50,#eef2ff); color:var(--indigo-800,#3730a3); border:1px solid var(--indigo-200,#c7d2fe); }
-.q-raw { margin-top:11px; padding:10px; border-radius:8px; background:var(--surface-muted,#f1f5f9); font-size:11px;
-  max-height:340px; overflow:auto; white-space:pre-wrap; word-break:break-word; color:var(--text-soft,#334155); }
-
-
-/* ===== Quinta per-agent connection ======================================== */
-.q-settings {
-  border:1px solid var(--border-strong,#cbd5e1); border-radius:12px;
-  background:var(--surface,#fff); padding:16px 18px; margin-bottom:16px; max-width:720px;
-}
-.q-settings-head { display:flex; align-items:center; gap:10px; margin-bottom:6px; font-size:14px; color:var(--text,#0f172a); }
-.q-hint-chip {
-  font-size:10px; font-weight:700; padding:2px 8px; border-radius:999px;
-  background:var(--emerald-50,#ecfdf5); color:var(--emerald-700,#047857); border:1px solid var(--emerald-200,#a7f3d0);
-}
-.q-field { display:block; margin:12px 0; }
-.q-field > span { display:block; font-size:11.5px; font-weight:600; color:var(--text-soft,#334155); margin-bottom:5px; }
-.q-field > span em { font-weight:400; font-style:normal; color:var(--muted,#64748b); }
-.q-field code { background:var(--surface-muted,#f1f5f9); border-radius:4px; padding:0 4px; font-size:11px; }
-.q-field .form-input { width:100%; }
-.q-settings-actions { display:flex; gap:9px; align-items:center; margin-top:14px; flex-wrap:wrap; }
-.q-test { margin-top:12px; padding:10px 12px; border-radius:9px; font-size:12px; line-height:1.5; }
-.q-test-ok { background:var(--emerald-50,#ecfdf5); border:1px solid var(--emerald-200,#a7f3d0); color:var(--emerald-700,#047857); }
-.q-test-bad { background:var(--red-50,#fef2f2); border:1px solid var(--red-200,#fecaca); color:var(--red-700,#b91c1c); }
-
-
-/* ===== Quinta: server endpoint field ====================================== */
-.q-field-admin {
-  border:1px dashed var(--border-strong,#cbd5e1); border-radius:10px;
-  padding:11px 12px; background:var(--surface-soft,#f8fafc);
-}
-.q-field-foot {
-  display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap;
-  margin-top:6px; font-size:10.5px; color:var(--muted,#64748b); font-weight:400;
-}
-.q-inline-btn { font-size:10.5px; padding:3px 10px; flex:0 0 auto; }
-.q-note-warn {
-  border:1px solid var(--amber-300,#fcd34d); background:var(--amber-50,#fffbeb);
-  color:var(--amber-800,#92400e); border-radius:9px; padding:9px 11px;
-}
-
-
 /* ===== Projects ============================================================ */
 .pj-head { display:flex; align-items:flex-start; justify-content:space-between; gap:16px; flex-wrap:wrap; margin-bottom:14px; }
 .pj-title { font-family:Caladea,serif; font-size:26px; color:var(--text,#0f172a); }
@@ -5022,6 +4956,127 @@ th {
 .emt-body { padding: 4px 11px 11px; font-size: 12.5px; line-height: 1.55; overflow-x: auto; }
 .emt-body img { max-width: 100%; height: auto; }
 
+
+/* ===== Feedback, as a bubble in the corner ================================ */
+.fb-launcher {
+  position: fixed; right: 22px; bottom: 22px; z-index: 3200;
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 10px 16px 10px 13px; border-radius: 999px;
+  border: 1px solid var(--indigo-600, #4f46e5);
+  background: var(--indigo-600, #4f46e5); color: #fff;
+  font-size: 13px; font-weight: 700; cursor: pointer;
+  box-shadow: 0 8px 22px rgba(79, 70, 229, .34);
+  transition: transform .14s ease, box-shadow .14s ease;
+}
+.fb-launcher:hover { transform: translateY(-1px); box-shadow: 0 12px 28px rgba(79, 70, 229, .42); }
+.fb-launcher.active { transform: translateY(0) scale(.94); opacity: .92; }
+.fb-launcher-icon { font-size: 15px; line-height: 1; }
+
+.fb-chat {
+  position: fixed; right: 22px; bottom: 80px; z-index: 3300;
+  width: min(370px, calc(100vw - 32px));
+  display: flex; flex-direction: column;
+  background: var(--surface, #fff);
+  border: 1px solid var(--border-strong, #cbd5e1); border-radius: 16px;
+  box-shadow: 0 20px 48px rgba(15, 23, 42, .26);
+  overflow: hidden;
+  /* Closed by default, and animated out rather than simply hidden so it reads
+     as folding back into the bubble it came from. */
+  opacity: 0; visibility: hidden; transform: translateY(12px) scale(.97);
+  transform-origin: bottom right;
+  transition: opacity .16s ease, transform .16s ease, visibility .16s;
+}
+.fb-chat.open { opacity: 1; visibility: visible; transform: translateY(0) scale(1); }
+
+.fb-chat-head {
+  display: flex; align-items: center; gap: 9px;
+  padding: 11px 12px 11px 15px;
+  background: var(--indigo-600, #4f46e5); color: #fff;
+}
+.fb-chat-title { font-size: 13.5px; font-weight: 800; }
+.fb-chat-sub { font-size: 10.5px; opacity: .85; margin-top: 1px; }
+.fb-chat-head > div:first-child { flex: 1; min-width: 0; }
+.fb-test-btn {
+  font-size: 10px; padding: 3px 9px;
+  background: rgba(255, 255, 255, .14); border-color: rgba(255, 255, 255, .4); color: #fff;
+}
+.fb-test-btn:hover { background: rgba(255, 255, 255, .24); }
+.fb-chat-close {
+  border: 0; background: transparent; color: rgba(255, 255, 255, .8);
+  font-size: 21px; line-height: 1; cursor: pointer; padding: 0 2px;
+}
+.fb-chat-close:hover { color: #fff; }
+
+.fb-log {
+  padding: 13px; display: flex; flex-direction: column; gap: 8px;
+  max-height: 44vh; min-height: 96px; overflow-y: auto;
+  background: var(--surface-soft, #f8fafc);
+}
+.fb-msg {
+  max-width: 86%; padding: 8px 11px; border-radius: 13px;
+  font-size: 12.5px; line-height: 1.5; white-space: pre-wrap; word-break: break-word;
+}
+.fb-bot {
+  align-self: flex-start; border-bottom-left-radius: 4px;
+  background: var(--surface, #fff); border: 1px solid var(--border, #e2e8f0); color: var(--text, #0f172a);
+}
+.fb-me {
+  align-self: flex-end; border-bottom-right-radius: 4px;
+  background: var(--indigo-600, #4f46e5); color: #fff;
+}
+/* The outcome is coloured, because "sent" and "not sent" must not look alike. */
+.fb-bot.fb-ok { background: var(--emerald-50, #ecfdf5); border-color: var(--emerald-200, #a7f3d0); color: var(--emerald-700, #047857); }
+.fb-bot.fb-warn { background: var(--amber-50, #fffbeb); border-color: var(--amber-300, #fcd34d); color: var(--amber-800, #92400e); }
+.fb-bot.fb-bad { background: var(--red-50, #fef2f2); border-color: var(--red-200, #fecaca); color: var(--red-700, #b91c1c); }
+
+.fb-typing { display: flex; gap: 4px; align-items: center; padding: 11px; }
+.fb-typing span {
+  width: 6px; height: 6px; border-radius: 50%; background: var(--muted-light, #94a3b8);
+  animation: fb-blink 1.1s infinite ease-in-out;
+}
+.fb-typing span:nth-child(2) { animation-delay: .18s; }
+.fb-typing span:nth-child(3) { animation-delay: .36s; }
+@keyframes fb-blink { 0%, 80%, 100% { opacity: .25; } 40% { opacity: 1; } }
+
+.fb-cats { display: flex; gap: 6px; padding: 9px 13px 0; flex-wrap: wrap; }
+.fb-cat {
+  font-size: 11px; font-weight: 600; padding: 3px 11px; border-radius: 999px;
+  border: 1px solid var(--border, #e2e8f0); background: var(--surface, #fff);
+  color: var(--muted, #64748b); cursor: pointer;
+}
+.fb-cat:hover { border-color: var(--border-strong, #cbd5e1); color: var(--text, #0f172a); }
+.fb-cat.active { background: var(--indigo-50, #eef2ff); border-color: var(--indigo-300, #a5b4fc); color: var(--indigo-800, #3730a3); }
+
+.fb-compose { display: flex; align-items: flex-end; gap: 8px; padding: 9px 13px; }
+.fb-textarea {
+  flex: 1; resize: none; min-height: 40px; max-height: 120px;
+  padding: 9px 11px; font: inherit; font-size: 12.5px; line-height: 1.45;
+  border: 1px solid var(--border, #e2e8f0); border-radius: 11px;
+  background: var(--surface, #fff); color: var(--text, #0f172a);
+}
+.fb-textarea:focus { outline: none; border-color: var(--indigo-400, #818cf8); }
+.fb-send {
+  flex: 0 0 auto; width: 36px; height: 36px; border-radius: 50%;
+  border: 0; background: var(--indigo-600, #4f46e5); color: #fff;
+  font-size: 14px; cursor: pointer; line-height: 1;
+}
+.fb-send:hover { background: var(--indigo-700, #4338ca); }
+.fb-send:disabled { opacity: .5; cursor: not-allowed; }
+
+.fb-foot {
+  display: flex; align-items: center; gap: 8px;
+  padding: 0 13px 11px; font-size: 10px; color: var(--muted, #64748b);
+}
+.fb-count { flex: 0 0 auto; }
+.fb-count.over { color: var(--red-600, #dc2626); font-weight: 700; }
+.fb-context { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+@media (max-width: 520px) {
+  .fb-chat { right: 12px; left: 12px; bottom: 74px; width: auto; }
+  .fb-launcher { right: 12px; bottom: 12px; }
+  .fb-launcher-label { display: none; }
+}
+
 </style>
 </head>
 <body>
@@ -5048,7 +5103,7 @@ th {
 <a class="audit-board-btn" href="/audit/tickets" title="Which tickets each Support agent and each CS updated, and what they changed">
   Audit Log
 </a>
-<button class="feedback-btn" id="feedback-btn" type="button" title="Report a problem with the board, or suggest something">Feedback</button>
+
     <div class="account-menu">
       <button class="account-btn" id="account-btn">Account </button>
      <div class="account-panel" id="account-panel">
@@ -5120,7 +5175,6 @@ th {
       <div class="crm-nav-section" aria-label="QT-Tools">
         <div class="crm-nav-section-title">QT-Tools</div>
         <button class="crm-nav-btn" id="projects-view-btn"> Projects</button>
-        <button class="crm-nav-btn" id="quinta-view-btn"> Quinta Hotels</button>
         <button class="crm-nav-btn" id="qt-seize-view-btn"> QT Seize</button>
         <!-- Admin only: hidden by syncRoleRestrictedControls, and the endpoint
              behind it is requireAdmin, so hiding the button is presentation
@@ -5303,9 +5357,6 @@ th {
     <button class="btn-primary" id="pj-e-save">Save</button>
   </div>
 </div></div>
-<div id="quinta-view" style="display:none;min-height:calc(100dvh - 175px);padding:var(--content-pad);">
-  <div id="quinta-body"></div>
-</div>
 <div id="insights-view" style="display:none;min-height:calc(100dvh - 175px);padding:var(--content-pad);">
   <div id="insights-body"></div>
 </div>
@@ -5539,42 +5590,32 @@ th {
   </div>
 </div>
 <!-- Feedback modal -->
-<div class="modal-bg" id="feedback-modal">
-  <!-- 580 rather than 520: the admin Test delivery button alongside Cancel and
-       Send pushed the row onto two lines at the narrower width. -->
-  <div class="modal" style="max-width:580px;">
-    <div class="modal-head">
-      <div>
-        <h2>Send feedback</h2>
-        <div style="font-size:11px;color:var(--slate-400);margin-top:3px;">Something broken, missing, or worth changing on the board</div>
-      </div>
-      <button class="modal-close-x" data-close="feedback-modal"></button>
+<!-- Feedback, as a bubble in the corner rather than a modal over the board -
+     see the fbToggleChat comment for why that matters. -->
+<button class="fb-launcher" id="fb-launcher" type="button" aria-expanded="false" aria-controls="fb-chat"
+        title="Tell the platform team something about the board">
+  <span class="fb-launcher-icon" aria-hidden="true">&#128172;</span>
+  <span class="fb-launcher-label">Feedback</span>
+</button>
+<section class="fb-chat" id="fb-chat" role="dialog" aria-label="Send feedback to the platform team">
+  <header class="fb-chat-head">
+    <div>
+      <div class="fb-chat-title">Platform team</div>
+      <div class="fb-chat-sub" id="fb-chat-sub">Goes to Teams</div>
     </div>
-    <div class="fb-body">
-      <div class="fb-cats" id="fb-cats" role="group" aria-label="What kind of feedback">
-        <button class="fb-cat" type="button" data-fb-cat="bug" aria-pressed="true">Bug</button>
-        <button class="fb-cat" type="button" data-fb-cat="idea" aria-pressed="false">Idea</button>
-        <button class="fb-cat" type="button" data-fb-cat="question" aria-pressed="false">Question</button>
-        <button class="fb-cat" type="button" data-fb-cat="other" aria-pressed="false">Other</button>
-      </div>
-      <div>
-        <textarea class="fb-textarea" id="fb-message" spellcheck="true"
-          placeholder="What happened, and what did you expect instead? If it was on one ticket, its number helps."></textarea>
-        <div class="fb-count" id="fb-count"></div>
-      </div>
-      <div class="fb-context" id="fb-context"></div>
-    </div>
-    <div class="modal-actions">
-      <span class="fb-note" id="fb-note"></span>
-      <!-- Admin only, and hidden otherwise: it sends a real mail, and it exists
-           so whoever set FEEDBACK_EMAIL and FEEDBACK_WEBHOOK_URL can prove both
-           legs work without waiting for somebody to report something. -->
-      <button class="btn-out admin-only" id="fb-test" type="button" title="Send a test report to check that email and Teams delivery work">Test delivery</button>
-      <button class="btn-out" data-close="feedback-modal">Cancel</button>
-      <button class="btn-primary" id="fb-send">Send feedback</button>
-    </div>
+    <button class="btn-out admin-only fb-test-btn" id="fb-test" type="button"
+            title="Send a test report to check that Teams and email delivery work">Test</button>
+    <button class="fb-chat-close" id="fb-close" type="button" aria-label="Close">&times;</button>
+  </header>
+  <div class="fb-log" id="fb-log" aria-live="polite"></div>
+  <div class="fb-cats" id="fb-cats" role="group" aria-label="What kind of feedback"></div>
+  <div class="fb-compose">
+    <textarea class="fb-textarea" id="fb-message" rows="2" spellcheck="true"
+      placeholder="What happened, and what did you expect instead?"></textarea>
+    <button class="fb-send" id="fb-send" type="button" aria-label="Send">&#10148;</button>
   </div>
-</div>
+  <div class="fb-foot"><span class="fb-count" id="fb-count"></span><span class="fb-context" id="fb-context"></span></div>
+</section>
 <div id="toast"></div>
 
 <!-- Email modal -->
@@ -7393,7 +7434,6 @@ function setSideNavActive(mode){
   document.getElementById('ticket-kpi-view-btn')?.classList.toggle('active',mode==='kpi');
   document.getElementById('insights-view-btn')?.classList.toggle('active',mode==='insights');
   document.getElementById('qt-seize-view-btn')?.classList.toggle('active',mode==='qtSeize');
-  document.getElementById('quinta-view-btn')?.classList.toggle('active',mode==='quinta');
   document.getElementById('projects-view-btn')?.classList.toggle('active',mode==='projects');
   document.getElementById('assignlog-view-btn')?.classList.toggle('active',mode==='assignlog');
   document.getElementById('qt-detect-view-btn')?.classList.toggle('active',mode==='qtDetect');
@@ -7460,7 +7500,6 @@ function restoreLastWorkspaceSession(){
   if(mode==='qtSeize')return showQtSeizeView();
   if(mode==='assignlog')return showAssignLogView();
   if(mode==='insights')return showInsightsView();
-  if(mode==='quinta')return showQuintaView();
   if(mode==='projects')return showProjectsView();
   // showQtDetectView falls back to the board itself if the user is not an
   // admin, so a stale saved session cannot strand them on a hidden view.
@@ -8077,7 +8116,7 @@ document.getElementById('emt-submit').addEventListener('click',async()=>{
 });
 
 //  View switching
-function hidePrimaryViews(){stopKpiAutoRefresh();document.getElementById('main-board').style.display='none';document.getElementById('spam-view').classList.remove('active');document.getElementById('archive-view').classList.remove('active');document.getElementById('companies-view').style.display='none';document.getElementById('kpi-view').style.display='none';document.getElementById('insights-view').style.display='none';document.getElementById('quinta-view').style.display='none';document.getElementById('projects-view').style.display='none';document.getElementById('qt-seize-view').style.display='none';document.getElementById('assignlog-view').style.display='none';document.getElementById('qt-detect-view').style.display='none';}
+function hidePrimaryViews(){stopKpiAutoRefresh();document.getElementById('main-board').style.display='none';document.getElementById('spam-view').classList.remove('active');document.getElementById('archive-view').classList.remove('active');document.getElementById('companies-view').style.display='none';document.getElementById('kpi-view').style.display='none';document.getElementById('insights-view').style.display='none';document.getElementById('projects-view').style.display='none';document.getElementById('qt-seize-view').style.display='none';document.getElementById('assignlog-view').style.display='none';document.getElementById('qt-detect-view').style.display='none';}
 function showBoardView(){viewMode='board';setBoardChromeVisible(true);hidePrimaryViews();document.getElementById('main-board').style.display='flex';setSideNavActive('board');saveLastWorkspaceSession('board');renderBoard();}
 function showSpamView(){viewMode='spam';setBoardChromeVisible(true);hidePrimaryViews();document.getElementById('spam-view').classList.add('active');setSideNavActive('spam');saveLastWorkspaceSession('spam');renderSpamView();}
 function showArchiveView(){viewMode='archive';setBoardChromeVisible(true);hidePrimaryViews();document.getElementById('archive-view').classList.add('active');setSideNavActive('archive');saveLastWorkspaceSession('archive');renderArchiveView();}
@@ -8641,322 +8680,6 @@ function renderInsightsView(){
 document.getElementById('insights-view-btn')?.addEventListener('click',()=>{if(viewMode==='insights')showBoardView();else showInsightsView();});
 
 
-/* ===========================================================================
-   Quinta properties, in QT-Tools
-   ---------------------------------------------------------------------------
-   The endpoint is shared, the credential is not: one Quinta server serves the
-   team, but each agent signs in with their own token and covers their own
-   properties. So this panel asks for both, per agent, rather than the board
-   holding one identity everybody borrows.
-
-   A saved token is never sent back here - the panel only ever learns its last
-   four characters, enough to show which one is saved and nothing more.
-   =========================================================================== */
-
-let quintaTab = 'properties';
-let quintaStatus = null;
-let quintaProperties = { state: 'idle', rows: [] };
-let quintaDialogs = { state: 'idle', rows: [], categories: [] };
-let quintaQuery = '';
-let quintaExpanded = new Set();
-let quintaSettingsOpen = false;
-let quintaTestResult = null;
-let quintaBusy = false;
-
-function showQuintaView(){
-  viewMode='quinta';
-  setBoardChromeVisible(false);
-  hidePrimaryViews();
-  document.getElementById('quinta-view').style.display='block';
-  setSideNavActive('quinta');
-  saveLastWorkspaceSession('quinta');
-  renderQuintaView();
-  if(!quintaStatus)loadQuintaStatus();
-}
-
-async function loadQuintaStatus(){
-  try{
-    const res=await fetch('/api/quinta/status',{credentials:'include'});
-    quintaStatus=await res.json();
-  }catch(error){
-    quintaStatus={serverConfigured:false,connected:false,error:String(error?.message||error)};
-  }
-  renderQuintaView();
-  if(quintaStatus?.connected)loadQuintaTab();
-}
-
-function loadQuintaTab(){
-  if(quintaTab==='properties'&&quintaProperties.state==='idle')loadQuintaProperties();
-  if(quintaTab==='dialogs'&&quintaDialogs.state==='idle')loadQuintaDialogs();
-}
-
-async function loadQuintaProperties(){
-  quintaProperties={state:'loading',rows:[]};renderQuintaView();
-  try{
-    const res=await fetch('/api/quinta/properties',{credentials:'include'});
-    const data=await res.json();
-    quintaProperties=data?.error
-      ?{state:'error',rows:[],message:data.message||data.error}
-      :{state:'done',rows:data.rows||[],note:data.note||''};
-  }catch(error){
-    quintaProperties={state:'error',rows:[],message:String(error?.message||error)};
-  }
-  renderQuintaView();
-}
-
-async function loadQuintaDialogs(){
-  quintaDialogs={state:'loading',rows:[],categories:[]};renderQuintaView();
-  try{
-    const res=await fetch('/api/quinta/dialogs',{credentials:'include'});
-    const data=await res.json();
-    quintaDialogs=data?.error
-      ?{state:'error',rows:[],categories:[],message:data.message||data.error}
-      :{state:'done',rows:data.rows||[],categories:data.categories||[]};
-  }catch(error){
-    quintaDialogs={state:'error',rows:[],categories:[],message:String(error?.message||error)};
-  }
-  renderQuintaView();
-}
-
-async function saveQuintaServerUrl(){
-  const url=document.getElementById('q-url')?.value||'';
-  quintaBusy=true;quintaTestResult=null;renderQuintaView();
-  try{
-    const res=await fetch('/api/quinta/server',{
-      method:'POST',credentials:'include',
-      headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({url})
-    });
-    const data=await res.json();
-    if(!res.ok)throw new Error(data?.message||data?.error||('HTTP '+res.status));
-    showToast(url?'Server endpoint saved':'Server endpoint cleared','ok');
-    quintaProperties={state:'idle',rows:[]};quintaDialogs={state:'idle',rows:[],categories:[]};
-    quintaSettingsOpen=true;
-    await loadQuintaStatus();
-  }catch(error){
-    showToast(String(error?.message||error));
-  }finally{
-    quintaBusy=false;renderQuintaView();
-  }
-}
-
-async function saveQuintaSettings(){
-  const token=document.getElementById('q-token')?.value||'';
-  const teamIds=document.getElementById('q-teams')?.value||'';
-  quintaBusy=true;quintaTestResult=null;renderQuintaView();
-  try{
-    const res=await fetch('/api/quinta/settings',{
-      method:'POST',credentials:'include',
-      headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({token,teamIds})
-    });
-    const data=await res.json();
-    if(!res.ok)throw new Error(data?.message||data?.error||('HTTP '+res.status));
-    showToast('Saved','ok');
-    quintaSettingsOpen=false;
-    // Whatever was cached belonged to the old credential.
-    quintaProperties={state:'idle',rows:[]};quintaDialogs={state:'idle',rows:[],categories:[]};
-    await loadQuintaStatus();
-    await testQuintaConnection();
-  }catch(error){
-    showToast('Could not save: '+String(error?.message||error));
-  }finally{
-    quintaBusy=false;renderQuintaView();
-  }
-}
-
-async function clearQuintaSettings(){
-  if(!confirm('Remove your saved Quinta token and property list from this board?'))return;
-  quintaBusy=true;renderQuintaView();
-  try{
-    await fetch('/api/quinta/settings',{method:'DELETE',credentials:'include'});
-    quintaTestResult=null;
-    quintaProperties={state:'idle',rows:[]};quintaDialogs={state:'idle',rows:[],categories:[]};
-    await loadQuintaStatus();
-    showToast('Removed','ok');
-  }finally{
-    quintaBusy=false;renderQuintaView();
-  }
-}
-
-async function testQuintaConnection(){
-  quintaBusy=true;renderQuintaView();
-  try{
-    const res=await fetch('/api/quinta/test',{credentials:'include'});
-    quintaTestResult=await res.json();
-  }catch(error){
-    quintaTestResult={ok:false,message:String(error?.message||error)};
-  }finally{
-    quintaBusy=false;renderQuintaView();
-  }
-}
-
-function quintaMatches(text){
-  const q=quintaQuery.trim().toLowerCase();
-  return !q||String(text||'').toLowerCase().includes(q);
-}
-
-function quintaValue(value){
-  if(value==null)return '<span class="q-muted">not set</span>';
-  if(Array.isArray(value))return value.length?value.map(v=>`<span class="q-pill">${esc(String(v))}</span>`).join(''):'<span class="q-muted">none</span>';
-  if(typeof value==='object')return `<span class="q-muted">${esc(Object.keys(value).length+' field(s)')}</span>`;
-  return esc(String(value));
-}
-
-// The form. Shown on its own when nothing is saved, and foldable once it is -
-// an agent should not have to walk past their own credentials to read a hotel.
-function quintaSettingsHtml(){
-  const s=quintaStatus||{};
-  const saved=!!s.connected;
-  // One server for the whole team, so it is set once - and only by an admin,
-  // because the board is what makes the outbound request with it.
-  const serverBlock=s.canEditServer
-    ? `<label class="q-field q-field-admin">
-         <span>Server endpoint <em>(shared by the whole team &middot; admin only)</em></span>
-         <input class="form-input" id="q-url" type="text" autocomplete="off" spellcheck="false" value="${esc(s.serverUrl||'')}" placeholder="https://mcp.quinta.example/mcp">
-         <span class="q-field-foot">${s.serverUrlSource==='env'?'Currently from QUINTA_MCP_URL — saving here overrides it, no redeploy needed.':s.serverUrlSource==='saved'?'Saved on the board.':'Not set yet — nobody can connect until it is.'}
-           <button class="btn-out q-inline-btn" id="q-url-save"${quintaBusy?' disabled':''}>Save endpoint</button></span>
-       </label>`
-    : (s.serverUrl?'':'<p class="q-note q-note-warn">No Quinta server has been set yet. An admin has to enter its URL before anyone can connect.</p>');
-  return `<div class="q-settings">
-    <div class="q-settings-head">
-      <strong>${saved?'Your Quinta connection':'Connect your Quinta account'}</strong>
-      ${saved?`<span class="q-hint-chip">token ending ${esc(s.tokenHint||'????')}</span>`:''}
-    </div>
-    <p class="q-note">The board asks each agent separately: the Quinta server is shared, but the token is yours and the properties you cover are yours. Your token is encrypted before it is stored and is never shown again - only its last four characters.</p>
-    ${serverBlock}
-    <label class="q-field">
-      <span>Quinta token${saved?' <em>(leave blank to keep the saved one)</em>':''}</span>
-      <input class="form-input" id="q-token" type="password" autocomplete="off" spellcheck="false" placeholder="${saved?'••••••••  unchanged':'Paste the token Quinta issued you'}">
-    </label>
-    <label class="q-field">
-      <span>Your properties <em>(numeric team ids, comma separated - <code>401, 252</code> or <code>401:Tartane St Tropez</code>)</em></span>
-      <input class="form-input" id="q-teams" type="text" autocomplete="off" spellcheck="false" value="${esc(s.teamIdsRaw||'')}" placeholder="401, 252, 19919">
-    </label>
-    <p class="q-note">There is no "list every hotel" tool on the Quinta server - <code>get-hotel-settings</code> is a lookup by team id - so the board has to be told which ones are yours. The dialog catalogue needs none of this and works with just a token.</p>
-    <div class="q-settings-actions">
-      <button class="btn-primary" id="q-save"${quintaBusy?' disabled':''}>${quintaBusy?'Working…':'Save'}</button>
-      <button class="btn-out" id="q-test"${quintaBusy?' disabled':''}>Test connection</button>
-      ${saved?`<button class="btn-out" id="q-clear"${quintaBusy?' disabled':''}>Remove</button>`:''}
-    </div>
-    ${quintaTestResult?`<div class="q-test ${quintaTestResult.ok?'q-test-ok':'q-test-bad'}">${esc(quintaTestResult.message||'')}</div>`:''}
-  </div>`;
-}
-
-function quintaPropertiesHtml(){
-  if(quintaProperties.state==='loading')return '<div class="q-loading"><span class="spinner"></span> Asking the Quinta server…</div>';
-  if(quintaProperties.state==='error')return `<div class="q-error">Could not load properties: ${esc(quintaProperties.message||'')}</div>`;
-  const rows=(quintaProperties.rows||[]).filter(r=>quintaMatches(r.name)||quintaMatches(r.teamId)||quintaMatches(r.address));
-  if(!rows.length){
-    return quintaProperties.note==='no_team_ids_configured'
-      ? `<div class="q-empty"><strong>No properties listed yet.</strong><br>Add your team ids under <em>Your connection</em> above.</div>`
-      : '<div class="q-empty">Nothing matches that search.</div>';
-  }
-  return rows.map(row=>{
-    const open=quintaExpanded.has(row.teamId);
-    return `<div class="q-card">
-      <div class="q-card-head">
-        <div>
-          <div class="q-name">${esc(row.name)}</div>
-          <div class="q-sub">${esc(row.address||'no address on file')}</div>
-        </div>
-        <button class="btn-out" data-q-raw="${esc(row.teamId)}">${open?'Hide':'Raw profile'}</button>
-      </div>
-      <div class="q-grid">
-        <div><span class="q-label">Bot languages</span>${quintaValue(row.languages)}</div>
-        <div><span class="q-label">Services</span>${quintaValue(row.services)}</div>
-        <div><span class="q-label">Notification contacts</span>${quintaValue(row.contacts)}</div>
-      </div>
-      ${open?`<pre class="q-raw">${esc(JSON.stringify(row.raw,null,2))}</pre>`:''}
-    </div>`;
-  }).join('');
-}
-
-function quintaDialogsHtml(){
-  if(quintaDialogs.state==='loading')return '<div class="q-loading"><span class="spinner"></span> Loading the dialog catalogue…</div>';
-  if(quintaDialogs.state==='error')return `<div class="q-error">Could not load dialogs: ${esc(quintaDialogs.message||'')}</div>`;
-  const rows=(quintaDialogs.rows||[]).filter(r=>quintaMatches(r.name)||quintaMatches(r.fid)||quintaMatches(r.description)||quintaMatches(r.category));
-  if(!rows.length)return '<div class="q-empty">Nothing matches that search.</div>';
-  return `<div class="q-lead">${rows.length} of ${quintaDialogs.rows.length} dialogs. These are what the bot can be asked about - the FID is the id support and the Quinta team use to refer to one.</div>
-    <div class="ins-table-wrap"><table class="ins-table">
-    <thead><tr><th>FID</th><th>Category</th><th>Name</th><th>What it handles</th></tr></thead>
-    <tbody>${rows.map(r=>`<tr>
-      <td style="font-weight:700;font-variant-numeric:tabular-nums;">${esc(r.fid)}</td>
-      <td>${esc(r.category)}</td>
-      <td>${esc(r.name)}</td>
-      <td style="white-space:normal;">${esc(r.description)}</td>
-    </tr>`).join('')}</tbody></table></div>`;
-}
-
-function quintaBindSettings(host){
-  host.querySelector('#q-url-save')?.addEventListener('click',saveQuintaServerUrl);
-  host.querySelector('#q-url')?.addEventListener('keydown',e=>{if(e.key==='Enter')saveQuintaServerUrl();});
-  host.querySelector('#q-save')?.addEventListener('click',saveQuintaSettings);
-  host.querySelector('#q-test')?.addEventListener('click',testQuintaConnection);
-  host.querySelector('#q-clear')?.addEventListener('click',clearQuintaSettings);
-  host.querySelector('#q-token')?.addEventListener('keydown',e=>{if(e.key==='Enter')saveQuintaSettings();});
-  host.querySelector('#q-teams')?.addEventListener('keydown',e=>{if(e.key==='Enter')saveQuintaSettings();});
-}
-
-function renderQuintaView(){
-  const host=document.getElementById('quinta-body');
-  if(!host)return;
-  const s=quintaStatus;
-
-  const header=`<div class="q-head">
-      <div><div class="q-title">Quinta properties</div>
-        <div class="q-subtitle">${s?.endpoint?esc(s.endpoint):'The hotels you support, read from the Quinta MCP server'}</div></div>
-      <div class="q-controls">
-        ${s?.connected?`<input class="filter-sel" id="q-search" type="text" placeholder="Search…" value="${esc(quintaQuery)}" autocomplete="off">`:''}
-        ${s?`<button class="${s.connected?'btn-out':'btn-primary'}" id="q-settings-toggle">${quintaSettingsOpen?'Hide connection':(s.connected?'Your connection':'Connect')}</button>`:''}
-        ${s?.connected?`<button class="btn-out" id="q-refresh">Refresh</button>`:''}
-      </div>
-    </div>`;
-
-  if(!s){host.innerHTML=header+'<div class="q-loading"><span class="spinner"></span> Checking your connection…</div>';return;}
-
-  // Not connected: the form is the page. An unset endpoint used to render a
-  // dead end with nothing to type into, which is the whole bug being fixed
-  // here - there is now always a way in.
-  if(!s.connected){
-    host.innerHTML=header+quintaSettingsHtml();
-    quintaBindSettings(host);
-    host.querySelector('#q-settings-toggle')?.addEventListener('click',()=>{quintaSettingsOpen=!quintaSettingsOpen;renderQuintaView();});
-    return;
-  }
-
-  const tabs=[['properties','Properties'],['dialogs','Dialog catalogue']];
-  host.innerHTML=header
-    +(quintaSettingsOpen?quintaSettingsHtml():'')
-    +`<div class="ins-tabs">${tabs.map(([k,l])=>`<button class="ins-tab${quintaTab===k?' active':''}" data-q-tab="${k}">${esc(l)}</button>`).join('')}</div>
-      <div class="q-body">${quintaTab==='properties'?quintaPropertiesHtml():quintaDialogsHtml()}</div>`;
-
-  quintaBindSettings(host);
-  host.querySelector('#q-settings-toggle')?.addEventListener('click',()=>{quintaSettingsOpen=!quintaSettingsOpen;renderQuintaView();});
-  host.querySelectorAll('[data-q-tab]').forEach(btn=>btn.addEventListener('click',()=>{
-    quintaTab=btn.dataset.qTab;renderQuintaView();loadQuintaTab();
-  }));
-  const bindRaw=()=>host.querySelectorAll('[data-q-raw]').forEach(btn=>btn.addEventListener('click',()=>{
-    const id=btn.dataset.qRaw;
-    if(quintaExpanded.has(id))quintaExpanded.delete(id);else quintaExpanded.add(id);
-    renderQuintaView();
-  }));
-  bindRaw();
-  host.querySelector('#q-search')?.addEventListener('input',e=>{
-    quintaQuery=e.target.value;
-    // Only the list is redrawn - re-rendering the panel would drop focus
-    // mid-keystroke.
-    const body=host.querySelector('.q-body');
-    if(body)body.innerHTML=quintaTab==='properties'?quintaPropertiesHtml():quintaDialogsHtml();
-    bindRaw();
-  });
-  host.querySelector('#q-refresh')?.addEventListener('click',()=>{
-    quintaProperties={state:'idle',rows:[]};quintaDialogs={state:'idle',rows:[],categories:[]};
-    loadQuintaTab();
-  });
-}
-
-document.getElementById('quinta-view-btn')?.addEventListener('click',()=>{if(viewMode==='quinta')showBoardView();else showQuintaView();});
 
 /* ===========================================================================
    Projects
@@ -9214,7 +8937,7 @@ document.getElementById('projects-view-btn')?.addEventListener('click',()=>{if(v
 document.getElementById('pj-e-save')?.addEventListener('click',saveProjectEditor);
 document.getElementById('pj-e-delete')?.addEventListener('click',deleteProjectFromEditor);
 
-function renderActiveView(){if(viewMode==='board')renderBoard();else if(viewMode==='spam')renderSpamView();else if(viewMode==='archive')renderArchiveView();else if(viewMode==='kpi')renderKpiView();else if(viewMode==='assignlog')renderAssignLogView();else if(viewMode==='insights')renderInsightsView();else if(viewMode==='quinta')renderQuintaView();else if(viewMode==='projects')renderProjectsView();else if(viewMode==='qtSeize')return;else renderCompaniesView();}
+function renderActiveView(){if(viewMode==='board')renderBoard();else if(viewMode==='spam')renderSpamView();else if(viewMode==='archive')renderArchiveView();else if(viewMode==='kpi')renderKpiView();else if(viewMode==='assignlog')renderAssignLogView();else if(viewMode==='insights')renderInsightsView();else if(viewMode==='projects')renderProjectsView();else if(viewMode==='qtSeize')return;else renderCompaniesView();}
 
 // ---------------------------------------------------------------------------
 // Assignment Log
@@ -13977,59 +13700,102 @@ function fbContext(){
   };
 }
 
+
+/* ===========================================================================
+   Feedback, as a conversation
+   ---------------------------------------------------------------------------
+   This was a header button that opened a modal with a form in it. A modal is a
+   task - it takes the screen, and the thing you were reporting on disappears
+   behind it, which is exactly the moment you needed to look at it. A bubble in
+   the corner is an aside: it sits over the board, the ticket stays visible
+   behind it, and it costs nothing to open and close again.
+
+   It is a chat only in shape. There is no thread and nothing replies for real;
+   what arrives back is the board saying honestly what happened to the report -
+   which leg delivered it, or that neither did. Dressing a failure up as a
+   cheerful "thanks!" would be the one thing worse than the old modal.
+   =========================================================================== */
+
+let fbOpen = false;
+let fbLog = [];          // the visible conversation
+let fbGreeted = false;
+
+const FB_CATEGORY_LABEL = { bug: 'Bug', idea: 'Idea', question: 'Question', other: 'Other' };
+
+function fbPush(role, text, tone){
+  fbLog.push({ role, text, tone: tone || '', at: Date.now() });
+  fbRenderLog();
+}
+
+function fbToggleChat(force){
+  fbOpen = force === undefined ? !fbOpen : !!force;
+  const panel = document.getElementById('fb-chat');
+  const launcher = document.getElementById('fb-launcher');
+  if(!panel) return;
+  panel.classList.toggle('open', fbOpen);
+  launcher?.classList.toggle('active', fbOpen);
+  launcher?.setAttribute('aria-expanded', String(fbOpen));
+  if(fbOpen){
+    if(!fbGreeted){
+      fbGreeted = true;
+      fbPush('bot','Something broken, missing, or worth changing? Tell me and it goes straight to the platform team.');
+    }
+    fbRenderContext();
+    setTimeout(()=>document.getElementById('fb-message')?.focus(), 60);
+  }
+}
+
+function fbRenderLog(){
+  const box = document.getElementById('fb-log');
+  if(!box) return;
+  box.innerHTML = fbLog.map(m =>
+    `<div class="fb-msg fb-${m.role}${m.tone?' fb-'+m.tone:''}">${esc(m.text)}</div>`
+  ).join('') + (fbSending?'<div class="fb-msg fb-bot fb-typing"><span></span><span></span><span></span></div>':'');
+  box.scrollTop = box.scrollHeight;
+}
+
+function fbRenderCats(){
+  const box = document.getElementById('fb-cats');
+  if(!box) return;
+  box.innerHTML = Object.entries(FB_CATEGORY_LABEL).map(([key,label]) =>
+    `<button class="fb-cat${fbCategory===key?' active':''}" type="button" data-fb-cat="${key}" aria-pressed="${fbCategory===key}">${esc(label)}</button>`
+  ).join('');
+  box.querySelectorAll('[data-fb-cat]').forEach(b=>b.addEventListener('click',()=>{
+    fbCategory=b.dataset.fbCat;
+    fbRenderCats();
+    document.getElementById('fb-message')?.focus();
+  }));
+}
+
 function fbRenderContext(){
   const box = document.getElementById('fb-context');
   if(!box) return;
   const c = fbContext();
-  const ticketLine = c.ticketId ? `<span>Ticket: ${esc(ticketDisplayNumber(c.ticketId)||c.ticketId)}</span>` : '';
-  box.innerHTML = `<strong>Attached automatically</strong>
-    <span>You: ${esc(currentUser())} &middot; View: ${esc(c.view)} &middot; Build: ${esc(c.build)}</span>
-    ${ticketLine}
-    <span>Screen: ${esc(c.viewport)} &middot; Theme: ${esc(c.theme)}</span>`;
+  const ticket = c.ticketId ? ` · ${esc(ticketDisplayNumber(c.ticketId)||c.ticketId)}` : '';
+  // One quiet line rather than a panel. It is reassurance, not content: the
+  // reporter should know their screen and build travel with the report without
+  // having to read a table about it.
+  box.textContent = `Sent with: ${currentUser()} · ${c.view}${ticket} · build ${c.build} · ${c.viewport}`;
 }
 
-function fbRenderCount(){
-  const el = document.getElementById('fb-count');
-  const value = String(document.getElementById('fb-message')?.value || '');
-  if(!el) return;
-  // Only worth showing once it is close to mattering - a character counter over
-  // an empty box is noise.
-  const left = FB_MAX - value.length;
-  el.textContent = value.length > FB_MAX - 500 ? `${left} characters left` : '';
-  el.classList.toggle('over', left < 0);
-}
-
-function fbSetCategory(category){
-  fbCategory = category;
-  document.querySelectorAll('[data-fb-cat]').forEach(btn=>{
-    btn.setAttribute('aria-pressed', btn.dataset.fbCat === category ? 'true' : 'false');
-  });
-}
-
-function openFeedbackModal(){
-  fbSetCategory('bug');
-  const box = document.getElementById('fb-message');
-  if(box) box.value = '';
-  const note = document.getElementById('fb-note');
-  // Says where it goes before it is written, not after. Not the address itself:
-  // that is the server's configuration to know, and the success toast names it.
-  if(note) note.textContent = 'Goes to the platform team';
-  fbRenderCount();
-  fbRenderContext();
-  document.getElementById('feedback-modal')?.classList.add('open');
-  setTimeout(()=>box?.focus(), 60);
-}
-
-async function sendFeedback(){
+async function fbSubmit(){
   if(fbSending) return;
   const box = document.getElementById('fb-message');
   const message = String(box?.value || '').trim();
-  if(!message){ showToast('Write what happened first','warn'); box?.focus(); return; }
-  if(message.length > FB_MAX){ showToast(`That is ${message.length - FB_MAX} characters too long`,'warn'); return; }
+  if(!message){ box?.focus(); return; }
+  if(message.length > FB_MAX){
+    fbPush('bot',`That is ${message.length - FB_MAX} characters too long to send.`,'bad');
+    return;
+  }
 
-  const btn = document.getElementById('fb-send');
+  fbPush('me', message);
+  if(box) box.value = '';
+  fbUpdateCount();
   fbSending = true;
-  if(btn){ btn.disabled = true; btn.textContent = 'Sending...'; }
+  fbRenderLog();
+  const send = document.getElementById('fb-send');
+  if(send) send.disabled = true;
+
   try{
     const res = await fetch('/api/feedback',{
       method:'POST',
@@ -14038,45 +13804,45 @@ async function sendFeedback(){
       body: JSON.stringify({ category: fbCategory, message, context: fbContext() })
     });
     const out = await res.json().catch(()=>({}));
+    fbSending = false;
+
     if(!res.ok || !out?.ok){
       const code = String(out?.error || '');
-      if(code === 'feedback_too_long') showToast('That report is too long to send','warn');
-      else if(res.status === 429) showToast('A few reports have just gone out - give it a minute','warn');
-      else showToast(`Could not send that: ${out?.detail || code || res.status}`,'warn');
+      if(res.status === 429) fbPush('bot','A few reports have just gone out - give it a minute and send that again.','warn');
+      else if(code === 'feedback_too_long') fbPush('bot','That report is too long to send.','warn');
+      else fbPush('bot',`That could not be sent: ${out?.detail || code || res.status}`,'bad');
       return;
     }
-    document.getElementById('feedback-modal')?.classList.remove('open');
-    if(box) box.value = '';
-    /* Three honest outcomes rather than one cheerful one. A report that was
-       written down but not delivered is not a failure - somebody will still see
-       it - but saying "sent" over it would be a lie. */
-    if(out.emailed || out.notified){
-      // `to` is a list now, and three addresses in a toast is noise - name the
-      // one recipient when there is one, and the count when there are more.
-      const to = Array.isArray(out.to) ? out.to : (out.to ? [out.to] : []);
-      const who = to.length === 1 ? to[0] : (to.length ? `${to.length} people on the platform team` : 'the team');
-      showToast(`Thanks - sent to ${who}`,'ok');
-    }else if(out.stored){
-      showToast('Recorded, but it could not be emailed yet - it is saved and will be seen','warn');
-    }else{
-      showToast('That could not be sent or saved. Please tell someone directly.','warn');
-    }
+
+    /* Which leg actually delivered it. Named rather than smoothed over: with
+       Outlook down and a Teams webhook set, "sent" alone would leave someone
+       wondering where it went - and when neither works, the reporter has to
+       know their words did not reach anyone. */
+    if(out.notified && out.emailed) fbPush('bot','Sent - posted to Teams and emailed to the platform team.','ok');
+    else if(out.notified) fbPush('bot','Sent - posted to the platform team on Teams.','ok');
+    else if(out.emailed) fbPush('bot','Sent - emailed to the platform team.','ok');
+    else if(out.stored) fbPush('bot','Written down, but it could not be delivered yet. It is saved and someone will see it.','warn');
+    else fbPush('bot','That could not be sent or saved. Please tell someone directly.','bad');
   }catch(err){
-    showToast(`Could not send that: ${String(err?.message||err)}`,'warn');
+    fbSending = false;
+    fbPush('bot',`That could not be sent: ${String(err?.message||err)}`,'bad');
   }finally{
     fbSending = false;
-    if(btn){ btn.disabled = false; btn.textContent = 'Send feedback'; }
+    if(send) send.disabled = false;
+    fbRenderLog();
+    document.getElementById('fb-message')?.focus();
   }
 }
 
-/* Proving the two delivery legs work, from the UI.
+function fbUpdateCount(){
+  const box = document.getElementById('fb-message');
+  const out = document.getElementById('fb-count');
+  if(!box||!out) return;
+  const left = FB_MAX - box.value.length;
+  out.textContent = left < 200 ? `${left} left` : '';
+  out.classList.toggle('over', left < 0);
+}
 
-   Setting this up is two environment variables and an Outlook consent, and each
-   of them fails invisibly from the outside: a webhook URL with a typo, a token
-   that predates Mail.Send, a flow somebody switched off. Without this the only
-   way to find out is to file a real report and wait to see if anything arrives -
-   and when nothing does, there is nothing to say which leg was at fault. This
-   sends one canned report and reports each leg separately. */
 async function sendFeedbackTest(){
   const btn = document.getElementById('fb-test');
   if(!btn || btn.disabled) return;
@@ -14105,15 +13871,22 @@ async function sendFeedbackTest(){
 }
 
 document.getElementById('feedback-btn')?.addEventListener('click', openFeedbackModal);
+document.getElementById('fb-launcher')?.addEventListener('click', ()=>fbToggleChat());
+document.getElementById('fb-close')?.addEventListener('click', ()=>fbToggleChat(false));
 document.getElementById('fb-test')?.addEventListener('click', sendFeedbackTest);
-document.getElementById('fb-send')?.addEventListener('click', sendFeedback);
-document.getElementById('fb-message')?.addEventListener('input', fbRenderCount);
-document.querySelectorAll('[data-fb-cat]').forEach(btn=>{
-  btn.addEventListener('click', ()=>fbSetCategory(btn.dataset.fbCat));
-});
-// Ctrl/Cmd+Enter sends, as it does in the reply composer.
+document.getElementById('fb-send')?.addEventListener('click', fbSubmit);
+document.getElementById('fb-message')?.addEventListener('input', fbUpdateCount);
+fbRenderCats();
+/* Enter sends, Shift+Enter is a new line - the way a chat box behaves. The
+   reply composer keeps Ctrl+Enter because a client reply is long and being
+   one stray Enter away from sending it would be the wrong trade there. */
 document.getElementById('fb-message')?.addEventListener('keydown', ev=>{
-  if((ev.ctrlKey||ev.metaKey) && ev.key === 'Enter'){ ev.preventDefault(); sendFeedback(); }
+  if(ev.key === 'Enter' && !ev.shiftKey){ ev.preventDefault(); fbSubmit(); }
+});
+// Escape closes it, but only when the composer has focus - it must not swallow
+// the key from the board behind.
+document.getElementById('fb-chat')?.addEventListener('keydown', ev=>{
+  if(ev.key === 'Escape'){ ev.stopPropagation(); fbToggleChat(false); }
 });
 
 /* ================= Open in Outlook, including when there is none ==========

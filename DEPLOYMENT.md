@@ -448,6 +448,27 @@ If a leg fails: a 403 on the email means the consent above is missing or the
 chosen mailbox is refused; a webhook error means the URL is wrong, the flow is
 off, or the flow rejected the body.
 
+## Where feedback goes
+
+### The feedback bubble
+
+Feedback is a bubble in the bottom-right corner, not a header button and not a
+modal. That is deliberate: a modal takes the screen, so the thing being
+reported on disappears behind it at exactly the moment it is needed. The bubble
+sits over the board and the ticket stays visible.
+
+It is a chat only in shape - there is no thread and nothing replies for real.
+What comes back is the board saying which delivery leg actually worked:
+*posted to Teams*, *emailed*, both, or that neither did. A failure is never
+dressed up as a thank-you.
+
+**Teams needs `FEEDBACK_WEBHOOK_URL` set** - it is currently empty, so nothing
+reaches Teams. The payload the board posts carries three shapes in one body: a
+MessageCard (old Office 365 connector), an Adaptive Card in `attachments`
+(Teams Workflows, the supported route now), and the raw fields (anyone reading
+it with their own Power Automate flow). So the same URL works whichever kind of
+webhook it points at, with no change here.
+
 ## Where feedback from the Feedback button goes
 
 Three things happen to one report, independently, so that no single failure
@@ -538,86 +559,6 @@ npm run check:m365
 * **HTTP 429/503/504** - Graph throttling. The server already retries these with
   backoff, and the pictures are fetched separately so a throttled attachment
   call no longer discards the whole message.
-
-## Quinta properties in QT-Tools
-
-The QT-Tools sidebar has a **Quinta Properties** panel: the hotels an agent
-supports, with each one's operational profile, and the bot's dialog catalogue,
-next to the tickets they are about.
-
-**The endpoint is shared; the credential is not.** One Quinta server serves the
-whole team, so its URL is deployment configuration. But each agent signs in with
-their own token and covers their own properties, so those are asked for in the
-panel and stored per user — not in the environment, where the whole team would
-share one identity.
-
-| Variable | Default | Effect |
-| --- | --- | --- |
-| `QUINTA_MCP_URL` | unset | Default Quinta MCP server endpoint (Streamable HTTP). Optional: an admin can set the endpoint from the panel instead, and a value saved there overrides this one. |
-| `QUINTA_MCP_TOKEN` | unset | *Optional fallback.* A single shared service token, used only by agents who have not saved their own. Leave unset to require a personal token from everyone. |
-| `QUINTA_TEAM_IDS` | unset | *Optional fallback.* A default property list for agents who have not set theirs. |
-
-Nothing has to be deployed at all: open **QT-Tools → Quinta Properties →
-Connect**. An admin fills in the server endpoint once (shared by the team), and
-every agent then pastes their own token and lists their team ids. The panel has
-a **Test connection** button that names the actual failure — token rejected,
-token not permitted, server unreachable, wrong server — rather than showing a
-transport error.
-
-### Who can change the endpoint, and why it is restricted
-
-Only admins. Not for tidiness: the board makes an outbound request to that URL
-carrying an agent bearer token, so a user-settable fetch target is an SSRF
-primitive. The URL is validated the same way the QT Detect URL checker validates
-its input — http(s) only, and the hostname is **resolved** and every address it
-returns has to be public. A URL that merely looks external but resolves to
-loopback, a private range, or cloud metadata is refused before any credential
-is sent to it.
-
-### How the per-agent credential is stored
-
-Tokens live in `QuintaUserSetting`, one row per user, created on first use with
-`CREATE TABLE IF NOT EXISTS` (the same pattern as `PasswordResetToken`) so no
-migration step is needed to deploy this.
-
-They are **encrypted at rest** with AES-256-GCM, and the API never returns one:
-the panel only ever learns the last four characters, enough to show which token
-is saved. Saving with the token field left blank keeps the stored token, so an
-agent can edit their property list without retyping a credential they cannot
-read.
-
-The encryption key is derived from `SESSION_SECRET` rather than a key of its
-own, so there is one secret to deploy rather than two. The tradeoff is worth
-stating: **rotating `SESSION_SECRET` makes stored Quinta tokens undecryptable**,
-and each agent is asked for theirs again. That is a re-entry, not a leak.
-
-### Why the team ids are typed in by hand
-
-The Quinta server exposes `get-dialogs-list` and `get-hotel-settings`, and
-nothing that enumerates hotels. `get-hotel-settings` is a lookup by numeric team
-id, so something has to supply the list. Enter them comma separated — `401, 252`
-— optionally labelled, `401:Tartane St Tropez`.
-
-The **Dialog catalogue** tab needs no team ids at all and works as soon as a
-token is saved.
-
-### Caching
-
-Per token, never global — two agents may see different properties, and one
-agent's answers must never be served to another. An hour for the dialog
-catalogue (definitions that rarely change), ten minutes for property profiles,
-which are edited by the people using this board. Saving or removing a token
-clears that token's cache immediately.
-
-### Two things unverified until a real server answers
-
-- **Auth shape.** A static bearer token is assumed. If Quinta issues OAuth
-  client credentials instead, `quintaCallTool` needs a token-exchange step;
-  nothing else changes.
-- **Profile shape.** The panel lays out name, address, bot languages, services
-  and notification contacts. Anything else the server returns is kept and shown
-  under *Raw profile* rather than dropped, so a field this board was not written
-  for is still visible to the agent.
 
 ## Projects
 

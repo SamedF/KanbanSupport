@@ -5381,452 +5381,6 @@ app.get('/api/insights/suggest-assignee', requireAuth, async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
-// Quinta MCP: the properties each agent supports, inside the board
-//
-// An agent working a ticket about a hotel had to leave the board to find out
-// anything about that hotel - which languages its bot speaks, what services it
-// has, who to notify. That data already exists on the Quinta MCP server; it was
-// just only reachable from a Claude conversation, never from here.
-//
-// Three things about how this is wired:
-//
-//   1. The endpoint is shared; the credential is not. One Quinta server serves
-//      the whole team (QUINTA_MCP_URL, set once by whoever deploys this), but
-//      each agent authenticates as themselves with their own token, and covers
-//      their own set of properties. So the token and the team ids are stored
-//      per user and asked for in the panel - not baked into the environment,
-//      where everyone would share one identity.
-//
-//   2. Tokens are encrypted at rest. They are other systems' credentials
-//      sitting in our database, and an agent must never be able to read
-//      another agent's - or their own back out of the API. Only the last four
-//      characters are ever returned, so the panel can show which token is
-//      saved without being able to reveal it.
-//
-//   3. There is no "list every hotel" tool. get-hotel-settings is a lookup by
-//      numeric teamId, so each agent has to say which properties they cover.
-//      The dialog catalogue needs no hotel at all, so it works as soon as a
-//      token is saved.
-// ---------------------------------------------------------------------------
-const QUINTA_MCP_URL = String(process.env.QUINTA_MCP_URL || '').trim();
-// Optional fallbacks for a single shared service identity. A per-user token
-// always wins; these only cover an agent who has not set one up.
-const QUINTA_FALLBACK_TOKEN = String(process.env.QUINTA_MCP_TOKEN || '').trim();
-const QUINTA_FALLBACK_TEAM_IDS = String(process.env.QUINTA_TEAM_IDS || '').trim();
-
-/* Where the endpoint comes from.
-
-   It was environment-only, which meant the panel could ask an agent for their
-   token but had nowhere to put the one thing that has to be right first - so
-   with QUINTA_MCP_URL unset the panel was a dead end with no way in. It is now
-   settable from the panel too, saved board-wide (one server serves everyone,
-   unlike the tokens), with the environment as the default.
-
-   Admin-only, and not for tidiness: the board makes outbound requests to this
-   URL carrying an agent's bearer token. A user-supplied fetch target is an SSRF
-   primitive, so it is restricted to admins AND checked against the same
-   private-address guard the URL checker uses - see quintaValidateServerUrl. */
-async function ensureAppSettingTable() {
-  await prisma.$executeRaw`
-    CREATE TABLE IF NOT EXISTS "AppSetting" (
-      "key" TEXT PRIMARY KEY,
-      "value" TEXT,
-      "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
-    )
-  `;
-}
-async function appSettingGet(key) {
-  await ensureAppSettingTable();
-  const rows = await prisma.$queryRaw`SELECT "value" FROM "AppSetting" WHERE "key" = ${String(key)} LIMIT 1`;
-  const row = Array.isArray(rows) ? rows[0] : null;
-  return row?.value || '';
-}
-async function appSettingSet(key, value) {
-  await ensureAppSettingTable();
-  await prisma.$executeRaw`
-    INSERT INTO "AppSetting" ("key", "value", "updatedAt") VALUES (${String(key)}, ${String(value)}, CURRENT_TIMESTAMP)
-    ON CONFLICT ("key") DO UPDATE SET "value" = ${String(value)}, "updatedAt" = CURRENT_TIMESTAMP
-  `;
-}
-
-const QUINTA_URL_KEY = 'quinta.mcpUrl';
-// Saved value wins over the environment, so a deployment default can be
-// corrected from the panel without a redeploy.
-async function quintaServerUrl() {
-  return (await appSettingGet(QUINTA_URL_KEY)) || QUINTA_MCP_URL;
-}
-async function quintaServerUrlSource() {
-  return (await appSettingGet(QUINTA_URL_KEY)) ? 'saved' : (QUINTA_MCP_URL ? 'env' : 'none');
-}
-
-/* Refuses anything the board should not be pointed at. Same reasoning as the
-   URL checker: a hostname passing a text check says nothing about where it
-   resolves, so the address is resolved and every answer has to be public. */
-async function quintaValidateServerUrl(raw) {
-  const value = String(raw || '').trim();
-  if (!value) return { ok: false, message: 'Enter the Quinta MCP server URL.' };
-  let url;
-  try { url = new URL(value); } catch (_) { return { ok: false, message: 'That is not a valid URL.' }; }
-  if (!/^https?:$/.test(url.protocol)) return { ok: false, message: 'The URL must start with https:// (or http:// for a local server).' };
-  if (!(await qtResolvesToPublicHost(url.hostname))) {
-    return { ok: false, message: 'That address resolves to a private or internal host. The board will not send credentials there.' };
-  }
-  return { ok: true, url: url.toString() };
-}
-
-function quintaServerConfigured() { return !!QUINTA_MCP_URL; }
-
-async function ensureQuintaSettingsTable() {
-  await prisma.$executeRaw`
-    CREATE TABLE IF NOT EXISTS "QuintaUserSetting" (
-      "userId" INTEGER PRIMARY KEY REFERENCES "User"("id") ON DELETE CASCADE,
-      "tokenCipher" TEXT,
-      "tokenHint" TEXT,
-      "teamIds" TEXT,
-      "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
-    )
-  `;
-}
-
-/* Encryption at rest.
-
-   The key is derived from SESSION_SECRET rather than a key of its own, so there
-   is one secret to deploy rather than two. The tradeoff is stated plainly:
-   rotating SESSION_SECRET makes stored tokens undecryptable, and the panel then
-   asks for the token again. That is the right failure - it is a re-entry, not a
-   leak, and it is far better than keeping other systems' credentials in
-   plaintext next to the tickets. */
-function quintaKey() {
-  return crypto.createHash('sha256').update(String(SESSION_SECRET || '') + '|quinta').digest();
-}
-function quintaEncrypt(plain) {
-  const iv = crypto.randomBytes(12);
-  const cipher = crypto.createCipheriv('aes-256-gcm', quintaKey(), iv);
-  const enc = Buffer.concat([cipher.update(String(plain), 'utf8'), cipher.final()]);
-  return [iv.toString('base64'), cipher.getAuthTag().toString('base64'), enc.toString('base64')].join('.');
-}
-function quintaDecrypt(stored) {
-  try {
-    const [iv, tag, data] = String(stored || '').split('.');
-    if (!iv || !tag || !data) return '';
-    const decipher = crypto.createDecipheriv('aes-256-gcm', quintaKey(), Buffer.from(iv, 'base64'));
-    decipher.setAuthTag(Buffer.from(tag, 'base64'));
-    return Buffer.concat([decipher.update(Buffer.from(data, 'base64')), decipher.final()]).toString('utf8');
-  } catch (_) {
-    // Wrong key (SESSION_SECRET rotated) or tampered row. Treated as "no token
-    // saved" so the panel asks again rather than throwing at the agent.
-    return '';
-  }
-}
-
-function quintaParseTeamIds(raw) {
-  return String(raw || '')
-    .split(/[,;\s]+/)
-    .map(entry => entry.trim())
-    .filter(Boolean)
-    .map(entry => {
-      const [id, ...label] = entry.split(':');
-      return { teamId: String(id).trim(), label: label.join(':').trim() || null };
-    })
-    .filter(entry => /^\d+$/.test(entry.teamId));
-}
-
-async function quintaSettingsFor(userId) {
-  await ensureQuintaSettingsTable();
-  const rows = await prisma.$queryRaw`
-    SELECT "tokenCipher", "tokenHint", "teamIds" FROM "QuintaUserSetting" WHERE "userId" = ${Number(userId)} LIMIT 1
-  `;
-  const row = Array.isArray(rows) ? rows[0] : null;
-  const token = row?.tokenCipher ? quintaDecrypt(row.tokenCipher) : '';
-  return {
-    token: token || QUINTA_FALLBACK_TOKEN,
-    // Only ever the last four, and only for a token this agent saved.
-    tokenHint: token ? (row.tokenHint || '') : (QUINTA_FALLBACK_TOKEN ? 'shared' : ''),
-    usingFallback: !token && !!QUINTA_FALLBACK_TOKEN,
-    teamIdsRaw: row?.teamIds || QUINTA_FALLBACK_TEAM_IDS || '',
-    teamIds: quintaParseTeamIds(row?.teamIds || QUINTA_FALLBACK_TEAM_IDS)
-  };
-}
-
-let mcpClientModules = null;
-async function loadMcpClientSdk() {
-  if (!mcpClientModules) {
-    const [{ Client }, { StreamableHTTPClientTransport }] = await Promise.all([
-      import('@modelcontextprotocol/sdk/client/index.js'),
-      import('@modelcontextprotocol/sdk/client/streamableHttp.js')
-    ]);
-    mcpClientModules = { Client, StreamableHTTPClientTransport };
-  }
-  return mcpClientModules;
-}
-
-// One short-lived client per request. The server is not ours and a pooled,
-// long-lived session would have to be reconnected on every network blip; these
-// calls are infrequent and cached below, so a fresh connection is cheaper to
-// reason about than a pool.
-async function quintaCallTool(token, name, args) {
-  const endpoint = await quintaServerUrl();
-  if (!endpoint) throw Object.assign(new Error('quinta_server_not_configured'), { status: 503 });
-  if (!token) throw Object.assign(new Error('quinta_no_token'), { status: 401 });
-  const { Client, StreamableHTTPClientTransport } = await loadMcpClientSdk();
-  const client = new Client({ name: 'support-kanban', version: '1.0.0' }, { capabilities: {} });
-  const transport = new StreamableHTTPClientTransport(new URL(endpoint), {
-    requestInit: { headers: { Authorization: `Bearer ${token}` } }
-  });
-  try {
-    await client.connect(transport);
-    const result = await client.callTool({ name, arguments: args || {} });
-    if (result?.isError) {
-      const text = (result.content || []).map(part => part.text).filter(Boolean).join(' ').slice(0, 300);
-      throw Object.assign(new Error(text || 'quinta_tool_error'), { status: 502 });
-    }
-    const text = (result?.content || []).filter(part => part.type === 'text').map(part => part.text).join('');
-    if (!text) return null;
-    try { return JSON.parse(text); } catch (_) { return { raw: text }; }
-  } finally {
-    await client.close().catch(() => {});
-  }
-}
-
-// Cached per token, never globally: two agents may see different properties,
-// and one agent's answers must not be served to another.
-const quintaCache = new Map();
-function quintaCacheKey(token, key) {
-  return crypto.createHash('sha256').update(String(token)).digest('hex').slice(0, 16) + ':' + key;
-}
-async function quintaCached(token, key, ttlMs, load) {
-  const cacheKey = quintaCacheKey(token, key);
-  const hit = quintaCache.get(cacheKey);
-  if (hit && hit.at > Date.now() - ttlMs) return hit.value;
-  const value = await load();
-  quintaCache.set(cacheKey, { at: Date.now(), value });
-  return value;
-}
-function quintaClearCache(token) {
-  const prefix = crypto.createHash('sha256').update(String(token)).digest('hex').slice(0, 16) + ':';
-  [...quintaCache.keys()].filter(k => k.startsWith(prefix)).forEach(k => quintaCache.delete(k));
-}
-
-/* What went wrong, in terms of what the agent can do about it.
-
-   Matched on the strings these failures actually produce rather than on HTTP
-   status codes: the MCP client wraps the response body in a transport error, so
-   a rejected token arrives as
-   'Streamable HTTP error: Error POSTing to endpoint: {"error":"invalid_token"}'
-   with no status code anywhere in the text. */
-function quintaFriendlyError(raw) {
-  const text = String(raw || '');
-  if (/invalid_token|invalid_grant|\b401\b|unauthoriz|unauthentic/i.test(text)) {
-    return 'The Quinta server rejected your token. Check you pasted it whole, and that it has not expired.';
-  }
-  if (/invalid_client|\b403\b|forbidden|access.?denied/i.test(text)) {
-    return 'Your token was accepted but is not allowed to do this. Ask Quinta to grant it access to the MCP tools.';
-  }
-  if (/not found|-32601|-32602|unknown tool/i.test(text)) {
-    // Authenticated fine, then asked for a tool that server does not have -
-    // which nearly always means the endpoint points at the wrong MCP server.
-    return 'Connected, but that server does not have the tools this panel needs (get-dialogs-list / get-hotel-settings). QUINTA_MCP_URL is probably pointing at a different MCP server.';
-  }
-  if (/ENOTFOUND|ECONNREFUSED|EAI_AGAIN|fetch failed|ETIMEDOUT|socket hang up/i.test(text)) {
-    return 'The board could not reach the Quinta server. The endpoint may be wrong or unreachable from here - that is a deployment setting, not yours.';
-  }
-  if (/certificate|self.signed|SSL|TLS/i.test(text)) {
-    return 'The Quinta server presented a TLS certificate the board would not accept.';
-  }
-  return text.slice(0, 300);
-}
-
-app.get('/api/quinta/status', requireAuth, async (req, res) => {
-  try {
-    const settings = await quintaSettingsFor(req.session.userId);
-    const endpoint = await quintaServerUrl();
-    return res.json({
-      ok: true,
-      serverConfigured: !!endpoint,
-      serverUrl: endpoint || '',
-      serverUrlSource: await quintaServerUrlSource(),
-      // Only an admin may repoint the board, because the board is what makes
-      // the outbound request.
-      canEditServer: isAdminRole(req.session.role),
-      endpoint: endpoint ? endpoint.replace(/^(https?:\/\/[^/]+).*$/, '$1/…') : null,
-      connected: !!settings.token,
-      usingFallback: settings.usingFallback,
-      tokenHint: settings.tokenHint,
-      teamIdsRaw: settings.teamIdsRaw,
-      propertyCount: settings.teamIds.length
-    });
-  } catch (error) {
-    console.error('Quinta status failed:', error?.message || error);
-    return res.status(500).json({ error: 'quinta_status_failed' });
-  }
-});
-
-// The agent's own credential. The token is write-only over this API: it goes in
-// and is never returned, only its last four characters.
-app.post('/api/quinta/settings', requireAuth, async (req, res) => {
-  try {
-    await ensureQuintaSettingsTable();
-    const userId = Number(req.session.userId);
-    const rawToken = String(req.body?.token || '').trim();
-    const teamIds = String(req.body?.teamIds || '').trim();
-    if (teamIds && !quintaParseTeamIds(teamIds).length) {
-      return res.status(400).json({ error: 'invalid_team_ids', message: 'Team ids must be numeric, comma separated - e.g. 401, 252 or 401:Tartane St Tropez.' });
-    }
-    if (rawToken && rawToken.length > 4096) return res.status(400).json({ error: 'token_too_long' });
-
-    // An empty token field means "leave the saved one alone", so an agent can
-    // edit their property list without retyping a token they cannot read.
-    if (rawToken) {
-      const cipher = quintaEncrypt(rawToken);
-      const hint = rawToken.slice(-4);
-      await prisma.$executeRaw`
-        INSERT INTO "QuintaUserSetting" ("userId", "tokenCipher", "tokenHint", "teamIds", "updatedAt")
-        VALUES (${userId}, ${cipher}, ${hint}, ${teamIds}, CURRENT_TIMESTAMP)
-        ON CONFLICT ("userId") DO UPDATE SET "tokenCipher" = ${cipher}, "tokenHint" = ${hint}, "teamIds" = ${teamIds}, "updatedAt" = CURRENT_TIMESTAMP
-      `;
-    } else {
-      await prisma.$executeRaw`
-        INSERT INTO "QuintaUserSetting" ("userId", "teamIds", "updatedAt")
-        VALUES (${userId}, ${teamIds}, CURRENT_TIMESTAMP)
-        ON CONFLICT ("userId") DO UPDATE SET "teamIds" = ${teamIds}, "updatedAt" = CURRENT_TIMESTAMP
-      `;
-    }
-    const settings = await quintaSettingsFor(userId);
-    quintaClearCache(settings.token);
-    return res.json({ ok: true, connected: !!settings.token, tokenHint: settings.tokenHint, propertyCount: settings.teamIds.length });
-  } catch (error) {
-    console.error('Quinta settings save failed:', error?.message || error);
-    return res.status(500).json({ error: 'quinta_settings_failed' });
-  }
-});
-
-app.post('/api/quinta/server', requireAdmin, async (req, res) => {
-  try {
-    const raw = String(req.body?.url || '').trim();
-    // Empty clears the saved value and falls back to the environment.
-    if (!raw) {
-      await appSettingSet(QUINTA_URL_KEY, '');
-      quintaCache.clear();
-      return res.json({ ok: true, serverUrl: QUINTA_MCP_URL || '', serverUrlSource: QUINTA_MCP_URL ? 'env' : 'none' });
-    }
-    const check = await quintaValidateServerUrl(raw);
-    if (!check.ok) return res.status(400).json({ error: 'invalid_server_url', message: check.message });
-    await appSettingSet(QUINTA_URL_KEY, check.url);
-    // Everything cached was fetched from the old endpoint.
-    quintaCache.clear();
-    return res.json({ ok: true, serverUrl: check.url, serverUrlSource: 'saved' });
-  } catch (error) {
-    console.error('Quinta server url save failed:', error?.message || error);
-    return res.status(500).json({ error: 'quinta_server_url_failed' });
-  }
-});
-
-app.delete('/api/quinta/settings', requireAuth, async (req, res) => {
-  try {
-    await ensureQuintaSettingsTable();
-    const settings = await quintaSettingsFor(req.session.userId);
-    quintaClearCache(settings.token);
-    await prisma.$executeRaw`DELETE FROM "QuintaUserSetting" WHERE "userId" = ${Number(req.session.userId)}`;
-    return res.json({ ok: true });
-  } catch (error) {
-    console.error('Quinta settings clear failed:', error?.message || error);
-    return res.status(500).json({ error: 'quinta_settings_failed' });
-  }
-});
-
-/* Says exactly what is wrong, because the alternative is an agent staring at a
-   red box with someone else's credential problem in it. Each failure is named
-   in terms of what the agent can do about it. */
-app.get('/api/quinta/test', requireAuth, async (req, res) => {
-  try {
-    if (!(await quintaServerUrl())) {
-      return res.json({ ok: false, stage: 'server', message: isAdminRole(req.session.role)
-        ? 'No Quinta server set yet. Put its URL in the Server endpoint field above and save.'
-        : 'No Quinta server set yet. An admin has to enter its URL before anyone can connect.' });
-    }
-    const settings = await quintaSettingsFor(req.session.userId);
-    if (!settings.token) return res.json({ ok: false, stage: 'token', message: 'No token saved yet. Paste the one Quinta issued you above and save.' });
-
-    const data = await quintaCallTool(settings.token, 'get-dialogs-list', { categories: '10' });
-    const count = Object.values(data || {}).reduce((n, group) => n + Object.keys(group || {}).length, 0);
-    return res.json({ ok: true, stage: 'done', message: `Connected. The server answered with ${count} dialog${count === 1 ? '' : 's'}, so your token works.` });
-  } catch (error) {
-    return res.json({ ok: false, stage: 'call', message: quintaFriendlyError(error?.message || error) });
-  }
-});
-
-// The dialog/intent catalogue - what the bots can be asked about. Needs no
-// hotel, so this works as soon as a token is saved.
-app.get('/api/quinta/dialogs', requireAuth, async (req, res) => {
-  try {
-    const settings = await quintaSettingsFor(req.session.userId);
-    if (!(await quintaServerUrl())) return res.status(503).json({ error: 'quinta_server_not_configured' });
-    if (!settings.token) return res.status(401).json({ error: 'quinta_no_token' });
-    const categories = String(req.query.categories || '').trim();
-    const propertyKind = Math.min(4, Math.max(1, Number(req.query.propertyKind) || 1));
-    const data = await quintaCached(settings.token, `dialogs:${categories}:${propertyKind}`, 60 * 60 * 1000, () =>
-      quintaCallTool(settings.token, 'get-dialogs-list', {
-        ...(categories ? { categories } : {}),
-        description: true,
-        property_kind: propertyKind
-      }));
-
-    // The server groups dialogs by category into nested objects. Flattened here
-    // so the board can render, search and count them without knowing that shape.
-    const rows = [];
-    for (const [category, dialogs] of Object.entries(data || {})) {
-      if (!dialogs || typeof dialogs !== 'object') continue;
-      for (const [fid, dialog] of Object.entries(dialogs)) {
-        rows.push({ fid, category, name: dialog?.name || fid, description: dialog?.description || '' });
-      }
-    }
-    rows.sort((a, b) => a.fid.localeCompare(b.fid));
-    return res.json({ ok: true, total: rows.length, categories: [...new Set(rows.map(r => r.category))].sort(), rows });
-  } catch (error) {
-    console.error('Quinta dialogs failed:', error?.message || error);
-    return res.status(error?.status || 502).json({ error: 'quinta_dialogs_failed', message: quintaFriendlyError(error?.message || error) });
-  }
-});
-
-// The properties this agent covers, with the operational profile of each.
-app.get('/api/quinta/properties', requireAuth, async (req, res) => {
-  try {
-    const settings = await quintaSettingsFor(req.session.userId);
-    if (!(await quintaServerUrl())) return res.status(503).json({ error: 'quinta_server_not_configured' });
-    if (!settings.token) return res.status(401).json({ error: 'quinta_no_token' });
-    if (!settings.teamIds.length) return res.json({ ok: true, rows: [], note: 'no_team_ids_configured' });
-
-    const teams = settings.teamIds.map(entry => entry.teamId).join(',');
-    const data = await quintaCached(settings.token, `properties:${teams}`, 10 * 60 * 1000, () =>
-      quintaCallTool(settings.token, 'get-hotel-settings', { teams }));
-
-    // The profile comes back keyed by team id, or as a single object when one
-    // id was asked for - normalised to a list either way.
-    const byTeam = (data && typeof data === 'object' && !Array.isArray(data)) ? data : {};
-    const rows = settings.teamIds.map(entry => {
-      const profile = byTeam[entry.teamId] || byTeam[Number(entry.teamId)] || (settings.teamIds.length === 1 ? data : null) || {};
-      const info = profile.information || profile;
-      return {
-        teamId: entry.teamId,
-        name: info?.name || entry.label || `Property ${entry.teamId}`,
-        address: info?.address || null,
-        languages: profile?.velma_settings?.languages || profile?.languages || null,
-        services: profile?.services || null,
-        contacts: profile?.notification_contacts || profile?.contacts || null,
-        // Kept so an agent can see anything the shaping above did not name,
-        // rather than the board silently hiding fields it was not written for.
-        raw: profile
-      };
-    });
-    return res.json({ ok: true, total: rows.length, rows });
-  } catch (error) {
-    console.error('Quinta properties failed:', error?.message || error);
-    return res.status(error?.status || 502).json({ error: 'quinta_properties_failed', message: quintaFriendlyError(error?.message || error) });
-  }
-});
-
-
-// ---------------------------------------------------------------------------
 // Projects
 //
 // The team's Claude projects, runnable from the board.
@@ -6823,6 +6377,72 @@ async function mcpFindDuplicates(id, limit) {
   };
 }
 
+/* Registering a project from inside Claude.
+
+   There is no API that lists claude.ai Projects, so the board cannot pull them.
+   But the connector already runs the other way - Claude calls into this board -
+   and a Claude conversation started inside a project HAS that project's
+   instructions in its own context. So the project can push itself here.
+
+   The workflow that makes this useful: open a project in Claude and say
+   "register yourself with the support board". Claude reads its own instructions
+   and calls this, and the project appears in QT-Tools with a working form. It
+   is the one direction the connection actually supports, and it removes the
+   copy-and-paste that the registry would otherwise need. */
+async function mcpRegisterProject(apiUser, args) {
+  if (!isAdminRole(apiUser?.role)) {
+    throw Object.assign(new Error('admin_required: only an admin token may add or change a project on the board'), { status: 403 });
+  }
+  const name = String(args?.name || '').trim();
+  if (!name) throw Object.assign(new Error('name_required'), { status: 400 });
+
+  await ensureProjectTable();
+  const slug = (String(args?.slug || name).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'project').slice(0, 60);
+  const scope = PROJECT_SCOPES.has(String(args?.scope)) ? String(args.scope) : 'org';
+  const inputs = normalizeProjectInputs(args?.inputs);
+  const instructions = String(args?.instructions || '');
+
+  await prisma.$executeRaw`
+    INSERT INTO "ClaudeProject" ("slug","name","description","scope","owner","instructions","inputs","accent","createdBy","updatedAt")
+    VALUES (${slug}, ${name}, ${String(args?.description || '').slice(0, 600)}, ${scope}, ${String(args?.owner || '').slice(0, 80)},
+            ${instructions}, ${JSON.stringify(inputs)}::jsonb, ${String(args?.accent || 'slate')}, ${'mcp:' + (apiUser?.username || '')}, CURRENT_TIMESTAMP)
+    ON CONFLICT ("slug") DO UPDATE SET
+      "name" = EXCLUDED."name", "description" = EXCLUDED."description", "scope" = EXCLUDED."scope",
+      "owner" = EXCLUDED."owner", "inputs" = EXCLUDED."inputs", "accent" = EXCLUDED."accent",
+      -- An empty instructions field means "leave what is there", so a partial
+      -- re-register cannot wipe a project that was already set up properly.
+      "instructions" = CASE WHEN ${instructions} = '' THEN "ClaudeProject"."instructions" ELSE ${instructions} END,
+      "updatedAt" = CURRENT_TIMESTAMP
+  `;
+
+  const rows = await prisma.$queryRaw`SELECT "id","slug","name","instructions","inputs" FROM "ClaudeProject" WHERE "slug" = ${slug} LIMIT 1`;
+  const saved = Array.isArray(rows) ? rows[0] : null;
+  return {
+    ok: true,
+    slug,
+    name,
+    inputs: (saved?.inputs || []).map(f => f.key),
+    ready: !!String(saved?.instructions || '').trim(),
+    status: String(saved?.instructions || '').trim()
+      ? `"${name}" is on the board with ${(saved?.inputs || []).length} input field(s) and can be run from QT-Tools -> Projects.`
+      : `"${name}" is on the board but has no instructions, so it cannot be run yet. Call this again with the project's instructions to finish it.`
+  };
+}
+
+async function mcpListBoardProjects() {
+  await ensureProjectTable();
+  const rows = await prisma.$queryRaw`SELECT "slug","name","description","scope","owner","inputs","instructions" FROM "ClaudeProject" ORDER BY "name"`;
+  return (Array.isArray(rows) ? rows : []).map(r => ({
+    slug: r.slug,
+    name: r.name,
+    description: r.description || '',
+    scope: r.scope,
+    owner: r.owner || '',
+    inputs: (r.inputs || []).map(f => ({ key: f.key, label: f.label, type: f.type, required: !!f.required })),
+    ready: !!String(r.instructions || '').trim()
+  }));
+}
+
 async function mcpShiftHandover(hours) {
   const windowHours = Math.min(168, Math.max(1, Number(hours) || 12));
   const since = new Date(Date.now() - windowHours * 3600000);
@@ -7257,6 +6877,45 @@ function buildKanbanMcpServer(apiUser, { McpServer, z }) {
     },
     async ({ ticketId, limit }) => {
       try { return mcpTextResult(await mcpFindDuplicates(ticketId, limit)); } catch (error) { return mcpErrorResult(error); }
+    }
+  );
+
+  server.registerTool(
+    'register_project',
+    {
+      title: 'Put this project on the support board',
+      description: "Register the Claude project you are running inside with the support board, so the team can run it from QT-Tools without opening Claude. Use this when someone asks to add, register or update a project on the board. Claude exposes no API that lists projects, so this is how one gets there: read your OWN project instructions out of your context and pass them as instructions, and describe the information the project asks the user for as inputs - the board turns that list into a form. Calling it again with the same name updates the entry; leaving instructions empty keeps whatever is already saved.",
+      inputSchema: {
+        name: z.string().min(1).describe('The project name, as it appears in Claude.'),
+        description: z.string().optional().describe('One line on what the project does.'),
+        instructions: z.string().optional().describe("The project's own instructions, verbatim. This is what the board sends as the system prompt when it runs the project."),
+        owner: z.string().optional().describe('Who owns it - a person or a team.'),
+        scope: z.enum(['mine', 'org', 'shared']).optional().describe('Which tab it belongs under. Defaults to org.'),
+        inputs: z.array(z.object({
+          key: z.string().describe('Short identifier, e.g. websiteUrl.'),
+          label: z.string().describe('What the field is called on screen.'),
+          type: z.enum(['text', 'textarea', 'number', 'url', 'select']).optional(),
+          required: z.boolean().optional(),
+          placeholder: z.string().optional(),
+          help: z.string().optional(),
+          options: z.array(z.string()).optional().describe('For type select only.')
+        })).optional().describe('The information this project asks for. Each entry becomes a field on the board form.')
+      }
+    },
+    async (args) => {
+      try { return mcpTextResult(await mcpRegisterProject(apiUser, args)); } catch (error) { return mcpErrorResult(error); }
+    }
+  );
+
+  server.registerTool(
+    'list_board_projects',
+    {
+      title: 'List the projects registered on the board',
+      description: 'What is already on the support board, and whether each one has instructions saved. Use it before registering, to update an entry rather than duplicate it.',
+      inputSchema: {}
+    },
+    async () => {
+      try { return mcpTextResult(await mcpListBoardProjects()); } catch (error) { return mcpErrorResult(error); }
     }
   );
 
