@@ -5385,13 +5385,11 @@ app.get('/api/insights/suggest-assignee', requireAuth, async (req, res) => {
 //
 // The team's Claude projects, runnable from the board.
 //
-// Why they are held here rather than read from Claude: there is no API for
-// claude.ai Projects. The Admin API covers members, invites, workspaces, API
-// keys, rate limits, service accounts, WIF and CMEK; for a claude.ai
-// organisation it is narrower still - members, invites, groups, custom roles,
-// spend limits. A project's name, description and instructions are not
-// retrievable by any of them. So the board keeps its own registry, and an admin
-// pastes the instructions in once.
+// The board keeps a local registry because ordinary Claude API keys cannot list
+// claude.ai Projects. Enterprise/eligible orgs can sync them through the
+// Compliance Projects API when a user connects a Compliance Access Key with
+// read:compliance_user_data. That API returns metadata and instructions, so a
+// synced project can be made runnable without manually pasting the prompt.
 //
 // What that buys, and it is the point of the feature: each project declares its
 // own inputs, so the board can render a real form for it instead of a chat box,
@@ -5400,6 +5398,8 @@ app.get('/api/insights/suggest-assignee', requireAuth, async (req, res) => {
 const PROJECT_SCOPES = new Set(['mine', 'org', 'shared']);
 const PROJECT_FIELD_TYPES = new Set(['text', 'textarea', 'number', 'select', 'url']);
 const PROJECT_MODEL = String(process.env.PROJECT_MODEL || 'claude-opus-5').trim();
+const CLAUDE_COMPLIANCE_API_BASE = String(process.env.CLAUDE_COMPLIANCE_API_BASE || 'https://api.anthropic.com').replace(/\/+$/, '');
+const CLAUDE_PROJECT_SYNC_LIMIT = Math.min(500, Math.max(1, Number(process.env.CLAUDE_PROJECT_SYNC_LIMIT || 100)));
 // Runs cost money and are started by a button, so they get their own ceiling
 // rather than sharing the general API limiter.
 const projectRunLimiter = rateLimit({ windowMs: 60 * 1000, max: 10, standardHeaders: true, legacyHeaders: false });
@@ -5423,7 +5423,15 @@ async function ensureProjectTable() {
       "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
     )
   `;
+  await prisma.$executeRaw`ALTER TABLE "ClaudeProject" ADD COLUMN IF NOT EXISTS "claudeProjectId" TEXT`;
+  await prisma.$executeRaw`ALTER TABLE "ClaudeProject" ADD COLUMN IF NOT EXISTS "source" TEXT NOT NULL DEFAULT 'manual'`;
+  await prisma.$executeRaw`ALTER TABLE "ClaudeProject" ADD COLUMN IF NOT EXISTS "sourceUserId" INTEGER`;
+  await prisma.$executeRaw`ALTER TABLE "ClaudeProject" ADD COLUMN IF NOT EXISTS "sourceUserEmail" TEXT`;
+  await prisma.$executeRaw`ALTER TABLE "ClaudeProject" ADD COLUMN IF NOT EXISTS "sourceDeletedAt" TIMESTAMP(3)`;
+  await prisma.$executeRaw`ALTER TABLE "ClaudeProject" ADD COLUMN IF NOT EXISTS "syncedAt" TIMESTAMP(3)`;
   await prisma.$executeRaw`CREATE INDEX IF NOT EXISTS "ClaudeProject_scope_idx" ON "ClaudeProject"("scope")`;
+  await prisma.$executeRaw`CREATE UNIQUE INDEX IF NOT EXISTS "ClaudeProject_claudeProjectId_key" ON "ClaudeProject"("claudeProjectId") WHERE "claudeProjectId" IS NOT NULL`;
+  await prisma.$executeRaw`CREATE INDEX IF NOT EXISTS "ClaudeProject_sourceUserId_idx" ON "ClaudeProject"("sourceUserId")`;
 }
 
 /* The projects already in use, with the inputs each one asks for in its own
@@ -5524,6 +5532,195 @@ function normalizeProjectInputs(raw) {
   });
 }
 
+function projectSlugFromName(name) {
+  return (String(name || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'project').slice(0, 60);
+}
+
+async function uniqueProjectSlug(baseSlug, claudeProjectId = '') {
+  const base = projectSlugFromName(baseSlug) || 'project';
+  let slug = base;
+  for (let i = 2; i <= 50; i += 1) {
+    const rows = await prisma.$queryRaw`SELECT "id","claudeProjectId" FROM "ClaudeProject" WHERE "slug" = ${slug} LIMIT 1`;
+    const hit = Array.isArray(rows) ? rows[0] : null;
+    if (!hit || (claudeProjectId && hit.claudeProjectId === claudeProjectId)) return slug;
+    const suffix = `-${i}`;
+    slug = `${base.slice(0, Math.max(1, 60 - suffix.length))}${suffix}`;
+  }
+  return `${base.slice(0, 46)}-${crypto.randomBytes(4).toString('hex')}`;
+}
+
+function claudeConnectionProvider(userId) {
+  return `claude-compliance:${Number(userId)}`;
+}
+
+function maskSecret(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  if (raw.length <= 12) return `${raw.slice(0, 2)}...${raw.slice(-2)}`;
+  return `${raw.slice(0, 10)}...${raw.slice(-4)}`;
+}
+
+function normalizeClaudeAuthMode(value, credential) {
+  const mode = String(value || 'auto').trim().toLowerCase();
+  if (['auto', 'api_key', 'bearer'].includes(mode)) return mode;
+  return String(credential || '').trim().startsWith('sk-') ? 'api_key' : 'bearer';
+}
+
+function claudeConnectionStatusFromTokens(tokens) {
+  const meta = (tokens?.metadata && typeof tokens.metadata === 'object' && !Array.isArray(tokens.metadata)) ? tokens.metadata : {};
+  const credential = String(tokens?.accessToken || '').trim();
+  return {
+    connected: !!credential,
+    credentialMasked: maskSecret(credential),
+    authMode: normalizeClaudeAuthMode(meta.authMode, credential),
+    userEmail: meta.userEmail || '',
+    lastSyncAt: meta.lastSyncAt || null,
+    lastProjectCount: Number(meta.lastProjectCount || 0),
+    lastError: meta.lastError || ''
+  };
+}
+
+async function getClaudeConnectionForRequest(req) {
+  if (!req.session?.userId) return null;
+  return getStoredOAuthTokens(claudeConnectionProvider(req.session.userId));
+}
+
+function claudeComplianceHeaders(credential, mode) {
+  const headers = {
+    Accept: 'application/json',
+    'Content-Type': 'application/json',
+    'anthropic-version': '2023-06-01'
+  };
+  if (mode === 'bearer') headers.Authorization = `Bearer ${credential}`;
+  else headers['x-api-key'] = credential;
+  return headers;
+}
+
+async function claudeComplianceRequest(credential, pathname, { searchParams } = {}) {
+  const raw = String(credential || '').trim();
+  if (!raw) throw new Error('claude_not_connected');
+  const url = new URL(pathname, `${CLAUDE_COMPLIANCE_API_BASE}/`);
+  Object.entries(searchParams || {}).forEach(([key, value]) => {
+    if (value === undefined || value === null || value === '') return;
+    if (Array.isArray(value)) value.forEach(v => url.searchParams.append(key, String(v)));
+    else url.searchParams.set(key, String(value));
+  });
+
+  const preferred = raw.startsWith('sk-') ? 'api_key' : 'bearer';
+  const modes = preferred === 'api_key' ? ['api_key', 'bearer'] : ['bearer', 'api_key'];
+  let lastStatus = 0;
+  let lastText = '';
+  for (const mode of modes) {
+    const response = await fetch(url, { headers: claudeComplianceHeaders(raw, mode) });
+    const text = await response.text();
+    if (response.ok) return text ? JSON.parse(text) : {};
+    lastStatus = response.status;
+    lastText = text;
+    if (![401, 403].includes(response.status)) break;
+  }
+  const message = (() => {
+    try { return JSON.parse(lastText)?.error?.message || JSON.parse(lastText)?.message; }
+    catch (_) { return ''; }
+  })();
+  const error = new Error(message || `claude_compliance_${lastStatus || 'failed'}`);
+  error.status = lastStatus;
+  error.body = lastText;
+  throw error;
+}
+
+async function fetchClaudeProjects(credential, { userEmail = '' } = {}) {
+  const email = normalizeEmailForDb(userEmail || '');
+  const projects = [];
+  let page = '';
+  while (projects.length < CLAUDE_PROJECT_SYNC_LIMIT) {
+    const list = await claudeComplianceRequest(credential, '/v1/compliance/apps/projects', {
+      searchParams: { limit: Math.min(100, CLAUDE_PROJECT_SYNC_LIMIT - projects.length), page }
+    });
+    const rows = Array.isArray(list?.data) ? list.data : [];
+    for (const row of rows) {
+      if (projects.length >= CLAUDE_PROJECT_SYNC_LIMIT) break;
+      if (row?.deleted_at) continue;
+      const id = String(row?.id || '').trim();
+      if (!id) continue;
+      const detail = await claudeComplianceRequest(credential, `/v1/compliance/apps/projects/${encodeURIComponent(id)}`);
+      if (detail?.deleted_at) continue;
+      const ownerEmail = normalizeEmailForDb(detail?.user?.email_address || row?.user?.email_address || '');
+      if (email && ownerEmail !== email) continue;
+      projects.push({ ...row, ...detail, user: detail?.user || row?.user || null });
+    }
+    page = String(list?.next_page || '');
+    if (!list?.has_more || !page) break;
+  }
+  return projects;
+}
+
+function defaultInputsForSyncedClaudeProject(project) {
+  return [{
+    key: 'prompt',
+    label: 'Prompt',
+    type: 'textarea',
+    required: true,
+    placeholder: `Run ${String(project?.name || 'this project')} for...`
+  }];
+}
+
+async function upsertSyncedClaudeProject(project, req) {
+  await ensureProjectTable();
+  const claudeProjectId = String(project?.id || '').trim();
+  if (!claudeProjectId) return null;
+  const name = String(project?.name || 'Claude project').trim().slice(0, 200) || 'Claude project';
+  const description = String(project?.description || '').slice(0, 600);
+  const ownerEmail = normalizeEmailForDb(project?.user?.email_address || '');
+  const owner = ownerEmail || String(project?.user?.id || '').slice(0, 80);
+  const scope = project?.is_private ? 'mine' : 'org';
+  const instructions = String(project?.instructions || '');
+  const inputs = normalizeProjectInputs(defaultInputsForSyncedClaudeProject(project));
+  const model = String(project?.model || '').trim() || null;
+  const accent = project?.is_private ? 'rose' : 'indigo';
+  const sourceDeletedAt = project?.deleted_at ? new Date(project.deleted_at) : null;
+
+  const existingRows = await prisma.$queryRaw`SELECT "id","slug" FROM "ClaudeProject" WHERE "claudeProjectId" = ${claudeProjectId} LIMIT 1`;
+  const existing = Array.isArray(existingRows) ? existingRows[0] : null;
+  const slug = existing?.slug || await uniqueProjectSlug(name, claudeProjectId);
+  if (existing?.id) {
+    await prisma.$executeRaw`
+      UPDATE "ClaudeProject"
+      SET "name" = ${name}, "description" = ${description}, "scope" = ${scope}, "owner" = ${owner},
+          "instructions" = ${instructions}, "inputs" = ${JSON.stringify(inputs)}::jsonb, "model" = ${model},
+          "accent" = ${accent}, "source" = 'claude', "sourceUserId" = ${Number(req.session.userId)},
+          "sourceUserEmail" = ${ownerEmail || null}, "sourceDeletedAt" = ${sourceDeletedAt},
+          "syncedAt" = CURRENT_TIMESTAMP, "updatedAt" = CURRENT_TIMESTAMP
+      WHERE "id" = ${Number(existing.id)}
+    `;
+    return existing.id;
+  }
+
+  const inserted = await prisma.$queryRaw`
+    INSERT INTO "ClaudeProject" ("slug","name","description","scope","owner","instructions","inputs","model","accent","pinned","createdBy","updatedAt","claudeProjectId","source","sourceUserId","sourceUserEmail","sourceDeletedAt","syncedAt")
+    VALUES (${slug}, ${name}, ${description}, ${scope}, ${owner}, ${instructions}, ${JSON.stringify(inputs)}::jsonb,
+            ${model}, ${accent}, ${false}, ${'claude:' + (req.session.username || '')}, CURRENT_TIMESTAMP,
+            ${claudeProjectId}, 'claude', ${Number(req.session.userId)}, ${ownerEmail || null}, ${sourceDeletedAt}, CURRENT_TIMESTAMP)
+    RETURNING "id"
+  `;
+  return Array.isArray(inserted) ? inserted[0]?.id : null;
+}
+
+async function syncClaudeProjectsForRequest(req) {
+  const tokens = await getClaudeConnectionForRequest(req);
+  const credential = String(tokens?.accessToken || '').trim();
+  if (!credential) throw Object.assign(new Error('claude_not_connected'), { status: 409 });
+  const meta = (tokens?.metadata && typeof tokens.metadata === 'object' && !Array.isArray(tokens.metadata)) ? tokens.metadata : {};
+  const projects = await fetchClaudeProjects(credential, { userEmail: meta.userEmail || '' });
+  for (const project of projects) await upsertSyncedClaudeProject(project, req);
+  const nextMeta = { ...meta, lastSyncAt: new Date().toISOString(), lastProjectCount: projects.length, lastError: '' };
+  await setStoredOAuthTokens(claudeConnectionProvider(req.session.userId), {
+    accessToken: credential,
+    expiresAt: null,
+    metadata: nextMeta
+  });
+  return { count: projects.length, lastSyncAt: nextMeta.lastSyncAt };
+}
+
 function projectRow(row, { includeInstructions = false } = {}) {
   return {
     id: row.id,
@@ -5536,6 +5733,9 @@ function projectRow(row, { includeInstructions = false } = {}) {
     model: row.model || PROJECT_MODEL,
     accent: row.accent || 'slate',
     pinned: !!row.pinned,
+    source: row.source || 'manual',
+    sourceUserEmail: row.sourceUserEmail || '',
+    syncedAt: row.syncedAt || null,
     // Whether the project can actually be run yet. An empty instruction set is
     // the normal state for a freshly seeded project, not an error.
     ready: !!String(row.instructions || '').trim(),
@@ -5550,10 +5750,100 @@ app.get('/api/projects', requireAuth, async (req, res) => {
     const rows = await prisma.$queryRaw`SELECT * FROM "ClaudeProject" ORDER BY "pinned" DESC, "updatedAt" DESC`;
     const isAdmin = isAdminRole(req.session.role);
     const list = (Array.isArray(rows) ? rows : []).map(r => projectRow(r, { includeInstructions: isAdmin }));
-    return res.json({ ok: true, canEdit: isAdmin, model: PROJECT_MODEL, configured: !!String(process.env.ANTHROPIC_API_KEY || '').trim(), rows: list });
+    const claudeTokens = await getClaudeConnectionForRequest(req);
+    return res.json({
+      ok: true,
+      canEdit: isAdmin,
+      model: PROJECT_MODEL,
+      configured: !!String(process.env.ANTHROPIC_API_KEY || '').trim(),
+      claude: claudeConnectionStatusFromTokens(claudeTokens),
+      rows: list
+    });
   } catch (error) {
     console.error('Project list failed:', error?.message || error);
     return res.status(500).json({ error: 'project_list_failed' });
+  }
+});
+
+app.get('/api/claude/connection', requireAuth, async (req, res) => {
+  try {
+    const tokens = await getClaudeConnectionForRequest(req);
+    const user = await prisma.user.findUnique({ where: { id: Number(req.session.userId) }, select: { email: true } }).catch(() => null);
+    return res.json({ ok: true, suggestedEmail: user?.email || '', claude: claudeConnectionStatusFromTokens(tokens) });
+  } catch (error) {
+    console.error('Claude connection status failed:', error?.message || error);
+    return res.status(500).json({ error: 'claude_connection_status_failed' });
+  }
+});
+
+app.post('/api/claude/connection', requireAuth, projectRunLimiter, async (req, res) => {
+  try {
+    const credential = String(req.body?.credential || '').trim();
+    if (!credential) return res.status(400).json({ error: 'credential_required', message: 'Paste a Claude Compliance Access Key first.' });
+    const userEmail = normalizeEmailForDb(req.body?.userEmail || '');
+    const authMode = normalizeClaudeAuthMode(req.body?.authMode, credential);
+
+    await setStoredOAuthTokens(claudeConnectionProvider(req.session.userId), {
+      accessToken: credential,
+      expiresAt: null,
+      metadata: { userEmail, authMode, connectedAt: new Date().toISOString(), lastSyncAt: null, lastProjectCount: 0, lastError: '' }
+    });
+
+    const sync = await syncClaudeProjectsForRequest(req);
+    const tokens = await getClaudeConnectionForRequest(req);
+    return res.json({ ok: true, sync, claude: claudeConnectionStatusFromTokens(tokens) });
+  } catch (error) {
+    const detail = String(error?.message || error);
+    console.error('Claude connection failed:', detail);
+    const existing = await getClaudeConnectionForRequest(req).catch(() => null);
+    const meta = (existing?.metadata && typeof existing.metadata === 'object' && !Array.isArray(existing.metadata)) ? existing.metadata : {};
+    if (existing?.accessToken) {
+      await setStoredOAuthTokens(claudeConnectionProvider(req.session.userId), {
+        accessToken: existing.accessToken,
+        expiresAt: null,
+        metadata: { ...meta, lastError: detail.slice(0, 300) }
+      }).catch(() => null);
+    }
+    const status = Number(error?.status) || 502;
+    return res.status(status === 401 || status === 403 ? status : 502).json({
+      error: status === 403 ? 'claude_missing_scope' : (status === 401 ? 'claude_auth_failed' : 'claude_connection_failed'),
+      message: detail.slice(0, 300)
+    });
+  }
+});
+
+app.post('/api/claude/sync-projects', requireAuth, projectRunLimiter, async (req, res) => {
+  try {
+    const sync = await syncClaudeProjectsForRequest(req);
+    const tokens = await getClaudeConnectionForRequest(req);
+    return res.json({ ok: true, sync, claude: claudeConnectionStatusFromTokens(tokens) });
+  } catch (error) {
+    const detail = String(error?.message || error);
+    console.error('Claude project sync failed:', detail);
+    const existing = await getClaudeConnectionForRequest(req).catch(() => null);
+    const meta = (existing?.metadata && typeof existing.metadata === 'object' && !Array.isArray(existing.metadata)) ? existing.metadata : {};
+    if (existing?.accessToken) {
+      await setStoredOAuthTokens(claudeConnectionProvider(req.session.userId), {
+        accessToken: existing.accessToken,
+        expiresAt: null,
+        metadata: { ...meta, lastError: detail.slice(0, 300) }
+      }).catch(() => null);
+    }
+    const status = Number(error?.status) || 502;
+    return res.status(status === 409 ? 409 : (status === 401 || status === 403 ? status : 502)).json({
+      error: status === 409 ? 'claude_not_connected' : (status === 403 ? 'claude_missing_scope' : (status === 401 ? 'claude_auth_failed' : 'claude_sync_failed')),
+      message: detail.slice(0, 300)
+    });
+  }
+});
+
+app.delete('/api/claude/connection', requireAuth, async (req, res) => {
+  try {
+    await prisma.oAuthToken.delete({ where: { provider: claudeConnectionProvider(req.session.userId) } }).catch(() => null);
+    return res.json({ ok: true, claude: claudeConnectionStatusFromTokens(null) });
+  } catch (error) {
+    console.error('Claude disconnect failed:', error?.message || error);
+    return res.status(500).json({ error: 'claude_disconnect_failed' });
   }
 });
 
@@ -6379,10 +6669,10 @@ async function mcpFindDuplicates(id, limit) {
 
 /* Registering a project from inside Claude.
 
-   There is no API that lists claude.ai Projects, so the board cannot pull them.
-   But the connector already runs the other way - Claude calls into this board -
-   and a Claude conversation started inside a project HAS that project's
-   instructions in its own context. So the project can push itself here.
+   Compliance API sync can pull Enterprise/eligible-org projects when a user has
+   connected a key with the right scope. The connector still matters for
+   everyone else, and for quick updates from inside the project itself: Claude
+   calls into this board and pushes the instructions it already has in context.
 
    The workflow that makes this useful: open a project in Claude and say
    "register yourself with the support board". Claude reads its own instructions
@@ -6884,7 +7174,7 @@ function buildKanbanMcpServer(apiUser, { McpServer, z }) {
     'register_project',
     {
       title: 'Put this project on the support board',
-      description: "Register the Claude project you are running inside with the support board, so the team can run it from QT-Tools without opening Claude. Use this when someone asks to add, register or update a project on the board. Claude exposes no API that lists projects, so this is how one gets there: read your OWN project instructions out of your context and pass them as instructions, and describe the information the project asks the user for as inputs - the board turns that list into a form. Calling it again with the same name updates the entry; leaving instructions empty keeps whatever is already saved.",
+      description: "Register the Claude project you are running inside with the support board, so the team can run it from QT-Tools without opening Claude. Use this when someone asks to add, register or update a project on the board. If Compliance API sync is unavailable, this is the direct route: read your OWN project instructions out of your context and pass them as instructions, and describe the information the project asks the user for as inputs - the board turns that list into a form. Calling it again with the same name updates the entry; leaving instructions empty keeps whatever is already saved.",
       inputSchema: {
         name: z.string().min(1).describe('The project name, as it appears in Claude.'),
         description: z.string().optional().describe('One line on what the project does.'),

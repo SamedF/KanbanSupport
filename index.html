@@ -4846,6 +4846,10 @@ th {
 .pj-search { min-width:230px; }
 .pj-loading, .pj-empty { padding:40px 10px; text-align:center; color:var(--muted,#64748b); font-size:13px; }
 .pj-error-box { padding:14px; border-radius:10px; font-size:13px; background:var(--red-50,#fef2f2); border:1px solid var(--red-200,#fecaca); color:var(--red-700,#b91c1c); }
+.pj-connect-box { display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; margin:0 0 14px; padding:12px 14px; border:1px solid var(--border,#e2e8f0); border-radius:10px; background:var(--surface-soft,#f8fafc); font-size:12px; color:var(--text-soft,#334155); }
+.pj-connect-box strong { color:var(--text,#0f172a); }
+.pj-connect-actions { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.pj-secret { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:11px; }
 
 .pj-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(330px,1fr)); gap:12px; align-items:start; padding-bottom:30px; }
 .pj-card {
@@ -5341,7 +5345,7 @@ th {
 <div class="modal-bg" id="projects-editor"><div class="modal" style="max-width:720px;">
   <div class="modal-head"><h2 id="pj-editor-title">Project</h2><button class="modal-close-x" data-close="projects-editor"></button></div>
   <div class="modal-body-scroll" style="padding:14px 18px;">
-    <p class="pj-help" style="margin-top:0;">Claude has no API that lists projects or hands over their instructions, so the board keeps its own copy. Paste the project's instructions here once and it becomes runnable.</p>
+    <p class="pj-help" style="margin-top:0;">Projects synced from Claude bring their instructions with them. For manual projects, paste the project's instructions here once and it becomes runnable.</p>
     <label class="pj-field"><span>Name</span><input class="form-input" id="pj-e-name" type="text" autocomplete="off"></label>
     <label class="pj-field"><span>Slug <em>(leave blank to derive from the name)</em></span><input class="form-input" id="pj-e-slug" type="text" autocomplete="off"></label>
     <label class="pj-field"><span>Description</span><input class="form-input" id="pj-e-desc" type="text" autocomplete="off"></label>
@@ -5356,6 +5360,19 @@ th {
     <span style="flex:1"></span>
     <button class="btn-out" data-close="projects-editor">Cancel</button>
     <button class="btn-primary" id="pj-e-save">Save</button>
+  </div>
+</div></div>
+<div class="modal-bg" id="claude-connect-modal"><div class="modal" style="max-width:560px;">
+  <div class="modal-head"><h2>Connect Claude</h2><button class="modal-close-x" data-close="claude-connect-modal"></button></div>
+  <div class="modal-body-scroll" style="padding:14px 18px;">
+    <p class="pj-help" style="margin-top:0;">Use a Claude Compliance Access Key with <code>read:compliance_user_data</code>. The board imports matching claude.ai Projects into QT Tools for this signed-in user.</p>
+    <label class="pj-field"><span>Claude account email <em>(optional filter)</em></span><input class="form-input" id="claude-connect-email" type="email" autocomplete="email"></label>
+    <label class="pj-field"><span>Compliance Access Key</span><input class="form-input pj-secret" id="claude-connect-credential" type="password" autocomplete="off" spellcheck="false" placeholder="sk-ant-api01-..."></label>
+    <label class="pj-field"><span>Authentication</span><select class="form-input" id="claude-connect-auth"><option value="auto">Auto</option><option value="api_key">API key header</option><option value="bearer">Bearer token</option></select></label>
+  </div>
+  <div class="modal-actions">
+    <button class="btn-out" data-close="claude-connect-modal">Cancel</button>
+    <button class="btn-primary" id="claude-connect-save">Connect and sync</button>
   </div>
 </div></div>
 <div id="insights-view" style="display:none;min-height:calc(100dvh - 175px);padding:var(--content-pad);">
@@ -8693,11 +8710,12 @@ document.getElementById('insights-view-btn')?.addEventListener('click',()=>{if(v
    renders the form that fits it, then runs it against the API and shows the
    answer in place.
 
-   The catalogue lives in the board, not in Claude, because Claude has no API
-   that lists projects or hands over their instructions. See the server module.
+   The catalogue lives in the board. A user can connect a Claude Compliance
+   Access Key to sync claude.ai Projects into that catalogue; manual projects
+   still exist for accounts that cannot use the Compliance API.
    =========================================================================== */
 
-let projectsState = { state: 'idle', rows: [], canEdit: false, configured: false, model: '' };
+let projectsState = { state: 'idle', rows: [], canEdit: false, configured: false, model: '', claude: { connected: false } };
 let projectsTab = 'all';
 let projectsQuery = '';
 let projectOpen = null;      // slug of the project whose form is showing
@@ -8722,10 +8740,10 @@ async function loadProjects(){
     const res=await fetch('/api/projects',{credentials:'include'});
     const data=await res.json();
     projectsState=data?.error
-      ?{state:'error',rows:[],canEdit:false,configured:false,message:data.message||data.error}
-      :{state:'done',rows:data.rows||[],canEdit:!!data.canEdit,configured:!!data.configured,model:data.model||''};
+      ?{state:'error',rows:[],canEdit:false,configured:false,message:data.message||data.error,claude:{connected:false}}
+      :{state:'done',rows:data.rows||[],canEdit:!!data.canEdit,configured:!!data.configured,model:data.model||'',claude:data.claude||{connected:false}};
   }catch(error){
-    projectsState={state:'error',rows:[],canEdit:false,configured:false,message:String(error?.message||error)};
+    projectsState={state:'error',rows:[],canEdit:false,configured:false,message:String(error?.message||error),claude:{connected:false}};
   }
   renderProjectsView();
 }
@@ -8775,13 +8793,14 @@ function projectCardHtml(p){
       <div class="pj-card-title">
         <span class="pj-name">${esc(p.name)}</span>
         ${p.pinned?'<span class="pj-pin" title="Pinned">Pinned</span>':''}
+        ${p.source==='claude'?'<span class="pj-pin" title="Synced from Claude">Claude</span>':''}
         ${p.ready?'':'<span class="pj-nodraft" title="No instructions saved yet">Needs setup</span>'}
       </div>
       <div class="pj-desc">${esc(p.description||'')}</div>
-      <div class="pj-meta">${esc(p.owner?('by '+p.owner):'')}${fields.length?` · ${fields.length} input${fields.length===1?'':'s'}`:''}</div>
+      <div class="pj-meta">${esc(p.owner?('by '+p.owner):'')}${fields.length?` · ${fields.length} input${fields.length===1?'':'s'}`:''}${p.syncedAt?' · synced '+fmtDate(p.syncedAt):''}</div>
     </button>
     ${open?`<div class="pj-body">
-      ${p.ready?'':`<div class="pj-warn">Claude does not expose a project's instructions through any API, so this one cannot run until an admin pastes them in.${projectsState.canEdit?' Use <strong>Edit</strong> below.':''}</div>`}
+      ${p.ready?'':`<div class="pj-warn">This project cannot run until its instructions are saved.${projectsState.canEdit?' Use <strong>Edit</strong> below.':''}</div>`}
       ${fields.length?fields.map(f=>projectFieldHtml(p.slug,f)).join(''):'<p class="pj-help">This project takes no inputs.</p>'}
       <div class="pj-actions">
         <button class="btn-primary" data-pj-run="${esc(p.slug)}"${(!p.ready||!projectsState.configured||projectResult[p.slug]?.running)?' disabled':''}>Run</button>
@@ -8868,10 +8887,90 @@ async function deleteProjectFromEditor(){
   await loadProjects();
 }
 
+async function openClaudeConnectModal(){
+  const modal=document.getElementById('claude-connect-modal');
+  if(!modal)return;
+  document.getElementById('claude-connect-credential').value='';
+  document.getElementById('claude-connect-auth').value=projectsState.claude?.authMode||'auto';
+  try{
+    const res=await fetch('/api/claude/connection',{credentials:'include'});
+    const data=await res.json();
+    const suggested=data?.claude?.userEmail||data?.suggestedEmail||'';
+    document.getElementById('claude-connect-email').value=suggested;
+  }catch(_){
+    document.getElementById('claude-connect-email').value=projectsState.claude?.userEmail||'';
+  }
+  modal.classList.add('open');
+  setTimeout(()=>document.getElementById('claude-connect-credential')?.focus(),0);
+}
+
+async function saveClaudeConnection(){
+  const btn=document.getElementById('claude-connect-save');
+  const credential=document.getElementById('claude-connect-credential').value.trim();
+  if(!credential)return showToast('Paste the Claude Compliance Access Key first');
+  btn.disabled=true;
+  btn.textContent='Connecting...';
+  try{
+    const res=await fetch('/api/claude/connection',{
+      method:'POST',credentials:'include',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({
+        credential,
+        userEmail:document.getElementById('claude-connect-email').value.trim(),
+        authMode:document.getElementById('claude-connect-auth').value
+      })
+    });
+    const data=await res.json();
+    if(!res.ok)throw new Error(data?.message||data?.error||('HTTP '+res.status));
+    document.getElementById('claude-connect-modal').classList.remove('open');
+    showToast(`Synced ${data.sync?.count||0} Claude project${data.sync?.count===1?'':'s'}`,'ok');
+    await loadProjects();
+  }catch(error){
+    showToast('Claude connection failed: '+String(error?.message||error));
+  }finally{
+    btn.disabled=false;
+    btn.textContent='Connect and sync';
+  }
+}
+
+async function syncClaudeProjects(){
+  if(!projectsState.claude?.connected)return openClaudeConnectModal();
+  try{
+    const res=await fetch('/api/claude/sync-projects',{method:'POST',credentials:'include'});
+    const data=await res.json();
+    if(!res.ok)throw new Error(data?.message||data?.error||('HTTP '+res.status));
+    showToast(`Synced ${data.sync?.count||0} Claude project${data.sync?.count===1?'':'s'}`,'ok');
+    await loadProjects();
+  }catch(error){
+    showToast('Claude sync failed: '+String(error?.message||error));
+  }
+}
+
+async function disconnectClaude(){
+  if(!projectsState.claude?.connected)return;
+  if(!confirm('Disconnect Claude from this Kanban user? Synced projects already on the board stay here.'))return;
+  try{
+    const res=await fetch('/api/claude/connection',{method:'DELETE',credentials:'include'});
+    const data=await res.json().catch(()=>({}));
+    if(!res.ok)throw new Error(data?.message||data?.error||('HTTP '+res.status));
+    showToast('Claude disconnected','ok');
+    await loadProjects();
+  }catch(error){
+    showToast('Could not disconnect Claude: '+String(error?.message||error));
+  }
+}
+
 function renderProjectsView(){
   const host=document.getElementById('projects-body');
   if(!host)return;
   const s=projectsState;
+  const claude=s.claude||{connected:false};
+  const claudeStatus=claude.connected
+    ? `<div><strong>Claude connected</strong>${claude.userEmail?` for ${esc(claude.userEmail)}`:''}${claude.lastSyncAt?` · last sync ${esc(fmtDate(claude.lastSyncAt))}`:''}${claude.lastProjectCount?` · ${claude.lastProjectCount} imported`:''}</div>`
+    : '<div><strong>Claude not connected</strong> · connect to import projects from your Claude account.</div>';
+  const claudeControls=claude.connected
+    ? `<div class="pj-connect-actions"><button class="btn-primary" id="pj-claude-sync">Sync Claude</button><button class="btn-out" id="pj-claude-connect">Change key</button><button class="btn-out" id="pj-claude-disconnect">Disconnect</button></div>`
+    : `<div class="pj-connect-actions"><button class="btn-primary" id="pj-claude-connect">Connect Claude</button></div>`;
 
   const tabs=[['all','All'],['mine','Your projects'],['org','Organization'],['shared','Shared with you']];
   const header=`<div class="pj-head">
@@ -8883,6 +8982,7 @@ function renderProjectsView(){
         <button class="btn-out" id="pj-refresh">Refresh</button>
       </div>
     </div>
+    <div class="pj-connect-box">${claudeStatus}${claudeControls}</div>
     <div class="ins-tabs">${tabs.map(([k,l])=>`<button class="ins-tab${projectsTab===k?' active':''}" data-pj-tab="${k}">${esc(l)}</button>`).join('')}</div>`;
 
   if(s.state==='loading'||s.state==='idle'){host.innerHTML=header+'<div class="pj-loading"><span class="spinner"></span> Loading projects…</div>';return;}
@@ -8900,6 +9000,9 @@ function renderProjectsView(){
 
   host.querySelectorAll('[data-pj-tab]').forEach(b=>b.addEventListener('click',()=>{projectsTab=b.dataset.pjTab;renderProjectsView();}));
   host.querySelector('#pj-refresh')?.addEventListener('click',loadProjects);
+  host.querySelector('#pj-claude-connect')?.addEventListener('click',openClaudeConnectModal);
+  host.querySelector('#pj-claude-sync')?.addEventListener('click',syncClaudeProjects);
+  host.querySelector('#pj-claude-disconnect')?.addEventListener('click',disconnectClaude);
   host.querySelector('#pj-new')?.addEventListener('click',()=>openProjectEditor(null));
   host.querySelectorAll('[data-pj-open]').forEach(b=>b.addEventListener('click',()=>{
     const slug=b.dataset.pjOpen;
@@ -8937,6 +9040,7 @@ function renderProjectsView(){
 document.getElementById('projects-view-btn')?.addEventListener('click',()=>{if(viewMode==='projects')showBoardView();else showProjectsView();});
 document.getElementById('pj-e-save')?.addEventListener('click',saveProjectEditor);
 document.getElementById('pj-e-delete')?.addEventListener('click',deleteProjectFromEditor);
+document.getElementById('claude-connect-save')?.addEventListener('click',saveClaudeConnection);
 
 function renderActiveView(){if(viewMode==='board')renderBoard();else if(viewMode==='spam')renderSpamView();else if(viewMode==='archive')renderArchiveView();else if(viewMode==='kpi')renderKpiView();else if(viewMode==='assignlog')renderAssignLogView();else if(viewMode==='insights')renderInsightsView();else if(viewMode==='projects')renderProjectsView();else if(viewMode==='qtSeize')return;else renderCompaniesView();}
 
