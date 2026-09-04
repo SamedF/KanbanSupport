@@ -1885,6 +1885,35 @@ header {
   display: block;
 }
 
+/* Sits beside the linked chip in the card footer. The chip goes to Jira, so
+   changing a link needs its own control in the same row - the slot the Link
+   button occupies while the ticket is still unlinked. Dashed like that button,
+   because both mean "this link is editable" rather than "here is a fact". */
+.jira-edit-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 800;
+  padding: 3px 8px;
+  background: var(--surface, #fff);
+  border: 1px dashed var(--blue-300);
+  color: var(--blue-700);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.jira-edit-btn:hover {
+  background: var(--blue-50);
+  border-style: solid;
+}
+
+.jira-edit-btn:focus-visible {
+  outline: 2px solid var(--blue-300);
+  outline-offset: 2px;
+}
+
 .manual-badge {
   font-size: 9px;
   font-weight: 900;
@@ -11638,17 +11667,20 @@ function makeCard(ticket,isNew=false){
   const jiraBtn=jiraKey
     ?`<a class="jira-badge-card" data-jira-open="${id}" href="${jiraHref}" ${JIRA_URL?'target="_blank"':''} title="Jira: ${esc(jiraKey)}"> ${esc(jiraKey)}</a>`
     :`<button class="jira-link-btn" data-jira-open="${id}" title="Link to Jira ticket" aria-label="Link to Jira ticket"><img class="jira-link-icon" src="/assets/jira-logo.svg" alt="" aria-hidden="true"></button>`;
+  // The chip above opens Jira once a link exists, which left no way back to the
+  // modal that can change one. This is that way, in the footer row where the
+  // Link button sits while the ticket is unlinked - so the control for "which
+  // issue is this?" is always in the same place, linked or not.
+  const jiraEditBtn=jiraKey
+    ?`<button class="jira-edit-btn" data-jira-edit="${id}" title="Link this ticket to a different Jira issue" aria-label="Change Jira link">Change</button>`
+    :'';
   const jiraLinkedQt=(jiraInfo?.linkedIssues||[]).filter(x=>String(x.key||'').startsWith('QT-'));
   const jiraLinkedHtml=jiraLinkedQt.length?jiraLinkedQt.slice(0,2).map(x=>`<span style="display:inline-flex;align-items:center;gap:4px;border:1px solid var(--indigo-200);border-radius:999px;padding:1px 7px;background:var(--indigo-50);color:var(--indigo-800);">${esc(x.key)} <span style="color:var(--slate-500);">${esc(x.status||'')}</span></span>`).join(' '):'<span style="color:var(--slate-400);">No QT linked</span>';
   const jiraCommentHtml=jiraInfo?.comments?.length?jiraInfo.comments.slice(-2).reverse().map(c=>`<div style="margin-top:3px;"><strong>${esc(c.author||'Unknown')}:</strong> ${esc(c.body||'').slice(0,140)}</div>`).join(''):'<div style="color:var(--slate-400);margin-top:3px;">No Jira comments</div>';
   const jiraStateHtml=jiraError
     ?`<div style="margin-top:4px;color:var(--amber-700);">Jira details unavailable</div><div style="margin-top:3px;color:var(--amber-800);white-space:normal;">${esc(jiraError.slice(0,180))}</div>`
     :(jiraInfo?.status?`<span style="font-weight:700;color:var(--slate-900);">${esc(jiraInfo.status)}</span>`:`<span style="color:var(--slate-400);">Loading...</span>`);
-  // Outside the jiraError branch below on purpose: a key typed wrong is one of
-  // the reasons Jira cannot return any details, so "Change Jira link" has to be
-  // there in exactly the state where the panel has nothing else to show.
-  const jiraEditRowHtml=`<div style="margin-top:6px;display:flex;justify-content:flex-end;"><button class="btn-out" data-jira-edit="${id}" title="Link this ticket to a different Jira issue" style="font-size:10px;padding:2px 8px;">Change Jira link</button></div>`;
-  const jiraDetailsHtml=jiraKey?`<div style="margin-top:6px;padding:7px 8px;border:1px solid var(--blue-100);border-radius:10px;background:var(--legacy-f8fbff);font-size:10px;line-height:1.35;color:var(--slate-700);"><div style="display:flex;justify-content:space-between;gap:8px;align-items:center;"><strong style="color:var(--blue-700);">Jira</strong>${jiraStateHtml}</div>${jiraError?'':`<div style="margin-top:4px;">Assignee: <strong>${esc(jiraInfo?.assignee||'Unknown')}</strong></div><div>Reporter: <strong>${esc(jiraInfo?.reporter||'Unknown')}</strong></div><div style="margin-top:4px;">QT links: ${jiraLinkedHtml}</div><div style="margin-top:4px;">Comments:${jiraCommentHtml}</div>`}${jiraEditRowHtml}</div>`:'';
+  const jiraDetailsHtml=jiraKey?`<div style="margin-top:6px;padding:7px 8px;border:1px solid var(--blue-100);border-radius:10px;background:var(--legacy-f8fbff);font-size:10px;line-height:1.35;color:var(--slate-700);"><div style="display:flex;justify-content:space-between;gap:8px;align-items:center;"><strong style="color:var(--blue-700);">Jira</strong>${jiraStateHtml}</div>${jiraError?'':`<div style="margin-top:4px;">Assignee: <strong>${esc(jiraInfo?.assignee||'Unknown')}</strong></div><div>Reporter: <strong>${esc(jiraInfo?.reporter||'Unknown')}</strong></div><div style="margin-top:4px;">QT links: ${jiraLinkedHtml}</div><div style="margin-top:4px;">Comments:${jiraCommentHtml}</div>`}</div>`:'';
   const hsTicketId=ticketHubspotId[id]||'';
   const inFlight=hubspotTicketSyncInFlight.has(id);
   if(inFlight){
@@ -11720,6 +11752,7 @@ function makeCard(ticket,isNew=false){
       <div class="card-actions">
         <span class="card-date">${fmtDate(email.receivedDateTime)}</span>
         ${jiraBtn}
+        ${jiraEditBtn}
         ${hsTicketBtn}
         ${trControlsHtml}
         <button class="open-email-btn" data-oe="${id}"> Open</button>
