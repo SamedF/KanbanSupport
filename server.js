@@ -1297,14 +1297,69 @@ function shiftAgentFromRequest(req, bodyAgent) {
   return null;
 }
 
+/* A break is fifteen minutes, and there is one every two hours.
+
+   Enforced on read rather than by a timer: a break that was started and never
+   ended is simply treated as having ended fifteen minutes after it began, so
+   an agent who closes the laptop mid-break does not get an open-ended pause on
+   their SLA clock. The cooldown is measured from the START of the last break -
+   from the end would let someone take fifteen minutes, come back, and be
+   eligible again two hours later having actually paused twice in that window. */
+const SHIFT_BREAK_MS = Number(process.env.SHIFT_BREAK_MS || 15 * 60 * 1000);
+const SHIFT_BREAK_COOLDOWN_MS = Number(process.env.SHIFT_BREAK_COOLDOWN_MS || 2 * 60 * 60 * 1000);
+
+// The moment a break actually finished, capped at its fifteen minutes.
+function breakEndMs(b, now = Date.now()) {
+  const start = Number(b?.start || 0);
+  if (!start) return 0;
+  const cap = start + SHIFT_BREAK_MS;
+  const ended = (b.end === null || b.end === undefined) ? now : Number(b.end);
+  return Math.min(ended, cap);
+}
+// Closes any break that has run past its cap, so the stored history matches
+// what the clock already assumes.
+function capExpiredBreaks(rec, now = Date.now()) {
+  let changed = false;
+  (rec?.sessions || []).forEach(session => {
+    (session.breaks || []).forEach(b => {
+      if ((b.end === null || b.end === undefined) && Number(b.start || 0) + SHIFT_BREAK_MS <= now) {
+        b.end = Number(b.start) + SHIFT_BREAK_MS;
+        changed = true;
+      }
+    });
+  });
+  return changed;
+}
+function lastBreakStart(rec) {
+  let latest = 0;
+  (rec?.sessions || []).forEach(session => {
+    (session.breaks || []).forEach(b => { latest = Math.max(latest, Number(b.start || 0)); });
+  });
+  return latest;
+}
+// How long until this agent may take another break. 0 means now.
+function breakCooldownRemaining(rec, now = Date.now()) {
+  const last = lastBreakStart(rec);
+  if (!last) return 0;
+  return Math.max(0, (last + SHIFT_BREAK_COOLDOWN_MS) - now);
+}
+
 function shiftSnapshotFor(code) {
   const rec = shiftStore.agents[code];
   if (!rec) return { agent: code, onShift: false, onBreak: false, sessions: [] };
+  const now = Date.now();
+  capExpiredBreaks(rec, now);
   const last = rec.sessions[rec.sessions.length - 1];
+  const openBreak = last && last.end === null ? last.breaks.find(b => b.end === null) : null;
   return {
     agent: code,
     onShift: !!(last && last.end === null),
-    onBreak: !!(last && last.end === null && last.breaks.some(b => b.end === null)),
+    onBreak: !!openBreak,
+    // What the button needs to draw itself without knowing the rules.
+    breakEndsAt: openBreak ? Number(openBreak.start) + SHIFT_BREAK_MS : 0,
+    breakMs: SHIFT_BREAK_MS,
+    cooldownMs: SHIFT_BREAK_COOLDOWN_MS,
+    cooldownRemainingMs: breakCooldownRemaining(rec, now),
     lastSeen: rec.lastSeen || 0,
     sessions: rec.sessions
   };
@@ -1346,6 +1401,42 @@ function isWeekendDate(date) {
 // Milliseconds of [from,to) landing on a weekday. Walks day by day via setDate
 // rather than adding a fixed 86400000 so a daylight-saving change cannot drift
 // the day boundaries.
+/* The hours the SLA clock actually runs.
+
+   08:00-12:00 and 14:00-17:00, weekdays: seven hours a day, not twenty-four and
+   not the nine between the first and last. The lunch gap matters - counting
+   through it made a ticket that arrived at 11:50 look an hour older by 14:00
+   than the work anyone could have done on it.
+
+   Walked a day at a time with setHours rather than by adding 86400000, so a
+   daylight-saving change moves the window with the clock instead of shifting it
+   by an hour. */
+const BUSINESS_WINDOWS = [[8, 0, 12, 0], [14, 0, 17, 0]];
+const BUSINESS_MS_PER_DAY = BUSINESS_WINDOWS.reduce((total, [sh, sm, eh, em]) => total + ((eh * 60 + em) - (sh * 60 + sm)) * 60000, 0);
+function businessMsInRange(from, to) {
+  if (!(to > from)) return 0;
+  let total = 0;
+  const cursor = new Date(from);
+  cursor.setHours(0, 0, 0, 0);
+  while (cursor.getTime() < to) {
+    const next = new Date(cursor);
+    next.setDate(next.getDate() + 1);
+    next.setHours(0, 0, 0, 0);
+    if (!isWeekendDate(cursor)) {
+      for (const [sh, sm, eh, em] of BUSINESS_WINDOWS) {
+        const windowStart = new Date(cursor); windowStart.setHours(sh, sm, 0, 0);
+        const windowEnd = new Date(cursor); windowEnd.setHours(eh, em, 0, 0);
+        const start = Math.max(windowStart.getTime(), from);
+        const end = Math.min(windowEnd.getTime(), to);
+        if (end > start) total += end - start;
+      }
+    }
+    cursor.setTime(next.getTime());
+  }
+  return total;
+}
+// Superseded by businessMsInRange - kept because the shift report still counts
+// presence in whole weekdays, which is a different question from SLA time.
 function weekdayMsInRange(from, to) {
   if (!(to > from)) return 0;
   let total = 0;
@@ -1378,11 +1469,11 @@ function shiftElapsedMs(fromMs, toMs, agentCode) {
     const start = Math.max(Number(s.start || 0), fromMs);
     const end = Math.min(s.end === null || s.end === undefined ? now : Number(s.end), toMs);
     if (!(end > start)) return;
-    let worked = weekdayMsInRange(start, end);
+    let worked = businessMsInRange(start, end);
     (s.breaks || []).forEach((b) => {
       const bs = Math.max(Number(b.start || 0), start);
-      const be = Math.min(b.end === null || b.end === undefined ? now : Number(b.end), end);
-      if (be > bs) worked -= weekdayMsInRange(bs, be);
+      const be = Math.min(breakEndMs(b, now), end);
+      if (be > bs) worked -= businessMsInRange(bs, be);
     });
     total += Math.max(0, worked);
   });
@@ -1398,8 +1489,13 @@ function shiftElapsedMs(fromMs, toMs, agentCode) {
 //                     "4h left" for a ticket nobody owns would be a fiction, so
 //                     these are counted and reported separately rather than
 //                     folded into compliance.
+
 function ticketSlaSnapshot(ticket, now = Date.now()) {
-  const createdMs = ticket?.createdAt ? new Date(ticket.createdAt).getTime() : NaN;
+  const arrivedMs = ticket?.createdAt ? new Date(ticket.createdAt).getTime() : NaN;
+  const resetMs = ticket?.slaResetAt ? new Date(ticket.slaResetAt).getTime() : NaN;
+  // The later of the two: a thread that has been replied to is measured from
+  // its last reply, an untouched one from when it arrived. Mirrors the board.
+  const createdMs = Number.isFinite(resetMs) && (!Number.isFinite(arrivedMs) || resetMs > arrivedMs) ? resetMs : arrivedMs;
   const targetHours = slaTargetHoursFor(ticket?.priority);
   const targetMs = targetHours * 3600000;
   const resolved = normalizeDbStatusForBoard(ticket?.status) === 'res';
@@ -2849,8 +2945,7 @@ function refreshDataHygieneCache(token) {
 }
 
 
-async function upsertBoardTicketsToDatabase(state, req) {
-  if (!state || typeof state !== 'object') return { count: 0 };
+async function upsertBoardTicketsToDatabase(state, req) {  if (!state || typeof state !== 'object') return { count: 0 };
 
   const allTickets = Array.isArray(state.allTickets) ? state.allTickets : [];
   const ticketState = state.ticketState || {};
@@ -2865,6 +2960,10 @@ async function upsertBoardTicketsToDatabase(state, req) {
   const ticketDuplicateOf = state.ticketDuplicateOf || {};
   const ticketHubspotId = state.ticketHubspotId || {};
   const ticketComments = state.ticketComments || {};
+  // When each ticket's SLA clock was last restarted by a reply. Written by the
+  // board; mirrored into the row so the KPI dashboard measures the same thing
+  // the badges do.
+  const ticketSlaResetAt = state.ticketSlaResetAt || {};
 
   const externalIds = [...new Set(allTickets.filter(t => t && t.id).map(t => String(t.id)))];
   // Fetch every existing ticket (and its comments) in one round trip instead of
@@ -2895,6 +2994,7 @@ async function upsertBoardTicketsToDatabase(state, req) {
     const assignedAgent = SUPPORT_AGENT_CODES.has(rawAssignedAgent) ? rawAssignedAgent : null;
     const csAgent = CS_AGENT_CODES.has(rawCsAgent) ? rawCsAgent : (CS_AGENT_CODES.has(rawAssignedAgent) ? rawAssignedAgent : null);
     const createdAt = safeDateForDb(email.receivedDateTime || ticketCreatedAt[externalId]) || new Date();
+    const slaResetAt = safeDateForDb(Number(ticketSlaResetAt[externalId] || 0) || null);
     const body = String(email.bodyPreview || email.preview || email.summary || email.body || email.text || '').trim() || null;
     const companyName = extractCompanyNameFromEmail(senderEmail);
     const existingTicket = existingByExternalId.get(externalId) || null;
@@ -2939,7 +3039,8 @@ async function upsertBoardTicketsToDatabase(state, req) {
       && existingTicket.hubspotTicketId === hubspotTicketId
       && existingTicket.jiraTicketKey === jiraTicketKey
       && existingTicket.duplicateOfExternalId === duplicateOfExternalId
-      && existingTicket.body === body;
+      && existingTicket.body === body
+      && Number(existingTicket.slaResetAt ? new Date(existingTicket.slaResetAt).getTime() : 0) === Number(slaResetAt ? slaResetAt.getTime() : 0);
 
     if (fieldsUnchanged && !newComments.length) continue;
 
@@ -2966,6 +3067,7 @@ async function upsertBoardTicketsToDatabase(state, req) {
         body,
         emailRaw: email,
         createdAt,
+        slaResetAt,
         resolvedAt: resolvedAtForDb
       },
       update: {
@@ -2985,6 +3087,7 @@ async function upsertBoardTicketsToDatabase(state, req) {
         duplicateOfExternalId,
         body,
         emailRaw: email,
+        slaResetAt,
         resolvedAt: resolvedAtForDb,
         // Leave untouched (undefined) while staying Resolved - the atomic
         // claim above owns setting it. Reset to null on leaving Resolved so
@@ -3496,9 +3599,22 @@ app.post('/api/shift/break', requireAuth, (req, res) => {
   const rec = shiftAgentRecord(code);
   rec.lastSeen = now;
   const session = openShiftSession(rec, now);
+  capExpiredBreaks(rec, now);
   const openBreak = session.breaks.find(b => b.end === null);
-  if (openBreak) openBreak.end = now;
-  else session.breaks.push({ start: now, end: null });
+  if (openBreak) {
+    // Coming back early is always allowed; the cap only ever shortens a break.
+    openBreak.end = Math.min(now, Number(openBreak.start) + SHIFT_BREAK_MS);
+  } else {
+    const remaining = breakCooldownRemaining(rec, now);
+    if (remaining > 0) {
+      return res.status(429).json({
+        error: 'break_cooldown',
+        cooldownRemainingMs: remaining,
+        ...shiftSnapshotFor(code)
+      });
+    }
+    session.breaks.push({ start: now, end: null });
+  }
   persistShiftStore();
   return res.json({ ok: true, ...shiftSnapshotFor(code) });
 });
@@ -4042,10 +4158,10 @@ const KPI_TICKET_SELECT = {
   duplicateOfExternalId: true,
   createdAt: true,
   updatedAt: true,
-  resolvedAt: true
+  resolvedAt: true,
+  slaResetAt: true
 };
-async function loadKpiWorkingSet(req) {
-  const bounds = kpiDateBounds(req.query.range);
+async function loadKpiWorkingSet(req) {  const bounds = kpiDateBounds(req.query.range);
   const role = normalizeRole(req.session.role) || 'support';
   const username = String(req.session.username || '').trim().toUpperCase();
   const team = String(req.query.team || 'all').trim().toLowerCase();
@@ -4944,6 +5060,78 @@ app.get('/api/insights/board-at', requireAuth, async (req, res) => {
 });
 
 // --- One ticket's timeline -------------------------------------------------
+/* Graph's message list, reduced to what the board renders. Separated from the
+   handler so the parts that can be got wrong - dropping drafts, ordering by
+   time, tolerating the fields Graph omits - are testable without a mailbox. */
+function shapeThreadMessages(value) {
+  return (value || [])
+    .filter(m => !m.isDraft)
+    .map(m => ({
+      id: m.id,
+      subject: m.subject || '',
+      from: m.from?.emailAddress?.address || '',
+      fromName: m.from?.emailAddress?.name || '',
+      to: (m.toRecipients || []).map(r => r.emailAddress?.address).filter(Boolean),
+      cc: (m.ccRecipients || []).map(r => r.emailAddress?.address).filter(Boolean),
+      receivedDateTime: m.receivedDateTime || m.sentDateTime || null,
+      bodyType: m.body?.contentType === 'text' ? 'text' : 'html',
+      body: m.body?.content || '',
+      preview: m.bodyPreview || '',
+      hasAttachments: !!m.hasAttachments,
+      webLink: m.webLink || ''
+    }))
+    .sort((a, b) => new Date(a.receivedDateTime || 0) - new Date(b.receivedDateTime || 0));
+}
+
+/* The whole conversation, not just the newest message.
+
+   A ticket is a thread, but the board only ever fetched one message from it -
+   whichever reply arrived last. Everything before that was only readable in the
+   quoted text the client's mail app happened to include, which is inconsistent,
+   often truncated, and gone entirely when someone replies without quoting. An
+   agent picking up a ticket mid-conversation could not see what had been said.
+
+   Graph groups a thread by conversationId, so this asks for every message
+   carrying the ticket's, oldest first. The bodies come back as the senders
+   wrote them and are sanitised on the client by the same allowlist the single
+   message goes through - see emSanitizeEmailHtml.
+
+   Only messages count: Graph returns drafts in a conversation too, and a
+   half-written reply sitting in someone's Drafts is not part of what was said. */
+app.get('/api/tickets/:externalId/thread', requireAuth, async (req, res) => {
+  try {
+    const externalId = String(req.params.externalId || '').trim();
+    if (!externalId) return res.status(400).json({ error: 'missing_ticket' });
+
+    // The conversation id is on the ticket's stored raw mail; the client can
+    // also pass it directly for a ticket the database has not caught up with.
+    let conversationId = String(req.query.conversationId || '').trim();
+    if (!conversationId) {
+      const row = await prisma.ticket.findUnique({ where: { externalId }, select: { emailRaw: true } }).catch(() => null);
+      const raw = (row?.emailRaw && typeof row.emailRaw === 'object') ? row.emailRaw : {};
+      conversationId = String(raw.conversationId || '').trim();
+    }
+    if (!conversationId) return res.json({ ok: true, externalId, messages: [], note: 'no_conversation_id' });
+
+    const select = '$select=id,subject,bodyPreview,body,from,toRecipients,ccRecipients,receivedDateTime,sentDateTime,webLink,isDraft,hasAttachments,conversationId';
+    // Escape the quote Graph delimits the filter with, or an id containing one
+    // would break the query rather than simply not matching.
+    const filter = `$filter=conversationId eq '${conversationId.replace(/'/g, "''")}'`;
+    const data = await graphGetResilient(
+      `/users/${encodeURIComponent(SUPPORT_MAILBOX)}/messages?${filter}&${select}&$orderby=receivedDateTime asc&$top=50`,
+      req
+    );
+
+    const messages = shapeThreadMessages(data?.value);
+
+    return res.json({ ok: true, externalId, conversationId, total: messages.length, messages });
+  } catch (error) {
+    const detail = String(error?.message || error);
+    console.error('Ticket thread failed:', detail);
+    return res.status(502).json({ error: 'thread_failed', message: detail.slice(0, 300) });
+  }
+});
+
 app.get('/api/tickets/:externalId/timeline', requireAuth, async (req, res) => {
   try {
     const externalId = String(req.params.externalId || '').trim();
@@ -5193,179 +5381,735 @@ app.get('/api/insights/suggest-assignee', requireAuth, async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
-// Quinta MCP: the properties this team supports, inside the board
+// Projects
 //
-// An agent working a ticket about a hotel has to leave the board to find out
-// anything about that hotel - which languages its bot speaks, what services it
-// has, who to notify. That data already exists on the Quinta MCP server; it was
-// just only reachable from a Claude conversation, never from here.
+// The team's Claude projects, runnable from the board.
 //
-// This is an ordinary MCP client, pointed at that server. Two things about it
-// are worth knowing:
+// The board keeps a local registry because ordinary Claude API keys cannot list
+// claude.ai Projects. Enterprise/eligible orgs can sync them through the
+// Compliance Projects API when a user connects a Compliance Access Key with
+// read:compliance_user_data. That API returns metadata and instructions, so a
+// synced project can be made runnable without manually pasting the prompt.
 //
-//   1. The board authenticates as ITSELF, with its own token. It cannot reuse
-//      anyone's Claude connector - that OAuth grant belongs to a Claude
-//      account, not to this server, and there is no mechanism to borrow it.
-//
-//   2. There is no "list every hotel" tool. get-hotel-settings is a lookup by
-//      numeric teamId, so the board has to be told which properties it covers
-//      (QUINTA_TEAM_IDS). Until that list exists the dialog catalogue still
-//      works, because get-dialogs-list needs no hotel at all.
+// What that buys, and it is the point of the feature: each project declares its
+// own inputs, so the board can render a real form for it instead of a chat box,
+// and run it against the API without anyone leaving the board.
 // ---------------------------------------------------------------------------
-const QUINTA_MCP_URL = String(process.env.QUINTA_MCP_URL || '').trim();
-const QUINTA_MCP_TOKEN = String(process.env.QUINTA_MCP_TOKEN || '').trim();
-// Comma-separated numeric team ids, optionally "id:Label" to give one a name
-// before the server has been asked for its profile.
-const QUINTA_TEAM_IDS = String(process.env.QUINTA_TEAM_IDS || '')
-  .split(/[,;\s]+/)
-  .map(entry => entry.trim())
-  .filter(Boolean)
-  .map(entry => {
-    const [id, ...label] = entry.split(':');
-    return { teamId: String(id).trim(), label: label.join(':').trim() || null };
-  })
-  .filter(entry => /^\d+$/.test(entry.teamId));
+const PROJECT_SCOPES = new Set(['mine', 'org', 'shared']);
+const PROJECT_FIELD_TYPES = new Set(['text', 'textarea', 'number', 'select', 'url']);
+const PROJECT_MODEL = String(process.env.PROJECT_MODEL || 'claude-opus-5').trim();
+const CLAUDE_COMPLIANCE_API_BASE = String(process.env.CLAUDE_COMPLIANCE_API_BASE || 'https://api.anthropic.com').replace(/\/+$/, '');
+const CLAUDE_PROJECT_SYNC_LIMIT = Math.min(500, Math.max(1, Number(process.env.CLAUDE_PROJECT_SYNC_LIMIT || 100)));
+// Runs cost money and are started by a button, so they get their own ceiling
+// rather than sharing the general API limiter.
+const projectRunLimiter = rateLimit({ windowMs: 60 * 1000, max: 10, standardHeaders: true, legacyHeaders: false });
 
-function quintaConfigured() { return !!(QUINTA_MCP_URL && QUINTA_MCP_TOKEN); }
-function quintaSetupHint() {
-  const missing = [];
-  if (!QUINTA_MCP_URL) missing.push('QUINTA_MCP_URL (the Quinta MCP server endpoint)');
-  if (!QUINTA_MCP_TOKEN) missing.push('QUINTA_MCP_TOKEN (a bearer token the board can use as itself)');
-  if (!QUINTA_TEAM_IDS.length) missing.push('QUINTA_TEAM_IDS (comma-separated numeric team ids - there is no list-all tool, so the board has to be told which properties it covers)');
-  return missing.length ? `Not configured. Set ${missing.join(', ')} and restart.` : '';
+async function ensureProjectTable() {
+  await prisma.$executeRaw`
+    CREATE TABLE IF NOT EXISTS "ClaudeProject" (
+      "id" SERIAL PRIMARY KEY,
+      "slug" TEXT NOT NULL UNIQUE,
+      "name" TEXT NOT NULL,
+      "description" TEXT,
+      "scope" TEXT NOT NULL DEFAULT 'org',
+      "owner" TEXT,
+      "instructions" TEXT,
+      "inputs" JSONB NOT NULL DEFAULT '[]'::jsonb,
+      "model" TEXT,
+      "accent" TEXT,
+      "pinned" BOOLEAN NOT NULL DEFAULT false,
+      "createdBy" TEXT,
+      "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+  `;
+  await prisma.$executeRaw`ALTER TABLE "ClaudeProject" ADD COLUMN IF NOT EXISTS "claudeProjectId" TEXT`;
+  await prisma.$executeRaw`ALTER TABLE "ClaudeProject" ADD COLUMN IF NOT EXISTS "source" TEXT NOT NULL DEFAULT 'manual'`;
+  await prisma.$executeRaw`ALTER TABLE "ClaudeProject" ADD COLUMN IF NOT EXISTS "sourceUserId" INTEGER`;
+  await prisma.$executeRaw`ALTER TABLE "ClaudeProject" ADD COLUMN IF NOT EXISTS "sourceUserEmail" TEXT`;
+  await prisma.$executeRaw`ALTER TABLE "ClaudeProject" ADD COLUMN IF NOT EXISTS "sourceDeletedAt" TIMESTAMP(3)`;
+  await prisma.$executeRaw`ALTER TABLE "ClaudeProject" ADD COLUMN IF NOT EXISTS "syncedAt" TIMESTAMP(3)`;
+  await prisma.$executeRaw`CREATE INDEX IF NOT EXISTS "ClaudeProject_scope_idx" ON "ClaudeProject"("scope")`;
+  await prisma.$executeRaw`CREATE UNIQUE INDEX IF NOT EXISTS "ClaudeProject_claudeProjectId_key" ON "ClaudeProject"("claudeProjectId") WHERE "claudeProjectId" IS NOT NULL`;
+  await prisma.$executeRaw`CREATE INDEX IF NOT EXISTS "ClaudeProject_sourceUserId_idx" ON "ClaudeProject"("sourceUserId")`;
 }
 
-// One short-lived client per request. The server is not ours and a pooled,
-// long-lived session would have to be reconnected on every network blip; these
-// calls are infrequent and cached below, so a fresh connection is cheaper to
-// reason about than a pool.
-let mcpClientModules = null;
-async function loadMcpClientSdk() {
-  if (!mcpClientModules) {
-    const [{ Client }, { StreamableHTTPClientTransport }] = await Promise.all([
-      import('@modelcontextprotocol/sdk/client/index.js'),
-      import('@modelcontextprotocol/sdk/client/streamableHttp.js')
-    ]);
-    mcpClientModules = { Client, StreamableHTTPClientTransport };
+/* The projects already in use, with the inputs each one asks for in its own
+   description. Seeded once, on an empty table, so the panel opens with the real
+   catalogue rather than a blank page and an "add your first project" prompt.
+   Instructions are left empty on purpose - only the people who wrote each
+   project can supply those, and a guessed system prompt would be worse than an
+   honest gap. Until one is filled in, the project says so and cannot be run. */
+const PROJECT_SEED = [
+  {
+    slug: 'q-seo-implementation', name: 'Q-SEO Implementation', scope: 'org', owner: 'you', accent: 'indigo', pinned: true,
+    description: 'Implementation steps for Q-SEO on a hotel site, for the stack the site actually runs on.',
+    inputs: [
+      { key: 'websiteUrl', label: 'Website URL', type: 'url', required: true, placeholder: 'https://hotel.example' },
+      { key: 'accountId', label: 'Quinta account ID', type: 'text', required: true },
+      { key: 'licenseKey', label: 'License key', type: 'text', required: true },
+      { key: 'serverLanguage', label: 'Server language', type: 'select', required: true, options: ['Node.js', 'Python', 'PHP'] }
+    ]
+  },
+  {
+    slug: 'q-share-mapping', name: 'Q-Share Mapping', scope: 'org', owner: 'you', accent: 'teal', pinned: true,
+    description: 'Q-Share mapping files for hotel webmasters, from a website URL and a teamId.',
+    inputs: [
+      { key: 'websiteUrl', label: 'Website URL', type: 'url', required: true, placeholder: 'https://hotel.example' },
+      { key: 'teamId', label: 'Team ID', type: 'text', required: true, placeholder: '401' }
+    ]
+  },
+  {
+    slug: 'global-check-agent', name: 'Global Check Agent V0.3', scope: 'org', owner: 'JAT Quinta', accent: 'amber',
+    description: 'Full check for one hotel. The name must match the one on the Dashboard exactly.',
+    inputs: [
+      { key: 'hotelName', label: 'Hotel name', type: 'text', required: true, help: 'Must match the name on the Dashboard.' },
+      { key: 'qtId', label: 'QT ID', type: 'text', required: true },
+      { key: 'officialUrl', label: "Hotel's official URL", type: 'url', required: true }
+    ]
+  },
+  {
+    slug: 'q-sync-check', name: 'Q-sync Check', scope: 'org', owner: 'Vincent', accent: 'violet',
+    description: 'Confirms Q-data is set correctly before Q-Sync is launched. Takes one or more hotel IDs.',
+    inputs: [
+      { key: 'hotelIds', label: 'Hotel IDs', type: 'textarea', required: true, placeholder: '401\n252\n19919', help: 'One per line, or comma separated.' }
+    ]
+  },
+  {
+    slug: 'b-signature-mcp', name: 'B Signature MCP', scope: 'mine', owner: 'you', accent: 'rose',
+    description: 'Q-MCP assistant for the six B Signature properties.',
+    inputs: [
+      { key: 'question', label: 'What do you need?', type: 'textarea', required: true, placeholder: 'Ask about any of the six B Signature properties…' }
+    ]
+  },
+  {
+    slug: 'quinta-onboarding-agent', name: 'Quinta Onboarding Agent V2', scope: 'org', owner: 'Quinta', accent: 'emerald',
+    description: 'Walks a new property through onboarding.',
+    inputs: [
+      { key: 'hotelName', label: 'Hotel name', type: 'text', required: true },
+      { key: 'notes', label: 'Anything specific to this onboarding', type: 'textarea', required: false }
+    ]
+  },
+  {
+    slug: 'qa-audit-conversation', name: 'QA AUDIT - Check Conversation', scope: 'org', owner: 'Quinta', accent: 'slate',
+    description: 'Audits a bot conversation for quality issues.',
+    inputs: [
+      { key: 'conversation', label: 'Conversation', type: 'textarea', required: true, placeholder: 'Paste the conversation transcript…' },
+      { key: 'hotelName', label: 'Hotel', type: 'text', required: false }
+    ]
   }
-  return mcpClientModules;
+];
+
+async function seedProjectsIfEmpty() {
+  await ensureProjectTable();
+  const rows = await prisma.$queryRaw`SELECT count(*)::int AS n FROM "ClaudeProject"`;
+  if ((Array.isArray(rows) ? rows[0]?.n : 0) > 0) return 0;
+  for (const p of PROJECT_SEED) {
+    await prisma.$executeRaw`
+      INSERT INTO "ClaudeProject" ("slug","name","description","scope","owner","instructions","inputs","accent","pinned","createdBy","updatedAt")
+      VALUES (${p.slug}, ${p.name}, ${p.description || ''}, ${p.scope}, ${p.owner || ''}, ${''},
+              ${JSON.stringify(p.inputs || [])}::jsonb, ${p.accent || 'slate'}, ${!!p.pinned}, ${'seed'}, CURRENT_TIMESTAMP)
+      ON CONFLICT ("slug") DO NOTHING
+    `;
+  }
+  return PROJECT_SEED.length;
 }
 
-async function quintaCallTool(name, args) {
-  if (!quintaConfigured()) throw Object.assign(new Error('quinta_not_configured'), { status: 503 });
-  const { Client, StreamableHTTPClientTransport } = await loadMcpClientSdk();
-  const client = new Client({ name: 'support-kanban', version: '1.0.0' }, { capabilities: {} });
-  const transport = new StreamableHTTPClientTransport(new URL(QUINTA_MCP_URL), {
-    requestInit: { headers: { Authorization: `Bearer ${QUINTA_MCP_TOKEN}` } }
+function normalizeProjectInputs(raw) {
+  const list = Array.isArray(raw) ? raw : [];
+  return list.slice(0, 20).map((field, index) => {
+    const key = String(field?.key || `field${index + 1}`).trim().replace(/[^A-Za-z0-9_]/g, '').slice(0, 40) || `field${index + 1}`;
+    const type = PROJECT_FIELD_TYPES.has(String(field?.type)) ? String(field.type) : 'text';
+    return {
+      key,
+      label: String(field?.label || key).slice(0, 120),
+      type,
+      required: !!field?.required,
+      placeholder: String(field?.placeholder || '').slice(0, 200),
+      help: String(field?.help || '').slice(0, 300),
+      options: type === 'select' ? (Array.isArray(field?.options) ? field.options.map(o => String(o).slice(0, 80)).slice(0, 30) : []) : []
+    };
   });
+}
+
+function projectSlugFromName(name) {
+  return (String(name || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'project').slice(0, 60);
+}
+
+async function uniqueProjectSlug(baseSlug, claudeProjectId = '') {
+  const base = projectSlugFromName(baseSlug) || 'project';
+  let slug = base;
+  for (let i = 2; i <= 50; i += 1) {
+    const rows = await prisma.$queryRaw`SELECT "id","claudeProjectId" FROM "ClaudeProject" WHERE "slug" = ${slug} LIMIT 1`;
+    const hit = Array.isArray(rows) ? rows[0] : null;
+    if (!hit || (claudeProjectId && hit.claudeProjectId === claudeProjectId)) return slug;
+    const suffix = `-${i}`;
+    slug = `${base.slice(0, Math.max(1, 60 - suffix.length))}${suffix}`;
+  }
+  return `${base.slice(0, 46)}-${crypto.randomBytes(4).toString('hex')}`;
+}
+
+function claudeConnectionProvider(userId) {
+  return `claude-compliance:${Number(userId)}`;
+}
+
+// The Compliance Access Key is the one Anthropic credential that cannot live in
+// the environment: every agent pastes their own, so it has to be persisted. It
+// is encrypted at rest rather than written into OAuthToken.accessToken in the
+// clear, so a database dump - a backup, a restored snapshot, a support export -
+// does not hand over a key that can read the organisation's Claude projects.
+//
+// The wrapping key is derived from CLAUDE_CREDENTIAL_SECRET, falling back to
+// SESSION_SECRET so an existing deployment needs no new configuration. Rotating
+// either one makes stored keys unreadable, and the connection reports itself as
+// disconnected until the agent pastes theirs again - which is the correct
+// outcome for a rotated secret, not a failure.
+const CLAUDE_CREDENTIAL_PREFIX = 'encv1:';
+function claudeCredentialKey() {
+  const secret = String(process.env.CLAUDE_CREDENTIAL_SECRET || process.env.SESSION_SECRET || '').trim();
+  if (!secret) return null;
+  return crypto.createHash('sha256').update(`claude-credential:${secret}`).digest();
+}
+function encryptClaudeCredential(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  const key = claudeCredentialKey();
+  // No secret configured: storing it unwrapped is what this deployment already
+  // did, and refusing to connect would be a worse trade than a logged warning.
+  if (!key) {
+    console.warn('Claude credential stored unencrypted: set CLAUDE_CREDENTIAL_SECRET or SESSION_SECRET.');
+    return raw;
+  }
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+  const body = Buffer.concat([cipher.update(raw, 'utf8'), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return `${CLAUDE_CREDENTIAL_PREFIX}${iv.toString('base64url')}.${tag.toString('base64url')}.${body.toString('base64url')}`;
+}
+function decryptClaudeCredential(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  // A key stored before this shipped is still plaintext. Read it, so upgrading
+  // does not silently disconnect everyone; the next write wraps it.
+  if (!raw.startsWith(CLAUDE_CREDENTIAL_PREFIX)) return raw;
+  const key = claudeCredentialKey();
+  if (!key) return '';
   try {
-    await client.connect(transport);
-    const result = await client.callTool({ name, arguments: args || {} });
-    if (result?.isError) {
-      const text = (result.content || []).map(part => part.text).filter(Boolean).join(' ').slice(0, 300);
-      throw Object.assign(new Error(text || 'quinta_tool_error'), { status: 502 });
-    }
-    // Every tool on that server answers with a single JSON text block.
-    const text = (result?.content || []).filter(part => part.type === 'text').map(part => part.text).join('');
-    if (!text) return null;
-    try { return JSON.parse(text); } catch (_) { return { raw: text }; }
-  } finally {
-    await client.close().catch(() => {});
+    const [ivPart, tagPart, bodyPart] = raw.slice(CLAUDE_CREDENTIAL_PREFIX.length).split('.');
+    const decipher = crypto.createDecipheriv('aes-256-gcm', key, Buffer.from(ivPart, 'base64url'));
+    decipher.setAuthTag(Buffer.from(tagPart, 'base64url'));
+    return Buffer.concat([decipher.update(Buffer.from(bodyPart, 'base64url')), decipher.final()]).toString('utf8');
+  } catch (_) {
+    // Wrong key, or a tampered row. Either way there is no credential to use.
+    return '';
   }
 }
 
-// The dialog catalogue is a definitions list that changes rarely and is
-// identical for every caller, so it is held for an hour rather than re-fetched
-// per agent. Property profiles are held for less: they are edited by the people
-// using this board.
-const quintaCache = new Map();
-async function quintaCached(key, ttlMs, load) {
-  const hit = quintaCache.get(key);
-  if (hit && hit.at > Date.now() - ttlMs) return hit.value;
-  const value = await load();
-  quintaCache.set(key, { at: Date.now(), value });
-  return value;
+function maskSecret(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  if (raw.length <= 12) return `${raw.slice(0, 2)}...${raw.slice(-2)}`;
+  return `${raw.slice(0, 10)}...${raw.slice(-4)}`;
 }
 
-app.get('/api/quinta/status', requireAuth, (req, res) => {
-  res.json({
-    ok: true,
-    configured: quintaConfigured(),
-    hint: quintaSetupHint(),
-    endpoint: QUINTA_MCP_URL ? QUINTA_MCP_URL.replace(/^(https?:\/\/[^/]+).*$/, '$1/…') : null,
-    propertyCount: QUINTA_TEAM_IDS.length
+function normalizeClaudeAuthMode(value, credential) {
+  const mode = String(value || 'auto').trim().toLowerCase();
+  if (['auto', 'api_key', 'bearer'].includes(mode)) return mode;
+  return String(credential || '').trim().startsWith('sk-') ? 'api_key' : 'bearer';
+}
+
+function claudeConnectionStatusFromTokens(tokens) {
+  const meta = (tokens?.metadata && typeof tokens.metadata === 'object' && !Array.isArray(tokens.metadata)) ? tokens.metadata : {};
+  const credential = String(tokens?.accessToken || '').trim();
+  return {
+    connected: !!credential,
+    credentialMasked: maskSecret(credential),
+    authMode: normalizeClaudeAuthMode(meta.authMode, credential),
+    userEmail: meta.userEmail || '',
+    lastSyncAt: meta.lastSyncAt || null,
+    lastProjectCount: Number(meta.lastProjectCount || 0),
+    lastError: meta.lastError || ''
+  };
+}
+
+async function getClaudeConnectionForRequest(req) {
+  if (!req.session?.userId) return null;
+  const tokens = await getStoredOAuthTokens(claudeConnectionProvider(req.session.userId));
+  if (!tokens) return null;
+  return { ...tokens, accessToken: decryptClaudeCredential(tokens.accessToken) };
+}
+
+// Every write of the Claude credential goes through here, so nothing can put a
+// plaintext key back into the table by taking the shorter path.
+async function setClaudeConnection(userId, { credential, metadata }) {
+  await setStoredOAuthTokens(claudeConnectionProvider(userId), {
+    accessToken: encryptClaudeCredential(credential),
+    expiresAt: null,
+    metadata: metadata || undefined
   });
-});
+}
 
-// The dialog/intent catalogue - what the bots can be asked about. Needs no
-// hotel, so this works the moment the server is reachable.
-app.get('/api/quinta/dialogs', requireAuth, async (req, res) => {
-  try {
-    if (!quintaConfigured()) return res.status(503).json({ error: 'quinta_not_configured', message: quintaSetupHint() });
-    const categories = String(req.query.categories || '').trim();
-    const propertyKind = Math.min(4, Math.max(1, Number(req.query.propertyKind) || 1));
-    const data = await quintaCached(`dialogs:${categories}:${propertyKind}`, 60 * 60 * 1000, () =>
-      quintaCallTool('get-dialogs-list', {
-        ...(categories ? { categories } : {}),
-        description: true,
-        property_kind: propertyKind
-      }));
+function claudeComplianceHeaders(credential, mode) {
+  const headers = {
+    Accept: 'application/json',
+    'Content-Type': 'application/json',
+    'anthropic-version': '2023-06-01'
+  };
+  if (mode === 'bearer') headers.Authorization = `Bearer ${credential}`;
+  else headers['x-api-key'] = credential;
+  return headers;
+}
 
-    // The server groups dialogs by category into nested objects. Flattened here
-    // so the board can render, search and count them without knowing that shape.
-    const rows = [];
-    for (const [category, dialogs] of Object.entries(data || {})) {
-      if (!dialogs || typeof dialogs !== 'object') continue;
-      for (const [fid, dialog] of Object.entries(dialogs)) {
-        rows.push({
-          fid,
-          category,
-          name: dialog?.name || fid,
-          description: dialog?.description || ''
-        });
-      }
-    }
-    rows.sort((a, b) => a.fid.localeCompare(b.fid));
-    return res.json({ ok: true, total: rows.length, categories: [...new Set(rows.map(r => r.category))].sort(), rows });
-  } catch (error) {
-    console.error('Quinta dialogs failed:', error?.message || error);
-    return res.status(error?.status || 502).json({ error: 'quinta_dialogs_failed', message: String(error?.message || error).slice(0, 300) });
+async function claudeComplianceRequest(credential, pathname, { searchParams } = {}) {
+  const raw = String(credential || '').trim();
+  if (!raw) throw new Error('claude_not_connected');
+  const url = new URL(pathname, `${CLAUDE_COMPLIANCE_API_BASE}/`);
+  Object.entries(searchParams || {}).forEach(([key, value]) => {
+    if (value === undefined || value === null || value === '') return;
+    if (Array.isArray(value)) value.forEach(v => url.searchParams.append(key, String(v)));
+    else url.searchParams.set(key, String(value));
+  });
+
+  const preferred = raw.startsWith('sk-') ? 'api_key' : 'bearer';
+  const modes = preferred === 'api_key' ? ['api_key', 'bearer'] : ['bearer', 'api_key'];
+  let lastStatus = 0;
+  let lastText = '';
+  for (const mode of modes) {
+    const response = await fetch(url, { headers: claudeComplianceHeaders(raw, mode) });
+    const text = await response.text();
+    if (response.ok) return text ? JSON.parse(text) : {};
+    lastStatus = response.status;
+    lastText = text;
+    if (![401, 403].includes(response.status)) break;
   }
-});
+  const message = (() => {
+    try { return JSON.parse(lastText)?.error?.message || JSON.parse(lastText)?.message; }
+    catch (_) { return ''; }
+  })();
+  const error = new Error(message || `claude_compliance_${lastStatus || 'failed'}`);
+  error.status = lastStatus;
+  error.body = lastText;
+  throw error;
+}
 
-// The properties this board covers, with the operational profile of each.
-app.get('/api/quinta/properties', requireAuth, async (req, res) => {
-  try {
-    if (!quintaConfigured()) return res.status(503).json({ error: 'quinta_not_configured', message: quintaSetupHint() });
-    if (!QUINTA_TEAM_IDS.length) return res.json({ ok: true, rows: [], note: 'no_team_ids_configured', message: quintaSetupHint() });
-
-    const teams = QUINTA_TEAM_IDS.map(entry => entry.teamId).join(',');
-    const data = await quintaCached(`properties:${teams}`, 10 * 60 * 1000, () =>
-      quintaCallTool('get-hotel-settings', { teams }));
-
-    // The profile comes back keyed by team id, or as a single object when one
-    // id was asked for - normalised to a list either way.
-    const byTeam = (data && typeof data === 'object' && !Array.isArray(data)) ? data : {};
-    const rows = QUINTA_TEAM_IDS.map(entry => {
-      const profile = byTeam[entry.teamId] || byTeam[Number(entry.teamId)] || (QUINTA_TEAM_IDS.length === 1 ? data : null) || {};
-      const info = profile.information || profile;
-      return {
-        teamId: entry.teamId,
-        name: info?.name || entry.label || `Property ${entry.teamId}`,
-        address: info?.address || null,
-        languages: profile?.velma_settings?.languages || profile?.languages || null,
-        services: profile?.services || null,
-        contacts: profile?.notification_contacts || profile?.contacts || null,
-        // Kept so an agent can see anything the shaping above did not name,
-        // rather than the board silently hiding fields it was not written for.
-        raw: profile
-      };
+async function fetchClaudeProjects(credential, { userEmail = '' } = {}) {
+  const email = normalizeEmailForDb(userEmail || '');
+  const projects = [];
+  let page = '';
+  while (projects.length < CLAUDE_PROJECT_SYNC_LIMIT) {
+    const list = await claudeComplianceRequest(credential, '/v1/compliance/apps/projects', {
+      searchParams: { limit: Math.min(100, CLAUDE_PROJECT_SYNC_LIMIT - projects.length), page }
     });
-    return res.json({ ok: true, total: rows.length, rows });
-  } catch (error) {
-    console.error('Quinta properties failed:', error?.message || error);
-    return res.status(error?.status || 502).json({ error: 'quinta_properties_failed', message: String(error?.message || error).slice(0, 300) });
+    const rows = Array.isArray(list?.data) ? list.data : [];
+    for (const row of rows) {
+      if (projects.length >= CLAUDE_PROJECT_SYNC_LIMIT) break;
+      if (row?.deleted_at) continue;
+      const id = String(row?.id || '').trim();
+      if (!id) continue;
+      const detail = await claudeComplianceRequest(credential, `/v1/compliance/apps/projects/${encodeURIComponent(id)}`);
+      if (detail?.deleted_at) continue;
+      const ownerEmail = normalizeEmailForDb(detail?.user?.email_address || row?.user?.email_address || '');
+      if (email && ownerEmail !== email) continue;
+      projects.push({ ...row, ...detail, user: detail?.user || row?.user || null });
+    }
+    page = String(list?.next_page || '');
+    if (!list?.has_more || !page) break;
   }
+  return projects;
+}
+
+function defaultInputsForSyncedClaudeProject(project) {
+  return [{
+    key: 'prompt',
+    label: 'Prompt',
+    type: 'textarea',
+    required: true,
+    placeholder: `Run ${String(project?.name || 'this project')} for...`
+  }];
+}
+
+async function upsertSyncedClaudeProject(project, req) {
+  await ensureProjectTable();
+  const claudeProjectId = String(project?.id || '').trim();
+  if (!claudeProjectId) return null;
+  const name = String(project?.name || 'Claude project').trim().slice(0, 200) || 'Claude project';
+  const description = String(project?.description || '').slice(0, 600);
+  const ownerEmail = normalizeEmailForDb(project?.user?.email_address || '');
+  const owner = ownerEmail || String(project?.user?.id || '').slice(0, 80);
+  const scope = project?.is_private ? 'mine' : 'org';
+  const instructions = String(project?.instructions || '');
+  const inputs = normalizeProjectInputs(defaultInputsForSyncedClaudeProject(project));
+  const model = String(project?.model || '').trim() || null;
+  const accent = project?.is_private ? 'rose' : 'indigo';
+  const sourceDeletedAt = project?.deleted_at ? new Date(project.deleted_at) : null;
+
+  const existingRows = await prisma.$queryRaw`SELECT "id","slug" FROM "ClaudeProject" WHERE "claudeProjectId" = ${claudeProjectId} LIMIT 1`;
+  const existing = Array.isArray(existingRows) ? existingRows[0] : null;
+  const slug = existing?.slug || await uniqueProjectSlug(name, claudeProjectId);
+  if (existing?.id) {
+    await prisma.$executeRaw`
+      UPDATE "ClaudeProject"
+      SET "name" = ${name}, "description" = ${description}, "scope" = ${scope}, "owner" = ${owner},
+          "instructions" = ${instructions}, "inputs" = ${JSON.stringify(inputs)}::jsonb, "model" = ${model},
+          "accent" = ${accent}, "source" = 'claude', "sourceUserId" = ${Number(req.session.userId)},
+          "sourceUserEmail" = ${ownerEmail || null}, "sourceDeletedAt" = ${sourceDeletedAt},
+          "syncedAt" = CURRENT_TIMESTAMP, "updatedAt" = CURRENT_TIMESTAMP
+      WHERE "id" = ${Number(existing.id)}
+    `;
+    return existing.id;
+  }
+
+  const inserted = await prisma.$queryRaw`
+    INSERT INTO "ClaudeProject" ("slug","name","description","scope","owner","instructions","inputs","model","accent","pinned","createdBy","updatedAt","claudeProjectId","source","sourceUserId","sourceUserEmail","sourceDeletedAt","syncedAt")
+    VALUES (${slug}, ${name}, ${description}, ${scope}, ${owner}, ${instructions}, ${JSON.stringify(inputs)}::jsonb,
+            ${model}, ${accent}, ${false}, ${'claude:' + (req.session.username || '')}, CURRENT_TIMESTAMP,
+            ${claudeProjectId}, 'claude', ${Number(req.session.userId)}, ${ownerEmail || null}, ${sourceDeletedAt}, CURRENT_TIMESTAMP)
+    RETURNING "id"
+  `;
+  return Array.isArray(inserted) ? inserted[0]?.id : null;
+}
+
+async function syncClaudeProjectsForRequest(req) {
+  const tokens = await getClaudeConnectionForRequest(req);
+  const credential = String(tokens?.accessToken || '').trim();
+  if (!credential) throw Object.assign(new Error('claude_not_connected'), { status: 409 });
+  const meta = (tokens?.metadata && typeof tokens.metadata === 'object' && !Array.isArray(tokens.metadata)) ? tokens.metadata : {};
+  const projects = await fetchClaudeProjects(credential, { userEmail: meta.userEmail || '' });
+  for (const project of projects) await upsertSyncedClaudeProject(project, req);
+  const nextMeta = { ...meta, lastSyncAt: new Date().toISOString(), lastProjectCount: projects.length, lastError: '' };
+  await setClaudeConnection(req.session.userId, { credential, metadata: nextMeta });
+  return { count: projects.length, lastSyncAt: nextMeta.lastSyncAt };
+}
+
+function projectRow(row, { includeInstructions = false } = {}) {
+  return {
+    id: row.id,
+    slug: row.slug,
+    name: row.name,
+    description: row.description || '',
+    scope: row.scope || 'org',
+    owner: row.owner || '',
+    inputs: Array.isArray(row.inputs) ? row.inputs : [],
+    model: row.model || PROJECT_MODEL,
+    accent: row.accent || 'slate',
+    pinned: !!row.pinned,
+    source: row.source || 'manual',
+    sourceUserEmail: row.sourceUserEmail || '',
+    syncedAt: row.syncedAt || null,
+    // Whether the project can actually be run yet. An empty instruction set is
+    // the normal state for a freshly seeded project, not an error.
+    ready: !!String(row.instructions || '').trim(),
+    updatedAt: row.updatedAt,
+    ...(includeInstructions ? { instructions: row.instructions || '' } : {})
+  };
+}
+
+app.get('/api/projects', requireAuth, async (req, res) => {
+  try {
+    await seedProjectsIfEmpty();
+    const rows = await prisma.$queryRaw`SELECT * FROM "ClaudeProject" ORDER BY "pinned" DESC, "updatedAt" DESC`;
+    const isAdmin = isAdminRole(req.session.role);
+    const list = (Array.isArray(rows) ? rows : []).map(r => projectRow(r, { includeInstructions: isAdmin }));
+    const claudeTokens = await getClaudeConnectionForRequest(req);
+    return res.json({
+      ok: true,
+      canEdit: isAdmin,
+      model: PROJECT_MODEL,
+      configured: !!String(process.env.ANTHROPIC_API_KEY || '').trim(),
+      claude: claudeConnectionStatusFromTokens(claudeTokens),
+      rows: list
+    });
+  } catch (error) {
+    console.error('Project list failed:', error?.message || error);
+    return res.status(500).json({ error: 'project_list_failed' });
+  }
+});
+
+app.get('/api/claude/connection', requireAuth, async (req, res) => {
+  try {
+    const tokens = await getClaudeConnectionForRequest(req);
+    const user = await prisma.user.findUnique({ where: { id: Number(req.session.userId) }, select: { email: true } }).catch(() => null);
+    return res.json({ ok: true, suggestedEmail: user?.email || '', claude: claudeConnectionStatusFromTokens(tokens) });
+  } catch (error) {
+    console.error('Claude connection status failed:', error?.message || error);
+    return res.status(500).json({ error: 'claude_connection_status_failed' });
+  }
+});
+
+app.post('/api/claude/connection', requireAuth, projectRunLimiter, async (req, res) => {
+  try {
+    const credential = String(req.body?.credential || '').trim();
+    if (!credential) return res.status(400).json({ error: 'credential_required', message: 'Paste a Claude Compliance Access Key first.' });
+    const userEmail = normalizeEmailForDb(req.body?.userEmail || '');
+    const authMode = normalizeClaudeAuthMode(req.body?.authMode, credential);
+
+    await setClaudeConnection(req.session.userId, {
+      credential,
+      metadata: { userEmail, authMode, connectedAt: new Date().toISOString(), lastSyncAt: null, lastProjectCount: 0, lastError: '' }
+    });
+
+    const sync = await syncClaudeProjectsForRequest(req);
+    const tokens = await getClaudeConnectionForRequest(req);
+    return res.json({ ok: true, sync, claude: claudeConnectionStatusFromTokens(tokens) });
+  } catch (error) {
+    const detail = String(error?.message || error);
+    console.error('Claude connection failed:', detail);
+    const existing = await getClaudeConnectionForRequest(req).catch(() => null);
+    const meta = (existing?.metadata && typeof existing.metadata === 'object' && !Array.isArray(existing.metadata)) ? existing.metadata : {};
+    if (existing?.accessToken) {
+      await setClaudeConnection(req.session.userId, {
+        credential: existing.accessToken,
+        metadata: { ...meta, lastError: detail.slice(0, 300) }
+      }).catch(() => null);
+    }
+    const status = Number(error?.status) || 502;
+    return res.status(status === 401 || status === 403 ? status : 502).json({
+      error: status === 403 ? 'claude_missing_scope' : (status === 401 ? 'claude_auth_failed' : 'claude_connection_failed'),
+      message: detail.slice(0, 300)
+    });
+  }
+});
+
+app.post('/api/claude/sync-projects', requireAuth, projectRunLimiter, async (req, res) => {
+  try {
+    const sync = await syncClaudeProjectsForRequest(req);
+    const tokens = await getClaudeConnectionForRequest(req);
+    return res.json({ ok: true, sync, claude: claudeConnectionStatusFromTokens(tokens) });
+  } catch (error) {
+    const detail = String(error?.message || error);
+    console.error('Claude project sync failed:', detail);
+    const existing = await getClaudeConnectionForRequest(req).catch(() => null);
+    const meta = (existing?.metadata && typeof existing.metadata === 'object' && !Array.isArray(existing.metadata)) ? existing.metadata : {};
+    if (existing?.accessToken) {
+      await setClaudeConnection(req.session.userId, {
+        credential: existing.accessToken,
+        metadata: { ...meta, lastError: detail.slice(0, 300) }
+      }).catch(() => null);
+    }
+    const status = Number(error?.status) || 502;
+    return res.status(status === 409 ? 409 : (status === 401 || status === 403 ? status : 502)).json({
+      error: status === 409 ? 'claude_not_connected' : (status === 403 ? 'claude_missing_scope' : (status === 401 ? 'claude_auth_failed' : 'claude_sync_failed')),
+      message: detail.slice(0, 300)
+    });
+  }
+});
+
+app.delete('/api/claude/connection', requireAuth, async (req, res) => {
+  try {
+    await prisma.oAuthToken.delete({ where: { provider: claudeConnectionProvider(req.session.userId) } }).catch(() => null);
+    return res.json({ ok: true, claude: claudeConnectionStatusFromTokens(null) });
+  } catch (error) {
+    console.error('Claude disconnect failed:', error?.message || error);
+    return res.status(500).json({ error: 'claude_disconnect_failed' });
+  }
+});
+
+app.post('/api/projects', requireAdmin, async (req, res) => {
+  try {
+    await ensureProjectTable();
+    const name = String(req.body?.name || '').trim();
+    if (!name) return res.status(400).json({ error: 'name_required' });
+    const slug = (String(req.body?.slug || name).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'project').slice(0, 60);
+    const scope = PROJECT_SCOPES.has(String(req.body?.scope)) ? String(req.body.scope) : 'org';
+    const inputs = normalizeProjectInputs(req.body?.inputs);
+    await prisma.$executeRaw`
+      INSERT INTO "ClaudeProject" ("slug","name","description","scope","owner","instructions","inputs","model","accent","pinned","createdBy","updatedAt")
+      VALUES (${slug}, ${name}, ${String(req.body?.description || '').slice(0, 600)}, ${scope}, ${String(req.body?.owner || '').slice(0, 80)},
+              ${String(req.body?.instructions || '')}, ${JSON.stringify(inputs)}::jsonb, ${String(req.body?.model || '').trim() || null},
+              ${String(req.body?.accent || 'slate')}, ${!!req.body?.pinned}, ${String(req.session.username || '')}, CURRENT_TIMESTAMP)
+      ON CONFLICT ("slug") DO UPDATE SET
+        "name" = EXCLUDED."name", "description" = EXCLUDED."description", "scope" = EXCLUDED."scope",
+        "owner" = EXCLUDED."owner", "instructions" = EXCLUDED."instructions", "inputs" = EXCLUDED."inputs",
+        "model" = EXCLUDED."model", "accent" = EXCLUDED."accent", "pinned" = EXCLUDED."pinned",
+        "updatedAt" = CURRENT_TIMESTAMP
+    `;
+    return res.json({ ok: true, slug });
+  } catch (error) {
+    console.error('Project save failed:', error?.message || error);
+    return res.status(500).json({ error: 'project_save_failed' });
+  }
+});
+
+app.delete('/api/projects/:id', requireAdmin, async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: 'invalid_id' });
+    await prisma.$executeRaw`DELETE FROM "ClaudeProject" WHERE "id" = ${id}`;
+    return res.json({ ok: true });
+  } catch (error) {
+    console.error('Project delete failed:', error?.message || error);
+    return res.status(500).json({ error: 'project_delete_failed' });
+  }
+});
+
+/* Running one.
+
+   The project's instructions become the system prompt and the form values
+   become the message, so the model gets the same brief it would have been given
+   in Claude - just assembled by the board instead of typed into a chat.
+
+   Streamed server-side and awaited whole: these produce long answers, and a
+   non-streaming request of this size is what trips an HTTP timeout. The
+   response is returned complete rather than forwarded to the browser as it
+   arrives - a progress stream would be nicer and is a clean follow-up, but it
+   is not what makes the feature work. */
+// A run and a follow-up are the same request with a different message list, so
+// they share everything from the model down: the project's instructions as a
+// cached system prompt, adaptive thinking, and the refusal check that has to
+// happen before the content is read.
+const PROJECT_CHAT_MAX_TURNS = 40;
+const PROJECT_CHAT_MAX_CHARS = 20_000;
+
+function projectBriefFromValues(project, values) {
+  const fields = Array.isArray(project.inputs) ? project.inputs : [];
+  const supplied = (values && typeof values === 'object') ? values : {};
+  const missing = fields.filter(f => f.required && !String(supplied[f.key] ?? '').trim()).map(f => f.label);
+  const brief = fields
+    .map(f => ({ label: f.label, value: String(supplied[f.key] ?? '').trim() }))
+    .filter(entry => entry.value)
+    .map(entry => `${entry.label}: ${entry.value}`)
+    .join('\n');
+  return { brief, missing };
+}
+
+// The transcript arrives from the browser rather than a table: a project thread
+// is a working session, not a record the board owes anyone, and keeping it out
+// of Postgres means no new migration and nothing to prune. It is still checked
+// like any other untrusted input - roles, shape, length, and a ceiling on how
+// much history one request may replay.
+function normalizeProjectTurns(raw) {
+  if (raw === undefined || raw === null) return { turns: [] };
+  if (!Array.isArray(raw)) return { error: 'Conversation history must be a list of turns.' };
+  if (raw.length > PROJECT_CHAT_MAX_TURNS) {
+    return { error: `This thread is too long to continue (${raw.length} turns, limit ${PROJECT_CHAT_MAX_TURNS}). Run the project again to start a fresh one.` };
+  }
+  const turns = [];
+  for (const entry of raw) {
+    const role = String(entry?.role || '').trim();
+    const content = String(entry?.content || '').trim();
+    if (role !== 'user' && role !== 'assistant') return { error: 'Every turn must be from the user or the assistant.' };
+    if (!content) return { error: 'A turn cannot be empty.' };
+    if (content.length > PROJECT_CHAT_MAX_CHARS) return { error: 'One of the turns is too long to send.' };
+    if (turns.length && turns[turns.length - 1].role === role) return { error: 'Turns have to alternate between the user and the assistant.' };
+    turns.push({ role, content });
+  }
+  if (turns.length) {
+    if (turns[0].role !== 'assistant') return { error: "A follow-up has to start from the project's first answer." };
+    if (turns[turns.length - 1].role !== 'user') return { error: 'The last turn has to be the question being asked.' };
+  }
+  return { turns };
+}
+
+async function loadRunnableProject(id) {
+  const rows = await prisma.$queryRaw`SELECT * FROM "ClaudeProject" WHERE "id" = ${id} LIMIT 1`;
+  const project = Array.isArray(rows) ? rows[0] : null;
+  if (!project) return { status: 404, error: 'project_not_found' };
+  if (!String(project.instructions || '').trim()) {
+    return {
+      status: 409,
+      error: 'project_not_ready',
+      message: `"${project.name}" has no instructions yet. Claude does not expose a project's instructions through any API, so an admin has to paste them in once before it can run here.`
+    };
+  }
+  return { project };
+}
+
+async function callProjectModel(project, messages) {
+  const client = new Anthropic({ apiKey: String(process.env.ANTHROPIC_API_KEY || '').trim(), maxRetries: 2 });
+  // Streamed and awaited whole: these answers are long, and a non-streaming
+  // request of that size is what trips an HTTP timeout.
+  const stream = client.messages.stream({
+    model: String(project.model || PROJECT_MODEL),
+    max_tokens: 32_000,
+    system: [{ type: 'text', text: String(project.instructions || '').trim(), cache_control: { type: 'ephemeral' } }],
+    thinking: { type: 'adaptive' },
+    output_config: { effort: 'high' },
+    messages: messages.map(m => ({ role: m.role, content: [{ type: 'text', text: m.content }] }))
+  });
+  return stream.finalMessage();
+}
+
+function projectRunResponse(message, project, started) {
+  // A policy decline arrives as a normal 200 with this stop reason, so it has
+  // to be checked before the content is read or the panel shows an empty box.
+  if (message.stop_reason === 'refusal') {
+    return {
+      status: 200,
+      body: {
+        ok: false, refused: true,
+        message: 'Claude declined to run this one. Rephrase the inputs, or check the project instructions.',
+        category: message.stop_details?.category || null
+      }
+    };
+  }
+  const text = (message.content || []).filter(b => b.type === 'text').map(b => b.text).join('\n').trim();
+  return {
+    status: 200,
+    body: {
+      ok: true,
+      project: { id: project.id, name: project.name },
+      text,
+      usage: {
+        inputTokens: message.usage?.input_tokens ?? null,
+        outputTokens: message.usage?.output_tokens ?? null,
+        cacheRead: message.usage?.cache_read_input_tokens ?? null
+      },
+      ms: Date.now() - started
+    }
+  };
+}
+
+function projectRunError(error, res) {
+  const detail = String(error?.message || error);
+  console.error('Project run failed:', detail);
+  if (error instanceof Anthropic.AuthenticationError) return res.status(502).json({ error: 'auth_failed', message: "The server's Anthropic API key was rejected." });
+  if (error instanceof Anthropic.RateLimitError) return res.status(429).json({ error: 'rate_limited', message: 'Anthropic is rate limiting this key right now. Try again shortly.' });
+  if (error instanceof Anthropic.APIConnectionError) return res.status(504).json({ error: 'unreachable', message: 'Could not reach the Anthropic API.' });
+  return res.status(502).json({ error: 'project_run_failed', message: detail.slice(0, 300) });
+}
+
+// Shared by /run and /chat: the only difference between them is whether any
+// turns follow the form brief.
+async function handleProjectRun(req, res, { withHistory }) {
+  const started = Date.now();
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: 'invalid_id' });
+    if (!String(process.env.ANTHROPIC_API_KEY || '').trim()) {
+      return res.status(503).json({ error: 'not_configured', message: 'ANTHROPIC_API_KEY is not set on this deployment, so the board cannot run a project.' });
+    }
+
+    const loaded = await loadRunnableProject(id);
+    if (!loaded.project) return res.status(loaded.status).json({ error: loaded.error, ...(loaded.message ? { message: loaded.message } : {}) });
+    const project = loaded.project;
+
+    const { brief, missing } = projectBriefFromValues(project, req.body?.values);
+    if (missing.length) return res.status(400).json({ error: 'missing_inputs', message: `Fill in: ${missing.join(', ')}.` });
+
+    const history = withHistory ? normalizeProjectTurns(req.body?.turns) : { turns: [] };
+    if (history.error) return res.status(400).json({ error: 'invalid_history', message: history.error });
+    if (withHistory && !history.turns.length) return res.status(400).json({ error: 'invalid_history', message: 'There is no question to answer yet.' });
+
+    const message = await callProjectModel(project, [
+      { role: 'user', content: brief || 'Run this project.' },
+      ...history.turns
+    ]);
+    const result = projectRunResponse(message, project, started);
+    return res.status(result.status).json(result.body);
+  } catch (error) {
+    return projectRunError(error, res);
+  }
+}
+
+app.post('/api/projects/:id/run', requireAuth, projectRunLimiter, async (req, res) => {
+  return handleProjectRun(req, res, { withHistory: false });
+});
+
+// Follow-ups on a project that has already been run. The project's instructions
+// stay the system prompt for every turn, so the thread keeps behaving like that
+// project rather than drifting into a general chat.
+app.post('/api/projects/:id/chat', requireAuth, projectRunLimiter, async (req, res) => {
+  return handleProjectRun(req, res, { withHistory: true });
 });
 
 app.get('/api/insights/languages', requireAuth, async (req, res) => {
@@ -6064,6 +6808,72 @@ async function mcpFindDuplicates(id, limit) {
   };
 }
 
+/* Registering a project from inside Claude.
+
+   Compliance API sync can pull Enterprise/eligible-org projects when a user has
+   connected a key with the right scope. The connector still matters for
+   everyone else, and for quick updates from inside the project itself: Claude
+   calls into this board and pushes the instructions it already has in context.
+
+   The workflow that makes this useful: open a project in Claude and say
+   "register yourself with the support board". Claude reads its own instructions
+   and calls this, and the project appears in QT-Tools with a working form. It
+   is the one direction the connection actually supports, and it removes the
+   copy-and-paste that the registry would otherwise need. */
+async function mcpRegisterProject(apiUser, args) {
+  if (!isAdminRole(apiUser?.role)) {
+    throw Object.assign(new Error('admin_required: only an admin token may add or change a project on the board'), { status: 403 });
+  }
+  const name = String(args?.name || '').trim();
+  if (!name) throw Object.assign(new Error('name_required'), { status: 400 });
+
+  await ensureProjectTable();
+  const slug = (String(args?.slug || name).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'project').slice(0, 60);
+  const scope = PROJECT_SCOPES.has(String(args?.scope)) ? String(args.scope) : 'org';
+  const inputs = normalizeProjectInputs(args?.inputs);
+  const instructions = String(args?.instructions || '');
+
+  await prisma.$executeRaw`
+    INSERT INTO "ClaudeProject" ("slug","name","description","scope","owner","instructions","inputs","accent","createdBy","updatedAt")
+    VALUES (${slug}, ${name}, ${String(args?.description || '').slice(0, 600)}, ${scope}, ${String(args?.owner || '').slice(0, 80)},
+            ${instructions}, ${JSON.stringify(inputs)}::jsonb, ${String(args?.accent || 'slate')}, ${'mcp:' + (apiUser?.username || '')}, CURRENT_TIMESTAMP)
+    ON CONFLICT ("slug") DO UPDATE SET
+      "name" = EXCLUDED."name", "description" = EXCLUDED."description", "scope" = EXCLUDED."scope",
+      "owner" = EXCLUDED."owner", "inputs" = EXCLUDED."inputs", "accent" = EXCLUDED."accent",
+      -- An empty instructions field means "leave what is there", so a partial
+      -- re-register cannot wipe a project that was already set up properly.
+      "instructions" = CASE WHEN ${instructions} = '' THEN "ClaudeProject"."instructions" ELSE ${instructions} END,
+      "updatedAt" = CURRENT_TIMESTAMP
+  `;
+
+  const rows = await prisma.$queryRaw`SELECT "id","slug","name","instructions","inputs" FROM "ClaudeProject" WHERE "slug" = ${slug} LIMIT 1`;
+  const saved = Array.isArray(rows) ? rows[0] : null;
+  return {
+    ok: true,
+    slug,
+    name,
+    inputs: (saved?.inputs || []).map(f => f.key),
+    ready: !!String(saved?.instructions || '').trim(),
+    status: String(saved?.instructions || '').trim()
+      ? `"${name}" is on the board with ${(saved?.inputs || []).length} input field(s) and can be run from QT-Tools -> Projects.`
+      : `"${name}" is on the board but has no instructions, so it cannot be run yet. Call this again with the project's instructions to finish it.`
+  };
+}
+
+async function mcpListBoardProjects() {
+  await ensureProjectTable();
+  const rows = await prisma.$queryRaw`SELECT "slug","name","description","scope","owner","inputs","instructions" FROM "ClaudeProject" ORDER BY "name"`;
+  return (Array.isArray(rows) ? rows : []).map(r => ({
+    slug: r.slug,
+    name: r.name,
+    description: r.description || '',
+    scope: r.scope,
+    owner: r.owner || '',
+    inputs: (r.inputs || []).map(f => ({ key: f.key, label: f.label, type: f.type, required: !!f.required })),
+    ready: !!String(r.instructions || '').trim()
+  }));
+}
+
 async function mcpShiftHandover(hours) {
   const windowHours = Math.min(168, Math.max(1, Number(hours) || 12));
   const since = new Date(Date.now() - windowHours * 3600000);
@@ -6502,6 +7312,45 @@ function buildKanbanMcpServer(apiUser, { McpServer, z }) {
   );
 
   server.registerTool(
+    'register_project',
+    {
+      title: 'Put this project on the support board',
+      description: "Register the Claude project you are running inside with the support board, so the team can run it from QT-Tools without opening Claude. Use this when someone asks to add, register or update a project on the board. If Compliance API sync is unavailable, this is the direct route: read your OWN project instructions out of your context and pass them as instructions, and describe the information the project asks the user for as inputs - the board turns that list into a form. Calling it again with the same name updates the entry; leaving instructions empty keeps whatever is already saved.",
+      inputSchema: {
+        name: z.string().min(1).describe('The project name, as it appears in Claude.'),
+        description: z.string().optional().describe('One line on what the project does.'),
+        instructions: z.string().optional().describe("The project's own instructions, verbatim. This is what the board sends as the system prompt when it runs the project."),
+        owner: z.string().optional().describe('Who owns it - a person or a team.'),
+        scope: z.enum(['mine', 'org', 'shared']).optional().describe('Which tab it belongs under. Defaults to org.'),
+        inputs: z.array(z.object({
+          key: z.string().describe('Short identifier, e.g. websiteUrl.'),
+          label: z.string().describe('What the field is called on screen.'),
+          type: z.enum(['text', 'textarea', 'number', 'url', 'select']).optional(),
+          required: z.boolean().optional(),
+          placeholder: z.string().optional(),
+          help: z.string().optional(),
+          options: z.array(z.string()).optional().describe('For type select only.')
+        })).optional().describe('The information this project asks for. Each entry becomes a field on the board form.')
+      }
+    },
+    async (args) => {
+      try { return mcpTextResult(await mcpRegisterProject(apiUser, args)); } catch (error) { return mcpErrorResult(error); }
+    }
+  );
+
+  server.registerTool(
+    'list_board_projects',
+    {
+      title: 'List the projects registered on the board',
+      description: 'What is already on the support board, and whether each one has instructions saved. Use it before registering, to update an entry rather than duplicate it.',
+      inputSchema: {}
+    },
+    async () => {
+      try { return mcpTextResult(await mcpListBoardProjects()); } catch (error) { return mcpErrorResult(error); }
+    }
+  );
+
+  server.registerTool(
     'shift_handover',
     {
       title: 'Summarise the shift for handover',
@@ -6576,7 +7425,9 @@ const LIVE_SYNC_FIELDS = [
   // A snooze hides the ticket for everyone, so every open board has to hear
   // about it immediately - otherwise one agent parks a ticket and another is
   // still looking at it.
-  'ticketDuplicateOf', 'ticketSnooze'
+  // A reply restarts the SLA clock, and every open board has to agree about
+  // when - otherwise one tab shows a badge as breached and another does not.
+  'ticketDuplicateOf', 'ticketSnooze', 'ticketSlaResetAt'
 ];
 
 function sseFrame(rev, type, data) {

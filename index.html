@@ -1885,6 +1885,35 @@ header {
   display: block;
 }
 
+/* Sits beside the linked chip in the card footer. The chip goes to Jira, so
+   changing a link needs its own control in the same row - the slot the Link
+   button occupies while the ticket is still unlinked. Dashed like that button,
+   because both mean "this link is editable" rather than "here is a fact". */
+.jira-edit-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 800;
+  padding: 3px 8px;
+  background: var(--surface, #fff);
+  border: 1px dashed var(--blue-300);
+  color: var(--blue-700);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.jira-edit-btn:hover {
+  background: var(--blue-50);
+  border-style: solid;
+}
+
+.jira-edit-btn:focus-visible {
+  outline: 2px solid var(--blue-300);
+  outline-offset: 2px;
+}
+
 .manual-badge {
   font-size: 9px;
   font-weight: 900;
@@ -2797,6 +2826,32 @@ header {
 
 .btn-primary:hover {
   background: var(--primary-dark);
+}
+
+/* Destructive confirmations. Fixed hex rather than the red-600 token, which
+   lightens in the dark theme and would leave white text on a pale button. */
+.btn-danger {
+  font-size: 12px;
+  padding: 7px 15px;
+  border-radius: 11px;
+  cursor: pointer;
+  font-weight: 800;
+  transition: all .15s ease;
+  border: none;
+  background: #dc2626;
+  color: #fff;
+}
+
+.btn-danger:hover {
+  background: #b91c1c;
+}
+
+.confirm-message {
+  padding: 16px 20px;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--slate-600);
+  white-space: pre-line;
 }
 
 .form-field {
@@ -4760,8 +4815,9 @@ th {
   border: 1px solid var(--border-strong, #cbd5e1);
   box-shadow: 0 12px 34px rgba(15, 23, 42, .2);
   transition: bottom .18s ease; max-width: calc(100vw - 32px); flex-wrap: wrap;
+  pointer-events: none;
 }
-.selection-bar.show { bottom: 22px; }
+.selection-bar.show { bottom: 22px; pointer-events: auto; }
 .sel-count { font-size: 12px; font-weight: 800; color: var(--indigo-700, #4338ca); white-space: nowrap; }
 .sel-input { font-size: 12px; padding: 4px 8px; border: 1px solid var(--border, #e2e8f0); border-radius: 8px; background: var(--surface, #fff); color: var(--text, #0f172a); }
 .sel-spacer { flex: 1; min-width: 4px; }
@@ -4837,33 +4893,273 @@ th {
 .emc-suggest-current { font-size: 10px; color: var(--muted, #64748b); font-style: italic; }
 
 
-/* ===== Quinta properties panel ============================================ */
-.q-head { display:flex; align-items:flex-start; justify-content:space-between; gap:16px; flex-wrap:wrap; margin-bottom:14px; }
-.q-title { font-family:Caladea,serif; font-size:26px; color:var(--text,#0f172a); }
-.q-subtitle { font-size:11px; color:var(--muted,#64748b); margin-top:3px; }
-.q-controls { display:flex; align-items:center; gap:10px; }
-.q-body { padding-bottom:30px; }
-.q-lead { font-size:12px; color:var(--text-soft,#334155); margin-bottom:12px; line-height:1.5; }
-.q-loading, .q-empty { padding:34px 10px; text-align:center; color:var(--muted,#64748b); font-size:13px; line-height:1.6; }
-.q-error { padding:14px; border-radius:10px; font-size:13px; background:var(--red-50,#fef2f2); border:1px solid var(--red-200,#fecaca); color:var(--red-700,#b91c1c); }
-.q-muted { color:var(--muted,#64748b); font-style:italic; }
-.q-setup {
-  border:1px solid var(--amber-300,#fcd34d); background:var(--amber-50,#fffbeb);
-  color:var(--amber-800,#92400e); border-radius:12px; padding:16px 18px; font-size:13px; line-height:1.6; max-width:760px;
+/* ===== Projects ============================================================ */
+.pj-head { display:flex; align-items:flex-start; justify-content:space-between; gap:16px; flex-wrap:wrap; margin-bottom:14px; }
+.pj-title { font-family:Caladea,serif; font-size:26px; color:var(--text,#0f172a); }
+.pj-subtitle { font-size:11px; color:var(--muted,#64748b); margin-top:3px; }
+.pj-controls { display:flex; align-items:center; gap:9px; flex-wrap:wrap; }
+.pj-search { min-width:230px; }
+.pj-loading, .pj-empty { padding:40px 10px; text-align:center; color:var(--muted,#64748b); font-size:13px; }
+.pj-error-box { padding:14px; border-radius:10px; font-size:13px; background:var(--red-50,#fef2f2); border:1px solid var(--red-200,#fecaca); color:var(--red-700,#b91c1c); }
+.pj-connect-box { display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; margin:0 0 14px; padding:12px 14px; border:1px solid var(--border,#e2e8f0); border-radius:10px; background:var(--surface-soft,#f8fafc); font-size:12px; color:var(--text-soft,#334155); }
+.pj-connect-box strong { color:var(--text,#0f172a); }
+.pj-connect-actions { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.pj-secret { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:11px; }
+
+.pj-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(330px,1fr)); gap:12px; align-items:start; padding-bottom:30px; }
+.pj-card {
+  border:1px solid var(--border,#e2e8f0); border-radius:14px; background:var(--surface,#fff);
+  overflow:hidden; transition:box-shadow .15s ease, border-color .15s ease;
 }
-.q-setup code { background:var(--surface,#fff); border:1px solid var(--amber-300,#fcd34d); border-radius:5px; padding:1px 6px; font-size:12px; }
-.q-setup p { margin:8px 0 0; }
-.q-note { font-size:11.5px; opacity:.85; }
-.q-card { border:1px solid var(--border,#e2e8f0); border-radius:12px; background:var(--surface,#fff); padding:13px 15px; margin-bottom:10px; }
-.q-card-head { display:flex; align-items:flex-start; justify-content:space-between; gap:12px; }
-.q-name { font-size:14px; font-weight:700; color:var(--text,#0f172a); }
-.q-sub { font-size:11px; color:var(--muted,#64748b); margin-top:2px; }
-.q-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:10px 18px; margin-top:11px; }
-.q-label { display:block; font-size:9.5px; font-weight:800; text-transform:uppercase; letter-spacing:.05em; color:var(--muted,#64748b); margin-bottom:3px; }
-.q-pill { display:inline-block; margin:0 4px 4px 0; padding:1px 8px; border-radius:999px; font-size:10px; font-weight:600;
-  background:var(--indigo-50,#eef2ff); color:var(--indigo-800,#3730a3); border:1px solid var(--indigo-200,#c7d2fe); }
-.q-raw { margin-top:11px; padding:10px; border-radius:8px; background:var(--surface-muted,#f1f5f9); font-size:11px;
-  max-height:340px; overflow:auto; white-space:pre-wrap; word-break:break-word; color:var(--text-soft,#334155); }
+.pj-card:hover { border-color:var(--border-strong,#cbd5e1); box-shadow:0 4px 14px rgba(15,23,42,.06); }
+.pj-card.open { grid-column:1 / -1; border-color:var(--indigo-400,#818cf8); box-shadow:0 8px 26px rgba(15,23,42,.10); }
+.pj-card-head { display:block; width:100%; text-align:left; border:0; background:transparent; cursor:pointer; padding:14px 16px; border-left:3px solid var(--pj-accent,#94a3b8); }
+.pj-card-title { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.pj-name { font-size:14px; font-weight:700; color:var(--text,#0f172a); }
+.pj-pin, .pj-nodraft {
+  font-size:9px; font-weight:800; text-transform:uppercase; letter-spacing:.05em;
+  padding:2px 7px; border-radius:999px;
+  background:var(--surface-muted,#f1f5f9); color:var(--muted,#64748b);
+}
+.pj-nodraft { background:var(--amber-50,#fffbeb); color:var(--amber-800,#92400e); border:1px solid var(--amber-300,#fcd34d); }
+.pj-desc { font-size:12px; color:var(--text-soft,#334155); margin-top:5px; line-height:1.5; }
+.pj-meta { font-size:10.5px; color:var(--muted,#64748b); margin-top:7px; }
+
+.pj-accent-indigo { --pj-accent:var(--indigo-600,#4f46e5); }
+.pj-accent-teal { --pj-accent:#0d9488; }
+.pj-accent-amber { --pj-accent:var(--amber-500,#f59e0b); }
+.pj-accent-violet { --pj-accent:#7c3aed; }
+.pj-accent-rose { --pj-accent:#e11d48; }
+.pj-accent-emerald { --pj-accent:#059669; }
+.pj-accent-slate { --pj-accent:#64748b; }
+
+.pj-body { padding:4px 16px 16px; border-top:1px solid var(--border,#e2e8f0); }
+.pj-field { display:block; margin:12px 0; }
+.pj-field > span { display:block; font-size:11.5px; font-weight:600; color:var(--text-soft,#334155); margin-bottom:5px; }
+.pj-field > span em { font-weight:400; font-style:normal; color:var(--muted,#64748b); }
+.pj-field .form-input { width:100%; }
+.pj-req { font-weight:400; font-size:10px; color:var(--muted,#64748b); }
+.pj-help { display:block; font-size:10.5px; color:var(--muted,#64748b); margin-top:4px; line-height:1.45; }
+.pj-help code, .pj-warn code { background:var(--surface-muted,#f1f5f9); border-radius:4px; padding:0 4px; font-size:10.5px; }
+.pj-textarea { min-height:84px; resize:vertical; font-family:inherit; }
+.pj-mono { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:11.5px; }
+.pj-actions { display:flex; align-items:center; gap:9px; margin-top:14px; flex-wrap:wrap; }
+.pj-model { font-size:10px; color:var(--muted,#64748b); margin-left:auto; font-variant-numeric:tabular-nums; }
+.pj-warn {
+  border:1px solid var(--amber-300,#fcd34d); background:var(--amber-50,#fffbeb);
+  color:var(--amber-800,#92400e); border-radius:9px; padding:9px 11px; font-size:11.5px; line-height:1.5; margin:12px 0;
+}
+.pj-warn-top { margin:0 0 14px; max-width:760px; }
+
+.pj-result { margin-top:14px; border-radius:10px; font-size:12.5px; line-height:1.6; }
+.pj-running { padding:12px; color:var(--muted,#64748b); background:var(--surface-soft,#f8fafc); border:1px solid var(--border,#e2e8f0); }
+.pj-error { padding:12px; background:var(--red-50,#fef2f2); border:1px solid var(--red-200,#fecaca); color:var(--red-700,#b91c1c); }
+.pj-ok { border:1px solid var(--border,#e2e8f0); background:var(--surface-soft,#f8fafc); overflow:hidden; }
+.pj-result-head {
+  display:flex; align-items:center; gap:10px; padding:8px 12px;
+  border-bottom:1px solid var(--border,#e2e8f0); background:var(--surface,#fff); font-size:11px; color:var(--muted,#64748b);
+}
+.pj-result-head strong { color:var(--text,#0f172a); font-size:12px; }
+.pj-result-head span { flex:1; }
+.pj-copy { font-size:10px; padding:2px 9px; }
+.pj-result-body { padding:12px; white-space:pre-wrap; word-break:break-word; max-height:480px; overflow:auto; color:var(--text,#0f172a); }
+
+/* A project thread: the first answer, then whatever was asked of it after. */
+.pj-thread { margin-top:14px; display:flex; flex-direction:column; gap:10px; }
+.pj-turn { border-radius:10px; font-size:12.5px; line-height:1.6; overflow:hidden; }
+.pj-turn-claude { border:1px solid var(--border,#e2e8f0); background:var(--surface-soft,#f8fafc); }
+.pj-turn-you { border:1px solid var(--indigo-200,#c7d2fe); background:var(--indigo-50,#eef2ff); }
+.pj-turn-who {
+  display:flex; align-items:center; gap:9px; padding:8px 12px;
+  border-bottom:1px solid var(--border,#e2e8f0);
+  font-size:11px; font-weight:700; color:var(--muted,#64748b);
+}
+.pj-turn-you .pj-turn-who { border-bottom:0; padding-bottom:2px; color:var(--indigo-700,#4338ca); }
+.pj-turn-who strong { color:var(--text,#0f172a); font-size:12px; }
+.pj-turn-who span { flex:1; }
+.pj-turn-body { padding:12px; white-space:pre-wrap; word-break:break-word; max-height:480px; overflow:auto; color:var(--text,#0f172a); }
+.pj-followup { display:flex; flex-direction:column; gap:8px; }
+.pj-followup-input {
+  width:100%; resize:vertical; min-height:52px;
+  border:1px solid var(--border,#e2e8f0); border-radius:10px;
+  padding:9px 11px; font:inherit; font-size:12.5px; line-height:1.55;
+  background:var(--surface,#fff); color:var(--text,#0f172a);
+}
+.pj-followup-input:focus { outline:none; border-color:var(--indigo-600,#4f46e5); }
+.pj-followup-actions { display:flex; gap:8px; flex-wrap:wrap; }
+
+
+/* A break that is on cooldown stays visible and greyed - hiding it would just
+   raise the question of where it went. */
+#break-btn.cooling {
+  opacity: .5;
+  cursor: not-allowed;
+  filter: grayscale(1);
+}
+
+
+/* ===== The conversation in a ticket ======================================= */
+.em-thread-list { padding: 0 18px; max-height: 46vh; overflow-y: auto; }
+.emt-bar {
+  display: flex; align-items: center; gap: 10px;
+  padding: 9px 0; font-size: 12px; color: var(--muted, #64748b);
+  border-bottom: 1px solid var(--border, #e2e8f0); margin-bottom: 8px;
+}
+.emt-bar strong { color: var(--text, #0f172a); }
+.emt-all { margin-left: auto; font-size: 10.5px; padding: 2px 9px; }
+.emt-note { padding: 10px 0; font-size: 11.5px; color: var(--muted, #64748b); }
+.emt-err { color: var(--amber-800, #92400e); }
+
+.emt-msg {
+  border: 1px solid var(--border, #e2e8f0); border-radius: 10px;
+  margin-bottom: 7px; overflow: hidden; background: var(--surface, #fff);
+  border-left: 3px solid var(--emt-accent, #94a3b8);
+}
+/* Who said it, at a glance: the client on one side, us on the other. */
+.emt-them { --emt-accent: var(--indigo-500, #6366f1); }
+.emt-us { --emt-accent: var(--emerald-500, #10b981); background: var(--surface-soft, #f8fafc); }
+.emt-head {
+  display: flex; align-items: center; gap: 9px; width: 100%;
+  padding: 8px 11px; border: 0; background: transparent; cursor: pointer; text-align: left;
+}
+.emt-who { font-size: 12px; font-weight: 700; color: var(--text, #0f172a); }
+.emt-badge {
+  font-size: 9px; font-weight: 800; text-transform: uppercase; letter-spacing: .05em;
+  padding: 1px 6px; border-radius: 999px;
+  background: var(--surface-muted, #f1f5f9); color: var(--muted, #64748b);
+}
+.emt-them .emt-badge { background: var(--indigo-50, #eef2ff); color: var(--indigo-800, #3730a3); }
+.emt-us .emt-badge { background: var(--emerald-50, #ecfdf5); color: var(--emerald-700, #047857); }
+.emt-when { font-size: 10.5px; color: var(--muted, #64748b); }
+.emt-clip { font-size: 9px; color: var(--muted, #64748b); border: 1px solid var(--border, #e2e8f0); border-radius: 999px; padding: 0 6px; }
+.emt-index { margin-left: auto; font-size: 10px; color: var(--muted-light, #94a3b8); font-variant-numeric: tabular-nums; }
+.emt-preview {
+  padding: 0 11px 9px; font-size: 11.5px; color: var(--muted, #64748b);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.emt-body { padding: 4px 11px 11px; font-size: 12.5px; line-height: 1.55; overflow-x: auto; }
+.emt-body img { max-width: 100%; height: auto; }
+
+
+/* ===== Feedback, as a bubble in the corner ================================ */
+.fb-launcher {
+  position: fixed; right: 22px; bottom: 22px; z-index: 3200;
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 10px 16px 10px 13px; border-radius: 999px;
+  border: 1px solid var(--indigo-600, #4f46e5);
+  background: var(--indigo-600, #4f46e5); color: #fff;
+  font-size: 13px; font-weight: 700; cursor: pointer;
+  box-shadow: 0 8px 22px rgba(79, 70, 229, .34);
+  transition: transform .14s ease, box-shadow .14s ease;
+}
+.fb-launcher:hover { transform: translateY(-1px); box-shadow: 0 12px 28px rgba(79, 70, 229, .42); }
+.fb-launcher.active { transform: translateY(0) scale(.94); opacity: .92; }
+.fb-launcher-icon { font-size: 15px; line-height: 1; }
+
+.fb-chat {
+  position: fixed; right: 22px; bottom: 80px; z-index: 3300;
+  width: min(370px, calc(100vw - 32px));
+  display: flex; flex-direction: column;
+  background: var(--surface, #fff);
+  border: 1px solid var(--border-strong, #cbd5e1); border-radius: 16px;
+  box-shadow: 0 20px 48px rgba(15, 23, 42, .26);
+  overflow: hidden;
+  /* Closed by default, and animated out rather than simply hidden so it reads
+     as folding back into the bubble it came from. */
+  opacity: 0; visibility: hidden; transform: translateY(12px) scale(.97);
+  transform-origin: bottom right;
+  transition: opacity .16s ease, transform .16s ease, visibility .16s;
+}
+.fb-chat.open { opacity: 1; visibility: visible; transform: translateY(0) scale(1); }
+
+.fb-chat-head {
+  display: flex; align-items: center; gap: 9px;
+  padding: 11px 12px 11px 15px;
+  background: var(--indigo-600, #4f46e5); color: #fff;
+}
+.fb-chat-title { font-size: 13.5px; font-weight: 800; }
+.fb-chat-sub { font-size: 10.5px; opacity: .85; margin-top: 1px; }
+.fb-chat-head > div:first-child { flex: 1; min-width: 0; }
+.fb-test-btn {
+  font-size: 10px; padding: 3px 9px;
+  background: rgba(255, 255, 255, .14); border-color: rgba(255, 255, 255, .4); color: #fff;
+}
+.fb-test-btn:hover { background: rgba(255, 255, 255, .24); }
+.fb-chat-close {
+  border: 0; background: transparent; color: rgba(255, 255, 255, .8);
+  font-size: 21px; line-height: 1; cursor: pointer; padding: 0 2px;
+}
+.fb-chat-close:hover { color: #fff; }
+
+.fb-log {
+  padding: 13px; display: flex; flex-direction: column; gap: 8px;
+  max-height: 44vh; min-height: 96px; overflow-y: auto;
+  background: var(--surface-soft, #f8fafc);
+}
+.fb-msg {
+  max-width: 86%; padding: 8px 11px; border-radius: 13px;
+  font-size: 12.5px; line-height: 1.5; white-space: pre-wrap; word-break: break-word;
+}
+.fb-bot {
+  align-self: flex-start; border-bottom-left-radius: 4px;
+  background: var(--surface, #fff); border: 1px solid var(--border, #e2e8f0); color: var(--text, #0f172a);
+}
+.fb-me {
+  align-self: flex-end; border-bottom-right-radius: 4px;
+  background: var(--indigo-600, #4f46e5); color: #fff;
+}
+/* The outcome is coloured, because "sent" and "not sent" must not look alike. */
+.fb-bot.fb-ok { background: var(--emerald-50, #ecfdf5); border-color: var(--emerald-200, #a7f3d0); color: var(--emerald-700, #047857); }
+.fb-bot.fb-warn { background: var(--amber-50, #fffbeb); border-color: var(--amber-300, #fcd34d); color: var(--amber-800, #92400e); }
+.fb-bot.fb-bad { background: var(--red-50, #fef2f2); border-color: var(--red-200, #fecaca); color: var(--red-700, #b91c1c); }
+
+.fb-typing { display: flex; gap: 4px; align-items: center; padding: 11px; }
+.fb-typing span {
+  width: 6px; height: 6px; border-radius: 50%; background: var(--muted-light, #94a3b8);
+  animation: fb-blink 1.1s infinite ease-in-out;
+}
+.fb-typing span:nth-child(2) { animation-delay: .18s; }
+.fb-typing span:nth-child(3) { animation-delay: .36s; }
+@keyframes fb-blink { 0%, 80%, 100% { opacity: .25; } 40% { opacity: 1; } }
+
+.fb-cats { display: flex; gap: 6px; padding: 9px 13px 0; flex-wrap: wrap; }
+.fb-cat {
+  font-size: 11px; font-weight: 600; padding: 3px 11px; border-radius: 999px;
+  border: 1px solid var(--border, #e2e8f0); background: var(--surface, #fff);
+  color: var(--muted, #64748b); cursor: pointer;
+}
+.fb-cat:hover { border-color: var(--border-strong, #cbd5e1); color: var(--text, #0f172a); }
+.fb-cat.active { background: var(--indigo-50, #eef2ff); border-color: var(--indigo-300, #a5b4fc); color: var(--indigo-800, #3730a3); }
+
+.fb-compose { display: flex; align-items: flex-end; gap: 8px; padding: 9px 13px; }
+.fb-textarea {
+  flex: 1; resize: none; min-height: 40px; max-height: 120px;
+  padding: 9px 11px; font: inherit; font-size: 12.5px; line-height: 1.45;
+  border: 1px solid var(--border, #e2e8f0); border-radius: 11px;
+  background: var(--surface, #fff); color: var(--text, #0f172a);
+}
+.fb-textarea:focus { outline: none; border-color: var(--indigo-400, #818cf8); }
+.fb-send {
+  flex: 0 0 auto; width: 36px; height: 36px; border-radius: 50%;
+  border: 0; background: var(--indigo-600, #4f46e5); color: #fff;
+  font-size: 14px; cursor: pointer; line-height: 1;
+}
+.fb-send:hover { background: var(--indigo-700, #4338ca); }
+.fb-send:disabled { opacity: .5; cursor: not-allowed; }
+
+.fb-foot {
+  display: flex; align-items: center; gap: 8px;
+  padding: 0 13px 11px; font-size: 10px; color: var(--muted, #64748b);
+}
+.fb-count { flex: 0 0 auto; }
+.fb-count.over { color: var(--red-600, #dc2626); font-weight: 700; }
+.fb-context { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+@media (max-width: 520px) {
+  .fb-chat { right: 12px; left: 12px; bottom: 74px; width: auto; }
+  .fb-launcher { right: 12px; bottom: 12px; }
+  .fb-launcher-label { display: none; }
+}
 
 </style>
 </head>
@@ -4891,7 +5187,7 @@ th {
 <a class="audit-board-btn" href="/audit/tickets" title="Which tickets each Support agent and each CS updated, and what they changed">
   Audit Log
 </a>
-<button class="feedback-btn" id="feedback-btn" type="button" title="Report a problem with the board, or suggest something">Feedback</button>
+
     <div class="account-menu">
       <button class="account-btn" id="account-btn">Account </button>
      <div class="account-panel" id="account-panel">
@@ -4962,7 +5258,7 @@ th {
       </div>
       <div class="crm-nav-section" aria-label="QT-Tools">
         <div class="crm-nav-section-title">QT-Tools</div>
-        <button class="crm-nav-btn" id="quinta-view-btn"> Quinta Properties</button>
+        <button class="crm-nav-btn" id="projects-view-btn"> Projects</button>
         <button class="crm-nav-btn" id="qt-seize-view-btn"> QT Seize</button>
         <!-- Admin only: hidden by syncRoleRestrictedControls, and the endpoint
              behind it is requireAdmin, so hiding the button is presentation
@@ -5122,9 +5418,42 @@ th {
     </table>
   </div>
 </div>
-<div id="quinta-view" style="display:none;min-height:calc(100dvh - 175px);padding:var(--content-pad);">
-  <div id="quinta-body"></div>
+<div id="projects-view" style="display:none;min-height:calc(100dvh - 175px);padding:var(--content-pad);">
+  <div id="projects-body"></div>
 </div>
+<div class="modal-bg" id="projects-editor"><div class="modal" style="max-width:720px;">
+  <div class="modal-head"><h2 id="pj-editor-title">Project</h2><button class="modal-close-x" data-close="projects-editor"></button></div>
+  <div class="modal-body-scroll" style="padding:14px 18px;">
+    <p class="pj-help" style="margin-top:0;">Projects synced from Claude bring their instructions with them. For manual projects, paste the project's instructions here once and it becomes runnable.</p>
+    <label class="pj-field"><span>Name</span><input class="form-input" id="pj-e-name" type="text" autocomplete="off"></label>
+    <label class="pj-field"><span>Slug <em>(leave blank to derive from the name)</em></span><input class="form-input" id="pj-e-slug" type="text" autocomplete="off"></label>
+    <label class="pj-field"><span>Description</span><input class="form-input" id="pj-e-desc" type="text" autocomplete="off"></label>
+    <label class="pj-field"><span>Owner</span><input class="form-input" id="pj-e-owner" type="text" autocomplete="off"></label>
+    <label class="pj-field"><span>Tab</span><select class="form-input" id="pj-e-scope"><option value="mine">Your projects</option><option value="org">Organization</option><option value="shared">Shared with you</option></select></label>
+    <label class="pj-field"><span>Instructions <em>(the project's system prompt)</em></span><textarea class="form-input pj-textarea" id="pj-e-instructions" rows="8" spellcheck="false"></textarea></label>
+    <label class="pj-field"><span>Inputs <em>(JSON — this is what generates the form)</em></span><textarea class="form-input pj-textarea pj-mono" id="pj-e-inputs" rows="8" spellcheck="false"></textarea>
+      <span class="pj-help">Each entry: <code>{"key":"websiteUrl","label":"Website URL","type":"url","required":true}</code>. Types: text, textarea, number, url, select (with <code>"options":[…]</code>).</span></label>
+  </div>
+  <div class="modal-actions">
+    <button class="btn-out" id="pj-e-delete" style="display:none;color:var(--red-600);">Delete</button>
+    <span style="flex:1"></span>
+    <button class="btn-out" data-close="projects-editor">Cancel</button>
+    <button class="btn-primary" id="pj-e-save">Save</button>
+  </div>
+</div></div>
+<div class="modal-bg" id="claude-connect-modal"><div class="modal" style="max-width:560px;">
+  <div class="modal-head"><h2>Connect Claude</h2><button class="modal-close-x" data-close="claude-connect-modal"></button></div>
+  <div class="modal-body-scroll" style="padding:14px 18px;">
+    <p class="pj-help" style="margin-top:0;">Use a Claude Compliance Access Key with <code>read:compliance_user_data</code>. The board imports matching claude.ai Projects into QT Tools for this signed-in user.</p>
+    <label class="pj-field"><span>Claude account email <em>(optional filter)</em></span><input class="form-input" id="claude-connect-email" type="email" autocomplete="email"></label>
+    <label class="pj-field"><span>Compliance Access Key</span><input class="form-input pj-secret" id="claude-connect-credential" type="password" autocomplete="off" spellcheck="false" placeholder="sk-ant-api01-..."></label>
+    <label class="pj-field"><span>Authentication</span><select class="form-input" id="claude-connect-auth"><option value="auto">Auto</option><option value="api_key">API key header</option><option value="bearer">Bearer token</option></select></label>
+  </div>
+  <div class="modal-actions">
+    <button class="btn-out" data-close="claude-connect-modal">Cancel</button>
+    <button class="btn-primary" id="claude-connect-save">Connect and sync</button>
+  </div>
+</div></div>
 <div id="insights-view" style="display:none;min-height:calc(100dvh - 175px);padding:var(--content-pad);">
   <div id="insights-body"></div>
 </div>
@@ -5358,46 +5687,37 @@ th {
   </div>
 </div>
 <!-- Feedback modal -->
-<div class="modal-bg" id="feedback-modal">
-  <!-- 580 rather than 520: the admin Test delivery button alongside Cancel and
-       Send pushed the row onto two lines at the narrower width. -->
-  <div class="modal" style="max-width:580px;">
-    <div class="modal-head">
-      <div>
-        <h2>Send feedback</h2>
-        <div style="font-size:11px;color:var(--slate-400);margin-top:3px;">Something broken, missing, or worth changing on the board</div>
-      </div>
-      <button class="modal-close-x" data-close="feedback-modal"></button>
+<!-- Feedback, as a bubble in the corner rather than a modal over the board -
+     see the fbToggleChat comment for why that matters. -->
+<button class="fb-launcher" id="fb-launcher" type="button" aria-expanded="false" aria-controls="fb-chat"
+        title="Tell the platform team something about the board">
+  <span class="fb-launcher-icon" aria-hidden="true">&#128172;</span>
+  <span class="fb-launcher-label">Feedback</span>
+</button>
+<section class="fb-chat" id="fb-chat" role="dialog" aria-label="Send feedback to the platform team">
+  <header class="fb-chat-head">
+    <div>
+      <div class="fb-chat-title">Platform team</div>
+      <div class="fb-chat-sub" id="fb-chat-sub">Goes to Teams</div>
     </div>
-    <div class="fb-body">
-      <div class="fb-cats" id="fb-cats" role="group" aria-label="What kind of feedback">
-        <button class="fb-cat" type="button" data-fb-cat="bug" aria-pressed="true">Bug</button>
-        <button class="fb-cat" type="button" data-fb-cat="idea" aria-pressed="false">Idea</button>
-        <button class="fb-cat" type="button" data-fb-cat="question" aria-pressed="false">Question</button>
-        <button class="fb-cat" type="button" data-fb-cat="other" aria-pressed="false">Other</button>
-      </div>
-      <div>
-        <textarea class="fb-textarea" id="fb-message" spellcheck="true"
-          placeholder="What happened, and what did you expect instead? If it was on one ticket, its number helps."></textarea>
-        <div class="fb-count" id="fb-count"></div>
-      </div>
-      <div class="fb-context" id="fb-context"></div>
-    </div>
-    <div class="modal-actions">
-      <span class="fb-note" id="fb-note"></span>
-      <!-- Admin only, and hidden otherwise: it sends a real mail, and it exists
-           so whoever set FEEDBACK_EMAIL and FEEDBACK_WEBHOOK_URL can prove both
-           legs work without waiting for somebody to report something. -->
-      <button class="btn-out admin-only" id="fb-test" type="button" title="Send a test report to check that email and Teams delivery work">Test delivery</button>
-      <button class="btn-out" data-close="feedback-modal">Cancel</button>
-      <button class="btn-primary" id="fb-send">Send feedback</button>
-    </div>
+    <button class="btn-out admin-only fb-test-btn" id="fb-test" type="button"
+            title="Send a test report to check that Teams and email delivery work">Test</button>
+    <button class="fb-chat-close" id="fb-close" type="button" aria-label="Close">&times;</button>
+  </header>
+  <div class="fb-log" id="fb-log" aria-live="polite"></div>
+  <div class="fb-cats" id="fb-cats" role="group" aria-label="What kind of feedback"></div>
+  <div class="fb-compose">
+    <textarea class="fb-textarea" id="fb-message" rows="2" spellcheck="true"
+      placeholder="What happened, and what did you expect instead?"></textarea>
+    <button class="fb-send" id="fb-send" type="button" aria-label="Send">&#10148;</button>
   </div>
-</div>
+  <div class="fb-foot"><span class="fb-count" id="fb-count"></span><span class="fb-context" id="fb-context"></span></div>
+</section>
 <div id="toast"></div>
 
 <!-- Email modal -->
-<div class="modal-bg" id="email-modal"><div class="modal"><div class="modal-head"><h2 id="em-title"></h2><button class="modal-close-x" data-close="email-modal"></button></div><div class="modal-meta-bar" id="em-meta"></div><div class="tr-bar" id="em-tr-bar"></div><div class="modal-body-scroll" id="em-body"></div>
+<div class="modal-bg" id="email-modal"><div class="modal"><div class="modal-head"><h2 id="em-title"></h2><button class="modal-close-x" data-close="email-modal"></button></div><div class="modal-meta-bar" id="em-meta"></div><div class="tr-bar" id="em-tr-bar"></div><div class="em-thread-list" id="em-thread"></div>
+<div class="modal-body-scroll" id="em-body"></div>
 <div class="em-context" id="em-context"></div>
 <!-- Replying to the client, without leaving the board. Collapsed until the
      Reply button is pressed: the modal's first job is still reading the
@@ -5437,6 +5757,13 @@ th {
 <div class="modal-bg" id="kpi-tickets-modal"><div class="modal" style="max-width:640px;"><div class="modal-head"><h2 id="kpi-tickets-title"></h2><button class="modal-close-x" data-close="kpi-tickets-modal"></button></div><div class="modal-body-scroll" id="kpi-tickets-list"></div><div class="modal-actions"><button class="btn-out" data-close="kpi-tickets-modal">Close</button></div></div></div>
 <!-- Bulk triage: appears only when something is selected. -->
 <div class="selection-bar" id="selection-bar"></div>
+<!-- Confirmations for destructive board actions. Deliberately not window.confirm
+     - see confirmAction(). -->
+<div class="modal-bg" id="confirm-modal"><div class="modal" style="max-width:420px;">
+  <div class="modal-head"><h2 id="confirm-title">Are you sure?</h2></div>
+  <div class="confirm-message" id="confirm-message"></div>
+  <div class="modal-actions"><button class="btn-out" id="confirm-cancel">Cancel</button><button class="btn-primary" id="confirm-ok">Confirm</button></div>
+</div></div>
 <!-- Undo lives apart from the ordinary toast because it needs a button. -->
 <div class="undo-toast" id="undo-toast"></div>
 <!-- Command palette (Ctrl/Cmd + K) -->
@@ -5651,14 +5978,18 @@ th {
 <!--  Jira link modal  -->
 <div class="modal-bg" id="jira-modal">
   <div class="modal" style="max-width:380px;">
-    <div class="modal-head"><h2> Link to Jira</h2><button class="modal-close-x" data-close="jira-modal"></button></div>
+    <div class="modal-head"><h2 id="jira-modal-title"> Link to Jira</h2><button class="modal-close-x" data-close="jira-modal"></button></div>
     <div style="padding:16px 18px;display:flex;flex-direction:column;gap:12px;">
       <div style="font-size:12px;color:var(--slate-500);line-height:1.4;" id="jira-ticket-title"></div>
+      <!-- What this ticket is linked to RIGHT NOW, and how to change it. Filled
+           by openJiraModal and hidden when there is no link: a wrong link is
+           only obvious next to the key it should have been. -->
+      <div id="jira-current" style="display:none;font-size:11px;line-height:1.45;color:var(--slate-700);background:var(--legacy-f8fbff);border:1px solid var(--blue-100);border-radius:10px;padding:10px;"></div>
       <div id="jira-connection-status" style="font-size:11px;color:var(--slate-500);background:var(--slate-50);border:1px solid var(--slate-200);border-radius:10px;padding:10px;">Checking Jira connection...</div>
       <div class="form-field">
-        <label>Jira ticket number</label>
+        <label id="jira-input-label">Jira ticket number</label>
         <input id="jira-input" class="form-input" type="text" placeholder="e.g. QT-1234" style="font-size:15px;font-weight:700;letter-spacing:.5px;text-transform:uppercase;"/>
-        <div style="font-size:10px;color:var(--slate-400);margin-top:3px;">Enter the issue key from your Jira project</div>
+        <div style="font-size:10px;color:var(--slate-400);margin-top:3px;" id="jira-input-hint">Enter the issue key from your Jira project</div>
       </div>
     </div>
     <div class="modal-actions">
@@ -5906,6 +6237,11 @@ function findExistingTicketForEmail(emailObj){const probe={id:'__probe__',email:
   const probeTs=Date.parse(emailObj?.receivedDateTime||'');
   for(const ticket of allTickets){const existingKeys=buildTicketThreadKeys(ticket,{allowSubjectFallback:true,forceSubjectFallback:true,requireReplyLikeSubject:false});if(!existingKeys.some(key=>fallbackKeys.includes(key)))continue;if(Number.isFinite(probeTs)){const existingTs=Date.parse(ticket?.email?.receivedDateTime||ticketCreatedAt[ticket.id]||'');if(Number.isFinite(existingTs)&&Math.abs(probeTs-existingTs)>THREAD_FALLBACK_MAX_GAP_DAYS*86400000)continue;}return ticket;}return null;}
 function mergeEmailIntoExistingTicket(ticket,emailObj,subtypeId){if(!ticket||!ticket.id||!emailObj)return false;ticket.email={...ticket.email,...emailObj};const ce=getClientEmail(emailObj);if(ce)ticketClientEmail[ticket.id]=ce;const csFromSender=csAgentFromSenderEmail(emailObj.sender);if(csFromSender&&!ticketCSOwner[ticket.id])ticketCSOwner[ticket.id]=csFromSender;const st=SUBTYPE_BY_ID[subtypeId]||null;if(!ticketSubtype[ticket.id]&&st)ticketSubtype[ticket.id]=st.id;if(!ticketPriority[ticket.id]&&st)ticketPriority[ticket.id]=st.priority;ticketHasNewReply[ticket.id]=true;
+  // Any new message in the loop restarts the clock - the client's reply and
+  // ours both. Stamped from the message's own timestamp where there is one, so
+  // a reply picked up by a late poll does not lose the minutes in between.
+  const replyAt=Date.parse(emailObj.receivedDateTime||'')||Date.now();
+  ticketSlaResetAt[ticket.id]=replyAt;
   // The ticket's support agent was assigned by workload balancing, but if a
   // DIFFERENT support agent is the one actually replying to the client in
   // the email loop, the ticket should follow the real handling agent
@@ -5947,6 +6283,14 @@ let manualSupportOverride={};
 let manualCSOverride={}; // ticketId -> true once CS owner was set by an explicit human action (manual ticket creation, or the manual-ticket edit modal) - protects it from being silently overwritten by the HubSpot-company-derived default the same way manualSupportOverride protects the support agent
 let ticketCSOwner={};
 let ticketCreatedAt={};
+/* ticketId -> when the SLA clock was last restarted.
+
+   Every new message in a thread resets it. The commitment is a response time,
+   not a lifetime: once someone writes again the question is how long THAT waits,
+   and a ticket that has been going back and forth for a week should not show as
+   permanently breached because of when it first arrived. getSLAStatus counts
+   from here when it is set, and from the ticket's creation when it is not. */
+let ticketSlaResetAt={};
 let ticketCreatedBy={}; // ticketId -> creator's agent code, set once at manual-ticket creation - gates who can use the Edit Manual Ticket action
 let ticketNumbers={};
 let ticketNumberCounter=0;
@@ -6360,7 +6704,7 @@ function buildStatePayload(reason){
     allTickets,
     seenIds:Object.keys(seen),
     ticketState,ticketStageTouchedAt,ticketAssigneeTouchedAt,ticketAssigneeBy,ticketHasNewReply,ticketResolutionMeta,ticketArchived,ticketPriority,ticketCategory,ticketSubtype,ticketAssignee,ticketAssignmentMode,manualSupportOverride,manualCSOverride,ticketCSOwner,ticketComments,ticketClientEmail,ticketCreatedAt,ticketCreatedBy,ticketNumbers,ticketNumberCounter,ticketJira,ticketDuplicateOf,ticketHubspotId,
-    ticketSnooze,wipLimits,savedViews,
+    ticketSnooze,ticketSlaResetAt,wipLimits,savedViews,
     spamSenders:[...spamSenders],hsCache,domainCompanyCache,readMentions:[...readMentions],jiraAlerts,readJiraAlerts:[...readJiraAlerts],jiraStatusSnapshot,companyCustomProps,companyProfiles,companiesViewType,companyNetworkCache,companyFilters,coOwnerMappings,actionHistory,
     _meta:{clientSavedAt:now,clientVersion:stateVersion,clientId:LIVE_CLIENT_ID}
   };
@@ -6625,7 +6969,7 @@ function liveSyncTargets(){
   return {ticketState,ticketStageTouchedAt,ticketAssigneeTouchedAt,ticketAssignee,ticketCSOwner,ticketAssignmentMode,
     manualSupportOverride,manualCSOverride,ticketPriority,ticketCategory,ticketSubtype,
     ticketJira,ticketDuplicateOf,ticketHubspotId,ticketArchived,ticketResolutionMeta,ticketHasNewReply,
-    ticketNumbers,ticketComments,ticketCreatedBy,ticketSnooze};
+    ticketNumbers,ticketComments,ticketCreatedBy,ticketSnooze,ticketSlaResetAt};
 }
 function setLiveIndicator(state,detail){
   const el=document.getElementById('live-indicator');
@@ -6814,6 +7158,9 @@ async function loadState(){
   if(s.ticketComments)Object.assign(ticketComments,s.ticketComments);
   if(s.ticketClientEmail)Object.assign(ticketClientEmail,s.ticketClientEmail);
   if(s.ticketCreatedAt)Object.assign(ticketCreatedAt,s.ticketCreatedAt);
+  if(s.ticketSlaResetAt&&typeof s.ticketSlaResetAt==='object'){
+    Object.entries(s.ticketSlaResetAt).forEach(([k,v])=>{const at=Number(v||0);if(k&&at>0)ticketSlaResetAt[k]=at;});
+  }
   if(s.ticketCreatedBy&&typeof s.ticketCreatedBy==='object')Object.assign(ticketCreatedBy,s.ticketCreatedBy);
   if(s.ticketNumbers&&typeof s.ticketNumbers==='object')Object.entries(s.ticketNumbers).forEach(([k,v])=>{const n=Number(v||0);if(k&&n>0)ticketNumbers[k]=n;});
   ticketNumberCounter=Math.max(ticketNumberCounter,Number(s.ticketNumberCounter||0),...Object.values(ticketNumbers).map(v=>Number(v)||0),0);
@@ -6922,6 +7269,40 @@ let shiftAgents={},shiftMe=null,shiftTracked=false,shiftOnBreak=false,shiftLoade
 const SHIFT_HEARTBEAT_MS=60000;
 
 function isWeekendDay(d){const day=d.getDay();return day===0||day===6;}
+/* The hours the SLA clock actually runs.
+
+   08:00-12:00 and 14:00-17:00, weekdays: seven hours a day, not twenty-four and
+   not the nine between the first and last. The lunch gap matters - counting
+   through it made a ticket that arrived at 11:50 look an hour older by 14:00
+   than the work anyone could have done on it.
+
+   Walked a day at a time with setHours rather than by adding 86400000, so a
+   daylight-saving change moves the window with the clock instead of shifting it
+   by an hour. */
+const BUSINESS_WINDOWS = [[8, 0, 12, 0], [14, 0, 17, 0]];
+const BUSINESS_MS_PER_DAY = BUSINESS_WINDOWS.reduce((total, [sh, sm, eh, em]) => total + ((eh * 60 + em) - (sh * 60 + sm)) * 60000, 0);
+function businessMsInRange(from, to) {
+  if (!(to > from)) return 0;
+  let total = 0;
+  const cursor = new Date(from);
+  cursor.setHours(0, 0, 0, 0);
+  while (cursor.getTime() < to) {
+    const next = new Date(cursor);
+    next.setDate(next.getDate() + 1);
+    next.setHours(0, 0, 0, 0);
+    if (!isWeekendDay(cursor)) {
+      for (const [sh, sm, eh, em] of BUSINESS_WINDOWS) {
+        const windowStart = new Date(cursor); windowStart.setHours(sh, sm, 0, 0);
+        const windowEnd = new Date(cursor); windowEnd.setHours(eh, em, 0, 0);
+        const start = Math.max(windowStart.getTime(), from);
+        const end = Math.min(windowEnd.getTime(), to);
+        if (end > start) total += end - start;
+      }
+    }
+    cursor.setTime(next.getTime());
+  }
+  return total;
+}
 // Milliseconds of [from,to) that land on a weekday. Walks day by day via
 // setDate so daylight-saving transitions cannot drift the boundaries the way
 // adding a fixed 86400000 would.
@@ -6944,6 +7325,21 @@ function weekdayMsInRange(from,to){
   }
   return total;
 }
+// A break is capped at fifteen minutes however it was left. Mirrors the
+// server's breakEndMs so a badge cannot disagree with the KPI dashboard.
+let shiftBreakMs=15*60*1000;
+let shiftBreakCooldownMs=2*60*60*1000;
+let shiftBreakEndsAt=0;
+let shiftCooldownRemainingMs=0;
+// When the numbers above were last handed to us, so they can be counted down
+// between polls instead of jumping.
+let shiftRulesAt=0;
+function clientBreakEndMs(b,now){
+  const start=Number(b?.start||0);
+  if(!start)return 0;
+  const ended=(b.end===null||b.end===undefined)?now:Number(b.end);
+  return Math.min(ended,start+shiftBreakMs);
+}
 // Worked milliseconds for one agent within [fromMs,toMs): their shift sessions,
 // clipped to weekdays, minus any break that overlaps.
 function shiftElapsedMs(fromMs,toMs,agentCode){
@@ -6955,11 +7351,11 @@ function shiftElapsedMs(fromMs,toMs,agentCode){
     const start=Math.max(Number(s.start||0),fromMs);
     const end=Math.min(s.end===null||s.end===undefined?now:Number(s.end),toMs);
     if(!(end>start))return;
-    let worked=weekdayMsInRange(start,end);
+    let worked=businessMsInRange(start,end);
     (s.breaks||[]).forEach(b=>{
       const bs=Math.max(Number(b.start||0),start);
-      const be=Math.min(b.end===null||b.end===undefined?now:Number(b.end),end);
-      if(be>bs)worked-=weekdayMsInRange(bs,be);
+      const be=Math.min(clientBreakEndMs(b,now),end);
+      if(be>bs)worked-=businessMsInRange(bs,be);
     });
     total+=Math.max(0,worked);
   });
@@ -6976,6 +7372,7 @@ async function refreshShiftState(){
     shiftMe=out?.me||null;
     shiftTracked=!!shiftMe;
     const mine=shiftMe?shiftAgents[shiftMe]:null;
+    absorbBreakRules(mine);
     shiftOnBreak=!!mine?.onBreak;
     shiftLoaded=true;
     updateBreakButton();
@@ -6997,14 +7394,40 @@ async function toggleShiftBreak(){
   try{
     const res=await fetch('/api/shift/break',{method:'POST',headers:{'Content-Type':'application/json'},
       credentials:'include',body:JSON.stringify({agent:currentUser()})});
+    const out=await res.json().catch(()=>null);
+    // The server refuses a second break inside the cooldown. Say so rather
+    // than appearing to do nothing.
+    if(res.status===429){
+      absorbBreakRules(out);
+      updateBreakButton();
+      showToast('Next break available in '+fmtDuration(shiftCooldownRemainingMs),'warn');
+      return;
+    }
     if(!res.ok)return;
-    const out=await res.json();
     if(out?.agent)shiftAgents[out.agent]={...(shiftAgents[out.agent]||{}),...out};
+    absorbBreakRules(out);
     shiftOnBreak=!!out?.onBreak;
     updateBreakButton();
     refreshSLABadges();
     showToast(shiftOnBreak?'On break - SLA timers paused':'Back on shift - SLA timers running',shiftOnBreak?'warn':'ok');
   }catch(_){}
+}
+// The server owns the two rules; the button only reflects what it was told.
+function absorbBreakRules(snapshot){
+  if(!snapshot)return;
+  if(Number(snapshot.breakMs)>0)shiftBreakMs=Number(snapshot.breakMs);
+  if(Number(snapshot.cooldownMs)>0)shiftBreakCooldownMs=Number(snapshot.cooldownMs);
+  shiftBreakEndsAt=Number(snapshot.breakEndsAt||0);
+  shiftCooldownRemainingMs=Number(snapshot.cooldownRemainingMs||0);
+  shiftRulesAt=boardNow();
+}
+// Counted down locally between polls so the button does not sit stale for a
+// minute after a break ends.
+function breakCooldownLeft(){
+  return Math.max(0,shiftCooldownRemainingMs-Math.max(0,boardNow()-shiftRulesAt));
+}
+function breakTimeLeft(){
+  return shiftBreakEndsAt?Math.max(0,shiftBreakEndsAt-boardNow()):0;
 }
 function updateBreakButton(){
   const btn=document.getElementById('break-btn');
@@ -7019,10 +7442,22 @@ function updateBreakButton(){
   }
   btn.classList.remove('off-shift');
   btn.classList.toggle('on-break',shiftOnBreak);
-  btn.textContent=shiftOnBreak?'On break - resume':'Take a break';
-  btn.title=shiftOnBreak
-    ?'You are on break. SLA timers on your tickets are paused. Click to resume.'
-    :'Pause your shift. SLA timers on your tickets stop until you come back.';
+  const cooling=!shiftOnBreak&&breakCooldownLeft()>0;
+  // Greyed rather than hidden: an agent needs to see that the break exists and
+  // when it comes back, not wonder where the button went.
+  btn.classList.toggle('cooling',cooling);
+  btn.disabled=cooling;
+  if(shiftOnBreak){
+    const left=breakTimeLeft();
+    btn.textContent=left?'On break - '+fmtDuration(left)+' left':'On break - resume';
+    btn.title='You are on break. SLA timers on your tickets are paused, and the break ends by itself after '+fmtDuration(shiftBreakMs)+'. Click to come back early.';
+  }else if(cooling){
+    btn.textContent='Break in '+fmtDuration(breakCooldownLeft());
+    btn.title='One break every '+fmtDuration(shiftBreakCooldownMs)+'. The next one is available in '+fmtDuration(breakCooldownLeft())+'.';
+  }else{
+    btn.textContent='Take a break';
+    btn.title='Pause your shift for '+fmtDuration(shiftBreakMs)+'. SLA timers on your tickets stop until you come back, and the break ends by itself.';
+  }
 }
 
 //  SLA
@@ -7041,9 +7476,12 @@ function getSLAStatus(id){
   // breaching twice.
   if(isDuplicateTicket(id))return null;
   const st=SUBTYPE_BY_ID[ticketSubtype[id]||''];
-  const createdMs=new Date(createdAt).getTime();
+  // The later of the two: a thread that has been replied to is measured from
+  // the last reply, an untouched one from when it arrived.
+  const createdMs=Math.max(new Date(createdAt).getTime(), Number(ticketSlaResetAt[id] || 0));
   const wallElapsed=Date.now()-createdMs;
-  const wallText=fmtDuration(wallElapsed)+' since received';
+  const resetAt=Number(ticketSlaResetAt[id]||0)>new Date(createdAt).getTime()?Number(ticketSlaResetAt[id]):0;
+  const wallText=fmtDuration(wallElapsed)+(resetAt?' since the last reply':' since received');
   if(st?.tier==='Paused')return{text:'Paused (awaiting hotel)',cls:'sla-warn',overdue:false,wallText,shiftMs:0};
   const pr=ticketPriority[id]||st?.priority||'Medium';
   const hrs=(SLA_HOURS[pr]||st?.responseHours||24);
@@ -7063,19 +7501,30 @@ function getSLAStatus(id){
   const remaining=slaMs-elapsed;
   const shiftText=fmtDuration(elapsed)+' worked ('+agent+')';
   if(remaining<=0){
-    return{text:fmtDuration(Math.abs(remaining))+' overdue',cls:'sla-breach',overdue:true,wallText,shiftText,shiftMs:elapsed};
+    return{text:fmtDuration(Math.abs(remaining))+' overdue',cls:'sla-breach',overdue:true,wallText,shiftText,shiftMs:elapsed,resetAt};
   }
   const pct=remaining/slaMs;
   const cls=pct>0.5?'sla-ok':pct>0.25?'sla-warn':'sla-urgent';
-  return{text:fmtDuration(remaining)+' left',cls,overdue:false,wallText,shiftText,shiftMs:elapsed};
+  return{text:fmtDuration(remaining)+' left',cls,overdue:false,wallText,shiftText,shiftMs:elapsed,resetAt};
 }
 function slaTooltip(status){
   if(!status)return'';
   return[status.shiftText?'Shift time: '+status.shiftText:'Shift clock not running',
     'Wall clock: '+(status.wallText||''),
-    'SLA counts only the assigned agent’s logged-in time, excluding breaks and weekends.'].join('\n');
+    ...(status.resetAt?['Clock restarted by the reply on '+fmtDate(new Date(status.resetAt).toISOString())]:[]),
+    'SLA runs 08:00-12:00 and 14:00-17:00 on weekdays, and only while the assigned agent is logged in and not on a break.'].join('\n');
 }
-function refreshSLABadges(){document.querySelectorAll('[data-sla-id]').forEach(el=>{const id=el.dataset.slaId;const status=getSLAStatus(id);if(!status){el.style.display='none';return;}el.style.display='';el.textContent=' '+status.text;el.className='sla-badge '+status.cls;el.title=slaTooltip(status);});}
+// The break countdown and its cooldown both tick down between polls, and the
+// SLA badges already refresh every minute - so they ride along rather than
+// adding a second timer.
+function refreshBreakState(){
+  updateBreakButton();
+  // The server ends a break by itself after fifteen minutes. Once the local
+  // countdown reaches zero, pull the real state rather than waiting out the
+  // five-minute poll showing a break that is over.
+  if(shiftOnBreak&&shiftBreakEndsAt&&breakTimeLeft()<=0)refreshShiftState();
+}
+function refreshSLABadges(){refreshBreakState();document.querySelectorAll('[data-sla-id]').forEach(el=>{const id=el.dataset.slaId;const status=getSLAStatus(id);if(!status){el.style.display='none';return;}el.style.display='';el.textContent=' '+status.text;el.className='sla-badge '+status.cls;el.title=slaTooltip(status);});}
 async function syncTicketStatusToHubspot(ticketId,newCol){const hsId=ticketHubspotId[ticketId];if(!hsId)return{ok:false,reason:'missing_hubspot_ticket_id'};try{const res=await fetch(`/api/hubspot/tickets/${encodeURIComponent(hsId)}/status`,{method:'PATCH',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({kanbanStatus:HUBSPOT_STATUS_BY_STAGE[newCol]||'new'})});const out=await res.json().catch(()=>({}));if(!res.ok)return{ok:false,reason:'api_error',error:String(out?.error||res.status)};return{ok:true};}catch(e){return{ok:false,reason:'network_error',error:String(e?.message||e)};}}
 
 //  Spam 
@@ -7093,7 +7542,7 @@ function setSideNavActive(mode){
   document.getElementById('ticket-kpi-view-btn')?.classList.toggle('active',mode==='kpi');
   document.getElementById('insights-view-btn')?.classList.toggle('active',mode==='insights');
   document.getElementById('qt-seize-view-btn')?.classList.toggle('active',mode==='qtSeize');
-  document.getElementById('quinta-view-btn')?.classList.toggle('active',mode==='quinta');
+  document.getElementById('projects-view-btn')?.classList.toggle('active',mode==='projects');
   document.getElementById('assignlog-view-btn')?.classList.toggle('active',mode==='assignlog');
   document.getElementById('qt-detect-view-btn')?.classList.toggle('active',mode==='qtDetect');
 }
@@ -7159,7 +7608,7 @@ function restoreLastWorkspaceSession(){
   if(mode==='qtSeize')return showQtSeizeView();
   if(mode==='assignlog')return showAssignLogView();
   if(mode==='insights')return showInsightsView();
-  if(mode==='quinta')return showQuintaView();
+  if(mode==='projects')return showProjectsView();
   // showQtDetectView falls back to the board itself if the user is not an
   // admin, so a stale saved session cannot strand them on a hidden view.
   if(mode==='qtDetect')return showQtDetectView();
@@ -7434,15 +7883,35 @@ document.getElementById('dup-unmark').addEventListener('click',async()=>{
 });
 document.getElementById('dup-input').addEventListener('keydown',e=>{if(e.key==='Enter')document.getElementById('dup-save').click();});
 
-//  Jira modal
+/*  Jira modal
+
+   Opens in one of two modes, because linking a ticket for the first time and
+   fixing a link that went to the wrong issue are different jobs. Everything
+   the second one needs used to be missing: the modal said "Link to Jira" and
+   its button said "Link" whether or not a link already existed, and nothing on
+   screen said which issue the ticket was on - so an agent who had just linked
+   QS-8385 by mistake had no way to see it, let alone re-point it. Linked mode
+   names the current key, says what will happen, and labels the button for
+   what it does: replace. */
 function openJiraModal(id){
   jiraTicketId=id;
   const ticket=allTickets.find(t=>t.id===id);
   const current=canonicalJiraKey(ticketJira[id])||'';
   if(current&&ticketJira[id]!==current)ticketJira[id]=current;
+  const linked=!!current;
   document.getElementById('jira-ticket-title').textContent=ticket?.email?.subject||'';
+  document.getElementById('jira-modal-title').textContent=linked?' Change Jira link':' Link to Jira';
+  const currentEl=document.getElementById('jira-current');
+  currentEl.style.display=linked?'':'none';
+  currentEl.innerHTML=linked
+    ?`<div>Linked to <strong style="color:var(--blue-700);font-size:13px;letter-spacing:.4px;">${esc(current)}</strong></div>
+      <div style="margin-top:5px;color:var(--slate-500);">Wrong issue? Put the right key in the box below and press <strong>Update link</strong>. <strong>Remove link</strong> takes it off this ticket entirely.</div>`
+    :'';
   const input=document.getElementById('jira-input');
   input.value=current;
+  document.getElementById('jira-input-label').textContent=linked?'Link it to this Jira ticket instead':'Jira ticket number';
+  document.getElementById('jira-input-hint').textContent=linked?'Replaces the key above - the link moves, the ticket stays put':'Enter the issue key from your Jira project';
+  document.getElementById('jira-save').textContent=linked?'Update link':' Link';
   const unlinkBtn=document.getElementById('jira-unlink');
   const openBtn=document.getElementById('jira-open-link');
   unlinkBtn.style.display=current?'':'none';
@@ -7450,7 +7919,37 @@ function openJiraModal(id){
   openBtn.onclick=()=>{if(current&&JIRA_URL)window.open(JIRA_URL+current,'_blank');};
   renderJiraConnectionStatus();
   document.getElementById('jira-modal').classList.add('open');
-  setTimeout(()=>input.focus(),100);
+  // Pre-selected rather than cleared when a link exists: the key stays readable
+  // and copyable, and typing still replaces it in one go. Clearing the box
+  // would make "I only came to look" end in an error toast.
+  setTimeout(()=>{input.focus();if(linked)input.select();},100);
+}
+/* Undo for a Jira link, so linking the wrong issue is one click to put back
+   rather than a hunt through the modal for Remove link - which anyway could
+   only clear the link, never restore whichever key was there before.
+
+   It cannot be the usual "write the old value back into the local map and let
+   saveState carry it" restore: ticketJira is server-owned, and server.js drops
+   it from every board snapshot (keepServerOwned('ticketJira')) because a
+   snapshot cannot tell "this ticket has no link" from "my tab has not heard
+   about the link yet". So the undo goes back through the same endpoints the
+   link came from. previousKey empty means there was no link to go back to and
+   the undo is an unlink. */
+function jiraLinkUndo(id,previousKey){
+  return async()=>{
+    const out=previousKey?await apiLinkJiraTicket(id,previousKey):await apiUnlinkJiraTicket(id);
+    if(!out?.ok)throw new Error(out?.error||'Jira would not take the change back');
+    const stale=canonicalJiraKey(ticketJira[id]);
+    if(stale)delete jiraIssueCache[stale];
+    if(previousKey){
+      ticketJira[id]=canonicalJiraKey(out.jiraKey||previousKey)||previousKey;
+      if(out.issue?.key)jiraIssueCache[String(out.issue.key).trim().toUpperCase()]=out.issue;
+    }else{
+      delete ticketJira[id];
+    }
+    updateJiraBadge();
+    await refreshLinkedJiraIssues(true);
+  };
 }
 document.getElementById('jira-save').addEventListener('click',async()=>{
   if(!jiraTicketId)return;
@@ -7460,17 +7959,32 @@ document.getElementById('jira-save').addEventListener('click',async()=>{
     showToast('Use a Jira ticket like QS-8385 or paste a Jira ticket URL.');
     return;
   }
-  const out=await apiLinkJiraTicket(jiraTicketId,normalized);
+  const linkedId=jiraTicketId;
+  const previousKey=canonicalJiraKey(ticketJira[linkedId])||'';
+  if(previousKey===normalized){
+    document.getElementById('jira-modal').classList.remove('open');
+    showToast('Already linked to '+normalized);
+    return;
+  }
+  const out=await apiLinkJiraTicket(linkedId,normalized);
   if(!out?.ok){
     showToast(`Jira link failed: ${out?.error||'unknown error'}`);
     return;
   }
-  ticketJira[jiraTicketId]=canonicalJiraKey(out.jiraKey||normalized)||normalized;
+  ticketJira[linkedId]=canonicalJiraKey(out.jiraKey||normalized)||normalized;
   if(out.issue?.key)jiraIssueCache[out.issue.key]=out.issue;
+  pushUndo(
+    previousKey
+      ? `Relinked ${ticketDisplayNumber(linkedId)} to ${ticketJira[linkedId]} (was ${previousKey})`
+      : `Linked ${ticketDisplayNumber(linkedId)} to ${ticketJira[linkedId]}`,
+    jiraLinkUndo(linkedId,previousKey));
   saveState('jira_linked');
+  // Closed before Jira is asked for the issue's details, not after: the link is
+  // already made either way, and leaving a dimmed modal up for the round-trip
+  // only puts it between the reader and the undo toast that just went up.
+  document.getElementById('jira-modal').classList.remove('open');
   await refreshLinkedJiraIssues(true);
   renderBoard();updateJiraBadge();
-  document.getElementById('jira-modal').classList.remove('open');
   if(out.jiraLookupError){
     showToast(`Linked to ${(out.jiraKey||raw)} locally. Jira details could not be read yet.`,'ok');
   }else{
@@ -7479,14 +7993,19 @@ document.getElementById('jira-save').addEventListener('click',async()=>{
 });
 document.getElementById('jira-unlink').addEventListener('click',async()=>{
   if(!jiraTicketId)return;
-  const out=await apiUnlinkJiraTicket(jiraTicketId);
+  const unlinkedId=jiraTicketId;
+  const existing=ticketJira[unlinkedId];
+  const previousKey=canonicalJiraKey(existing)||'';
+  const out=await apiUnlinkJiraTicket(unlinkedId);
   if(!out?.ok){
     showToast(`Jira unlink failed: ${out?.error||'unknown error'}`);
     return;
   }
-  const existing=ticketJira[jiraTicketId];
   if(existing)delete jiraIssueCache[String(existing).trim().toUpperCase()];
-  delete ticketJira[jiraTicketId];
+  delete ticketJira[unlinkedId];
+  // Removing the right ticket's link by accident is the same mistake mirrored,
+  // and just as unrecoverable without the key in front of you.
+  if(previousKey)pushUndo(`Unlinked ${ticketDisplayNumber(unlinkedId)} from ${previousKey}`,jiraLinkUndo(unlinkedId,previousKey));
   saveState('jira_unlinked');renderBoard();updateJiraBadge();
   document.getElementById('jira-modal').classList.remove('open');
   showToast('Jira link removed');
@@ -7775,8 +8294,8 @@ document.getElementById('emt-submit').addEventListener('click',async()=>{
 });
 
 //  View switching
-function hidePrimaryViews(){stopKpiAutoRefresh();document.getElementById('main-board').style.display='none';document.getElementById('spam-view').classList.remove('active');document.getElementById('archive-view').classList.remove('active');document.getElementById('companies-view').style.display='none';document.getElementById('kpi-view').style.display='none';document.getElementById('insights-view').style.display='none';document.getElementById('quinta-view').style.display='none';document.getElementById('qt-seize-view').style.display='none';document.getElementById('assignlog-view').style.display='none';document.getElementById('qt-detect-view').style.display='none';}
-function showBoardView(){viewMode='board';setBoardChromeVisible(true);hidePrimaryViews();document.getElementById('main-board').style.display='flex';setSideNavActive('board');saveLastWorkspaceSession('board');renderBoard();}
+function hidePrimaryViews(){stopKpiAutoRefresh();document.getElementById('main-board').style.display='none';document.getElementById('spam-view').classList.remove('active');document.getElementById('archive-view').classList.remove('active');document.getElementById('companies-view').style.display='none';document.getElementById('kpi-view').style.display='none';document.getElementById('insights-view').style.display='none';document.getElementById('projects-view').style.display='none';document.getElementById('qt-seize-view').style.display='none';document.getElementById('assignlog-view').style.display='none';document.getElementById('qt-detect-view').style.display='none';if(viewMode!=='board'){clearSelection();renderSelectionBar();}}
+function showBoardView(){viewMode='board';setBoardChromeVisible(true);hidePrimaryViews();setSideNavActive('board');saveLastWorkspaceSession('board');renderBoard();/* renderBoard() shows the flat board or the swimlanes, per boardGrouping */}
 function showSpamView(){viewMode='spam';setBoardChromeVisible(true);hidePrimaryViews();document.getElementById('spam-view').classList.add('active');setSideNavActive('spam');saveLastWorkspaceSession('spam');renderSpamView();}
 function showArchiveView(){viewMode='archive';setBoardChromeVisible(true);hidePrimaryViews();document.getElementById('archive-view').classList.add('active');setSideNavActive('archive');saveLastWorkspaceSession('archive');renderArchiveView();}
 function showDashboardView(){companiesViewType='report';viewMode='companies';setBoardChromeVisible(true);hidePrimaryViews();document.getElementById('companies-view').style.display='block';setSideNavActive('dashboard');saveLastWorkspaceSession('dashboard');renderCompaniesView();}
@@ -8339,199 +8858,461 @@ function renderInsightsView(){
 document.getElementById('insights-view-btn')?.addEventListener('click',()=>{if(viewMode==='insights')showBoardView();else showInsightsView();});
 
 
-/* ===========================================================================
-   Quinta properties, in QT-Tools
-   ---------------------------------------------------------------------------
-   An agent working a ticket about a hotel had to leave the board to learn
-   anything about it. This puts the property's operational profile and the bot's
-   dialog catalogue next to the tickets they are about.
 
-   Everything is served by the board (/api/quinta/*), which talks to the Quinta
-   MCP server as itself. The board never borrows anyone's Claude connector - see
-   the server module for why it cannot.
+/* ===========================================================================
+   Projects
+   ---------------------------------------------------------------------------
+   The team's Claude projects, runnable from the board.
+
+   These are not documents - each one is a small agent with a fixed set of
+   inputs ("website URL + account ID + license key + server language"). So the
+   panel does not show a chat box: it reads each project's declared inputs and
+   renders the form that fits it, then runs it against the API and shows the
+   answer in place.
+
+   The catalogue lives in the board. A user can connect a Claude Compliance
+   Access Key to sync claude.ai Projects into that catalogue; manual projects
+   still exist for accounts that cannot use the Compliance API.
    =========================================================================== */
 
-let quintaTab = 'properties';
-let quintaStatus = null;
-let quintaProperties = { state: 'idle', rows: [] };
-let quintaDialogs = { state: 'idle', rows: [], categories: [] };
-let quintaQuery = '';
-let quintaExpanded = new Set();
+let projectsState = { state: 'idle', rows: [], canEdit: false, configured: false, model: '', claude: { connected: false } };
+let projectsTab = 'all';
+let projectsQuery = '';
+let projectOpen = null;      // slug of the project whose form is showing
+let projectValues = {};      // slug -> { fieldKey: value }
+// slug -> { running, error, draft, turns:[{role,content,usage,ms}] }.
+// A project is a thread, not a single answer: the form starts it and the
+// follow-ups continue it, with the project's instructions still the system
+// prompt on every turn. The transcript lives here rather than in Postgres -
+// it is a working session, not a record the board owes anyone.
+let projectThread = {};
+let projectEditorOpen = false;
 
-function showQuintaView(){
-  viewMode='quinta';
+function showProjectsView(){
+  viewMode='projects';
   setBoardChromeVisible(false);
   hidePrimaryViews();
-  document.getElementById('quinta-view').style.display='block';
-  setSideNavActive('quinta');
-  saveLastWorkspaceSession('quinta');
-  renderQuintaView();
-  if(!quintaStatus)loadQuintaStatus();
+  document.getElementById('projects-view').style.display='block';
+  setSideNavActive('projects');
+  saveLastWorkspaceSession('projects');
+  renderProjectsView();
+  if(projectsState.state==='idle')loadProjects();
 }
 
-async function loadQuintaStatus(){
+async function loadProjects(){
+  projectsState={...projectsState,state:'loading'};renderProjectsView();
   try{
-    const res=await fetch('/api/quinta/status',{credentials:'include'});
-    quintaStatus=await res.json();
-  }catch(error){
-    quintaStatus={configured:false,hint:'Could not reach the board: '+String(error?.message||error)};
-  }
-  renderQuintaView();
-  if(quintaStatus?.configured)loadQuintaTab();
-}
-
-function loadQuintaTab(){
-  if(quintaTab==='properties'&&quintaProperties.state==='idle')loadQuintaProperties();
-  if(quintaTab==='dialogs'&&quintaDialogs.state==='idle')loadQuintaDialogs();
-}
-
-async function loadQuintaProperties(){
-  quintaProperties={state:'loading',rows:[]};renderQuintaView();
-  try{
-    const res=await fetch('/api/quinta/properties',{credentials:'include'});
+    const res=await fetch('/api/projects',{credentials:'include'});
     const data=await res.json();
-    quintaProperties=data?.error
-      ?{state:'error',rows:[],message:data.message||data.error}
-      :{state:'done',rows:data.rows||[],note:data.note||''};
+    projectsState=data?.error
+      ?{state:'error',rows:[],canEdit:false,configured:false,message:data.message||data.error,claude:{connected:false}}
+      :{state:'done',rows:data.rows||[],canEdit:!!data.canEdit,configured:!!data.configured,model:data.model||'',claude:data.claude||{connected:false}};
   }catch(error){
-    quintaProperties={state:'error',rows:[],message:String(error?.message||error)};
+    projectsState={state:'error',rows:[],canEdit:false,configured:false,message:String(error?.message||error),claude:{connected:false}};
   }
-  renderQuintaView();
+  renderProjectsView();
 }
 
-async function loadQuintaDialogs(){
-  quintaDialogs={state:'loading',rows:[],categories:[]};renderQuintaView();
-  try{
-    const res=await fetch('/api/quinta/dialogs',{credentials:'include'});
-    const data=await res.json();
-    quintaDialogs=data?.error
-      ?{state:'error',rows:[],categories:[],message:data.message||data.error}
-      :{state:'done',rows:data.rows||[],categories:data.categories||[]};
-  }catch(error){
-    quintaDialogs={state:'error',rows:[],categories:[],message:String(error?.message||error)};
-  }
-  renderQuintaView();
+function projectMatches(p){
+  const q=projectsQuery.trim().toLowerCase();
+  if(projectsTab!=='all'&&p.scope!==projectsTab)return false;
+  if(!q)return true;
+  return [p.name,p.description,p.owner,...(p.inputs||[]).map(f=>f.label)]
+    .some(v=>String(v||'').toLowerCase().includes(q));
 }
 
-function quintaMatches(text){
-  const q=quintaQuery.trim().toLowerCase();
-  return !q||String(text||'').toLowerCase().includes(q);
+function projectFieldHtml(slug,field){
+  const value=esc(String(projectValues[slug]?.[field.key]??''));
+  const req=field.required?' <span class="pj-req">required</span>':'';
+  const common=`id="pjf-${esc(slug)}-${esc(field.key)}" data-pj-field="${esc(field.key)}" data-pj-slug="${esc(slug)}"`;
+  let control;
+  if(field.type==='textarea')control=`<textarea class="form-input pj-textarea" ${common} placeholder="${esc(field.placeholder||'')}">${value}</textarea>`;
+  else if(field.type==='select')control=`<select class="form-input" ${common}><option value="">Choose…</option>${(field.options||[]).map(o=>`<option value="${esc(o)}"${String(projectValues[slug]?.[field.key]||'')===o?' selected':''}>${esc(o)}</option>`).join('')}</select>`;
+  else control=`<input class="form-input" ${common} type="${field.type==='number'?'number':'text'}" value="${value}" placeholder="${esc(field.placeholder||'')}" autocomplete="off" spellcheck="false">`;
+  return `<label class="pj-field">
+    <span>${esc(field.label)}${req}</span>
+    ${control}
+    ${field.help?`<span class="pj-help">${esc(field.help)}</span>`:''}
+  </label>`;
 }
 
-// A property profile carries fields this board was not written for, and hiding
-// them would mean an agent cannot see something the server actually said. The
-// named ones are laid out; the rest are available under Raw profile.
-function quintaValue(value){
-  if(value==null)return '<span class="q-muted">not set</span>';
-  if(Array.isArray(value))return value.length?value.map(v=>`<span class="q-pill">${esc(String(v))}</span>`).join(''):'<span class="q-muted">none</span>';
-  if(typeof value==='object')return `<span class="q-muted">${esc(Object.keys(value).length+' field(s)')}</span>`;
-  return esc(String(value));
-}
-
-function quintaPropertiesHtml(){
-  if(quintaProperties.state==='loading')return '<div class="q-loading"><span class="spinner"></span> Asking the Quinta server…</div>';
-  if(quintaProperties.state==='error')return `<div class="q-error">Could not load properties: ${esc(quintaProperties.message||'')}</div>`;
-  const rows=(quintaProperties.rows||[]).filter(r=>quintaMatches(r.name)||quintaMatches(r.teamId)||quintaMatches(r.address));
-  if(!rows.length){
-    return quintaProperties.note==='no_team_ids_configured'
-      ? `<div class="q-empty"><strong>No properties configured.</strong><br>There is no "list every hotel" tool on the Quinta server - <code>get-hotel-settings</code> is a lookup by numeric team id. Set <code>QUINTA_TEAM_IDS</code> to the properties this board covers.</div>`
-      : '<div class="q-empty">Nothing matches that search.</div>';
-  }
-  return rows.map(row=>{
-    const open=quintaExpanded.has(row.teamId);
-    return `<div class="q-card">
-      <div class="q-card-head">
-        <div>
-          <div class="q-name">${esc(row.name)}</div>
-          <div class="q-sub">${esc(row.address||'no address on file')}</div>
-        </div>
-        <button class="btn-out" data-q-raw="${esc(row.teamId)}">${open?'Hide':'Raw profile'}</button>
-      </div>
-      <div class="q-grid">
-        <div><span class="q-label">Bot languages</span>${quintaValue(row.languages)}</div>
-        <div><span class="q-label">Services</span>${quintaValue(row.services)}</div>
-        <div><span class="q-label">Notification contacts</span>${quintaValue(row.contacts)}</div>
-      </div>
-      ${open?`<pre class="q-raw">${esc(JSON.stringify(row.raw,null,2))}</pre>`:''}
-    </div>`;
-  }).join('');
-}
-
-function quintaDialogsHtml(){
-  if(quintaDialogs.state==='loading')return '<div class="q-loading"><span class="spinner"></span> Loading the dialog catalogue…</div>';
-  if(quintaDialogs.state==='error')return `<div class="q-error">Could not load dialogs: ${esc(quintaDialogs.message||'')}</div>`;
-  const rows=(quintaDialogs.rows||[]).filter(r=>quintaMatches(r.name)||quintaMatches(r.fid)||quintaMatches(r.description)||quintaMatches(r.category));
-  if(!rows.length)return '<div class="q-empty">Nothing matches that search.</div>';
-  return `<div class="q-lead">${rows.length} of ${quintaDialogs.rows.length} dialogs. These are what the bot can be asked about - the FID is the id support and the Quinta team use to refer to one.</div>
-    <div class="ins-table-wrap"><table class="ins-table">
-    <thead><tr><th>FID</th><th>Category</th><th>Name</th><th>What it handles</th></tr></thead>
-    <tbody>${rows.map(r=>`<tr>
-      <td style="font-weight:700;font-variant-numeric:tabular-nums;">${esc(r.fid)}</td>
-      <td>${esc(r.category)}</td>
-      <td>${esc(r.name)}</td>
-      <td style="white-space:normal;">${esc(r.description)}</td>
-    </tr>`).join('')}</tbody></table></div>`;
-}
-
-function renderQuintaView(){
-  const host=document.getElementById('quinta-body');
-  if(!host)return;
-
-  if(quintaStatus&&!quintaStatus.configured){
-    host.innerHTML=`
-      <div class="q-head"><div><div class="q-title">Quinta properties</div>
-        <div class="q-subtitle">The hotels this board supports, read from the Quinta MCP server</div></div></div>
-      <div class="q-setup">
-        <strong>Not connected yet.</strong>
-        <p>${esc(quintaStatus.hint||'')}</p>
-        <p class="q-note">The board connects to the Quinta MCP server <em>as itself</em>, with its own token. It cannot reuse a Claude connector: that authorisation belongs to a Claude account, and there is no way for a server to borrow it.</p>
+function projectThreadHtml(slug){
+  const t=projectThread[slug];
+  if(!t)return '';
+  const turns=t.turns||[];
+  const parts=turns.map((turn,i)=>{
+    if(turn.role==='user'){
+      return `<div class="pj-turn pj-turn-you">
+        <div class="pj-turn-who">You asked</div>
+        <div class="pj-turn-body">${esc(turn.content)}</div>
       </div>`;
-    return;
+    }
+    const meta=[turn.ms?`${(turn.ms/1000).toFixed(1)}s`:'',turn.usage?.outputTokens?`${turn.usage.outputTokens} output tokens`:''].filter(Boolean).join(' · ');
+    return `<div class="pj-turn pj-turn-claude">
+      <div class="pj-turn-who"><strong>${i===0?'Result':'Claude'}</strong><span>${esc(meta)}</span>
+        <button class="btn-out pj-copy" data-pj-copy="${esc(slug)}" data-pj-turn="${i}">Copy</button></div>
+      <div class="pj-turn-body">${esc(turn.content)}</div>
+    </div>`;
+  });
+  if(t.running)parts.push('<div class="pj-result pj-running"><span class="spinner"></span> Working… this can take a minute on a long job.</div>');
+  if(t.error)parts.push(`<div class="pj-result pj-error">${esc(t.error)}</div>`);
+  // Nothing to follow up on until the project has answered once.
+  if(turns.length&&!t.running){
+    parts.push(`<div class="pj-followup">
+      <textarea class="pj-followup-input" data-pj-draft="${esc(slug)}" rows="2" placeholder="Ask a follow-up — Ctrl+Enter to send">${esc(t.draft||'')}</textarea>
+      <div class="pj-followup-actions">
+        <button class="btn-primary" data-pj-ask="${esc(slug)}">Ask</button>
+        <button class="btn-out" data-pj-reset="${esc(slug)}">Start over</button>
+      </div>
+    </div>`);
   }
+  return parts.length?`<div class="pj-thread">${parts.join('')}</div>`:'';
+}
 
-  const tabs=[['properties','Properties'],['dialogs','Dialog catalogue']];
-  host.innerHTML=`
-    <div class="q-head">
-      <div><div class="q-title">Quinta properties</div>
-        <div class="q-subtitle">${quintaStatus?.endpoint?esc(quintaStatus.endpoint):'Reading from the Quinta MCP server'}</div></div>
-      <div class="q-controls">
-        <input class="filter-sel" id="q-search" type="text" placeholder="Search…" value="${esc(quintaQuery)}" autocomplete="off">
-        <button class="btn-out" id="q-refresh">Refresh</button>
+function projectCardHtml(p){
+  const open=projectOpen===p.slug;
+  const fields=p.inputs||[];
+  return `<div class="pj-card pj-accent-${esc(p.accent||'slate')}${open?' open':''}">
+    <button class="pj-card-head" data-pj-open="${esc(p.slug)}">
+      <div class="pj-card-title">
+        <span class="pj-name">${esc(p.name)}</span>
+        ${p.pinned?'<span class="pj-pin" title="Pinned">Pinned</span>':''}
+        ${p.source==='claude'?'<span class="pj-pin" title="Synced from Claude">Claude</span>':''}
+        ${p.ready?'':'<span class="pj-nodraft" title="No instructions saved yet">Needs setup</span>'}
+      </div>
+      <div class="pj-desc">${esc(p.description||'')}</div>
+      <div class="pj-meta">${esc(p.owner?('by '+p.owner):'')}${fields.length?` · ${fields.length} input${fields.length===1?'':'s'}`:''}${p.syncedAt?' · synced '+fmtDate(p.syncedAt):''}</div>
+    </button>
+    ${open?`<div class="pj-body">
+      ${p.ready?'':`<div class="pj-warn">This project cannot run until its instructions are saved.${projectsState.canEdit?' Use <strong>Edit</strong> below.':''}</div>`}
+      ${fields.length?fields.map(f=>projectFieldHtml(p.slug,f)).join(''):'<p class="pj-help">This project takes no inputs.</p>'}
+      <div class="pj-actions">
+        <button class="btn-primary" data-pj-run="${esc(p.slug)}"${(!p.ready||!projectsState.configured||projectThread[p.slug]?.running)?' disabled':''}>${projectThread[p.slug]?.turns?.length?'Run again':'Run'}</button>
+        ${projectsState.canEdit?`<button class="btn-out" data-pj-edit="${esc(p.slug)}">Edit</button>`:''}
+        <span class="pj-model">${esc(p.model||projectsState.model||'')}</span>
+      </div>
+      ${projectThreadHtml(p.slug)}
+    </div>`:''}
+  </div>`;
+}
+
+// Run starts a fresh thread. Whatever was asked before belongs to the previous
+// set of inputs, so keeping it would only make the transcript lie.
+async function runProject(slug){
+  const p=projectsState.rows.find(x=>x.slug===slug);
+  if(!p)return;
+  projectThread[slug]={running:true,error:'',draft:'',turns:[]};
+  renderProjectsView();
+  const t=projectThread[slug];
+  try{
+    const res=await fetch(`/api/projects/${p.id}/run`,{
+      method:'POST',credentials:'include',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({values:projectValues[slug]||{}})
+    });
+    const data=await res.json();
+    if(!res.ok||data.ok===false){
+      t.error=data?.message||data?.error||`HTTP ${res.status}`;
+    }else{
+      t.turns=[{role:'assistant',content:data.text||'(no output)',usage:data.usage,ms:data.ms}];
+    }
+  }catch(error){
+    t.error=String(error?.message||error);
+  }
+  t.running=false;
+  renderProjectsView();
+}
+
+// A follow-up replays the whole thread. The server puts the project's
+// instructions back in front of it, so turn nine still answers as that project
+// rather than drifting into a general chat.
+async function askProjectFollowUp(slug){
+  const p=projectsState.rows.find(x=>x.slug===slug);
+  const t=projectThread[slug];
+  if(!p||!t||t.running)return;
+  const question=String(t.draft||'').trim();
+  if(!question)return;
+  // The question joins the transcript before the request goes out, so the
+  // thread reads correctly while the answer is still being written.
+  t.turns=[...t.turns,{role:'user',content:question}];
+  t.draft='';t.running=true;t.error='';
+  renderProjectsView();
+  try{
+    const res=await fetch(`/api/projects/${p.id}/chat`,{
+      method:'POST',credentials:'include',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({
+        values:projectValues[slug]||{},
+        turns:t.turns.map(x=>({role:x.role,content:x.content}))
+      })
+    });
+    const data=await res.json();
+    if(!res.ok||data.ok===false){
+      // Put the question back in the box rather than leaving it stranded at the
+      // end of a thread it never got an answer to - sending again would
+      // otherwise replay it twice.
+      t.turns=t.turns.slice(0,-1);
+      t.draft=question;
+      t.error=data?.message||data?.error||`HTTP ${res.status}`;
+    }else{
+      t.turns=[...t.turns,{role:'assistant',content:data.text||'(no output)',usage:data.usage,ms:data.ms}];
+    }
+  }catch(error){
+    t.turns=t.turns.slice(0,-1);
+    t.draft=question;
+    t.error=String(error?.message||error);
+  }
+  t.running=false;
+  renderProjectsView();
+}
+
+function resetProjectThread(slug){
+  delete projectThread[slug];
+  renderProjectsView();
+}
+
+/* The editor. Instructions are the thing that cannot be fetched from Claude, so
+   this exists mainly to paste them in - and to let an admin describe a
+   project's inputs, which is what generates its form. */
+function openProjectEditor(slug){
+  const p=slug?projectsState.rows.find(x=>x.slug===slug):null;
+  document.getElementById('pj-editor-title').textContent=p?`Edit ${p.name}`:'New project';
+  document.getElementById('pj-e-name').value=p?.name||'';
+  document.getElementById('pj-e-slug').value=p?.slug||'';
+  document.getElementById('pj-e-desc').value=p?.description||'';
+  document.getElementById('pj-e-owner').value=p?.owner||'';
+  document.getElementById('pj-e-scope').value=p?.scope||'org';
+  document.getElementById('pj-e-instructions').value=p?.instructions||'';
+  document.getElementById('pj-e-inputs').value=JSON.stringify(p?.inputs||[],null,2);
+  document.getElementById('pj-e-delete').style.display=p?'':'none';
+  document.getElementById('pj-e-delete').dataset.pjId=p?.id||'';
+  document.getElementById('projects-editor').classList.add('open');
+  projectEditorOpen=true;
+}
+
+async function saveProjectEditor(){
+  let inputs=[];
+  try{inputs=JSON.parse(document.getElementById('pj-e-inputs').value||'[]');}
+  catch(_){return showToast('The inputs box is not valid JSON');}
+  const body={
+    name:document.getElementById('pj-e-name').value,
+    slug:document.getElementById('pj-e-slug').value,
+    description:document.getElementById('pj-e-desc').value,
+    owner:document.getElementById('pj-e-owner').value,
+    scope:document.getElementById('pj-e-scope').value,
+    instructions:document.getElementById('pj-e-instructions').value,
+    inputs
+  };
+  try{
+    const res=await fetch('/api/projects',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    const data=await res.json();
+    if(!res.ok)throw new Error(data?.message||data?.error||('HTTP '+res.status));
+    document.getElementById('projects-editor').classList.remove('open');
+    projectEditorOpen=false;
+    showToast('Saved','ok');
+    await loadProjects();
+  }catch(error){showToast('Could not save: '+String(error?.message||error));}
+}
+
+async function deleteProjectFromEditor(){
+  const id=document.getElementById('pj-e-delete').dataset.pjId;
+  if(!id)return;
+  if(!confirm('Remove this project from the board? The project in Claude is untouched.'))return;
+  await fetch(`/api/projects/${id}`,{method:'DELETE',credentials:'include'});
+  document.getElementById('projects-editor').classList.remove('open');
+  projectEditorOpen=false;
+  await loadProjects();
+}
+
+async function openClaudeConnectModal(){
+  const modal=document.getElementById('claude-connect-modal');
+  if(!modal)return;
+  document.getElementById('claude-connect-credential').value='';
+  document.getElementById('claude-connect-auth').value=projectsState.claude?.authMode||'auto';
+  try{
+    const res=await fetch('/api/claude/connection',{credentials:'include'});
+    const data=await res.json();
+    const suggested=data?.claude?.userEmail||data?.suggestedEmail||'';
+    document.getElementById('claude-connect-email').value=suggested;
+  }catch(_){
+    document.getElementById('claude-connect-email').value=projectsState.claude?.userEmail||'';
+  }
+  modal.classList.add('open');
+  setTimeout(()=>document.getElementById('claude-connect-credential')?.focus(),0);
+}
+
+async function saveClaudeConnection(){
+  const btn=document.getElementById('claude-connect-save');
+  const credential=document.getElementById('claude-connect-credential').value.trim();
+  if(!credential)return showToast('Paste the Claude Compliance Access Key first');
+  btn.disabled=true;
+  btn.textContent='Connecting...';
+  try{
+    const res=await fetch('/api/claude/connection',{
+      method:'POST',credentials:'include',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({
+        credential,
+        userEmail:document.getElementById('claude-connect-email').value.trim(),
+        authMode:document.getElementById('claude-connect-auth').value
+      })
+    });
+    const data=await res.json();
+    if(!res.ok)throw new Error(data?.message||data?.error||('HTTP '+res.status));
+    document.getElementById('claude-connect-modal').classList.remove('open');
+    showToast(`Synced ${data.sync?.count||0} Claude project${data.sync?.count===1?'':'s'}`,'ok');
+    await loadProjects();
+  }catch(error){
+    showToast('Claude connection failed: '+String(error?.message||error));
+  }finally{
+    btn.disabled=false;
+    btn.textContent='Connect and sync';
+  }
+}
+
+async function syncClaudeProjects(){
+  if(!projectsState.claude?.connected)return openClaudeConnectModal();
+  try{
+    const res=await fetch('/api/claude/sync-projects',{method:'POST',credentials:'include'});
+    const data=await res.json();
+    if(!res.ok)throw new Error(data?.message||data?.error||('HTTP '+res.status));
+    showToast(`Synced ${data.sync?.count||0} Claude project${data.sync?.count===1?'':'s'}`,'ok');
+    await loadProjects();
+  }catch(error){
+    showToast('Claude sync failed: '+String(error?.message||error));
+  }
+}
+
+async function disconnectClaude(){
+  if(!projectsState.claude?.connected)return;
+  if(!confirm('Disconnect Claude from this Kanban user? Synced projects already on the board stay here.'))return;
+  try{
+    const res=await fetch('/api/claude/connection',{method:'DELETE',credentials:'include'});
+    const data=await res.json().catch(()=>({}));
+    if(!res.ok)throw new Error(data?.message||data?.error||('HTTP '+res.status));
+    showToast('Claude disconnected','ok');
+    await loadProjects();
+  }catch(error){
+    showToast('Could not disconnect Claude: '+String(error?.message||error));
+  }
+}
+
+// Bound after any redraw that replaces card nodes - the full render and the
+// search box's grid-only swap both go through here, so a filtered grid keeps
+// its Run buttons and its follow-up composer.
+function bindProjectCardHandlers(host){
+  host.querySelectorAll('[data-pj-open]').forEach(b=>b.addEventListener('click',()=>{
+    const slug=b.dataset.pjOpen;
+    projectOpen=projectOpen===slug?null:slug;
+    renderProjectsView();
+  }));
+  host.querySelectorAll('[data-pj-field]').forEach(el=>el.addEventListener('input',e=>{
+    const slug=e.target.dataset.pjSlug,key=e.target.dataset.pjField;
+    projectValues[slug]=projectValues[slug]||{};
+    projectValues[slug][key]=e.target.value;
+  }));
+  host.querySelectorAll('[data-pj-run]').forEach(b=>b.addEventListener('click',()=>runProject(b.dataset.pjRun)));
+  host.querySelectorAll('[data-pj-edit]').forEach(b=>b.addEventListener('click',()=>openProjectEditor(b.dataset.pjEdit)));
+  host.querySelectorAll('[data-pj-ask]').forEach(b=>b.addEventListener('click',()=>askProjectFollowUp(b.dataset.pjAsk)));
+  host.querySelectorAll('[data-pj-reset]').forEach(b=>b.addEventListener('click',()=>resetProjectThread(b.dataset.pjReset)));
+  // Kept out of the render loop on purpose: redrawing the panel on every
+  // keystroke would take the focus out of the box being typed into.
+  host.querySelectorAll('[data-pj-draft]').forEach(el=>{
+    el.addEventListener('input',e=>{
+      const thread=projectThread[e.target.dataset.pjDraft];
+      if(thread)thread.draft=e.target.value;
+    });
+    // Ctrl/Cmd+Enter sends and plain Enter is a newline: these are prompts, and
+    // a multi-line one should not need the mouse to survive.
+    el.addEventListener('keydown',e=>{
+      if((e.ctrlKey||e.metaKey)&&e.key==='Enter'){e.preventDefault();askProjectFollowUp(e.target.dataset.pjDraft);}
+    });
+  });
+  host.querySelectorAll('[data-pj-copy]').forEach(b=>b.addEventListener('click',()=>{
+    const turns=projectThread[b.dataset.pjCopy]?.turns||[];
+    const text=turns[Number(b.dataset.pjTurn)]?.content||'';
+    navigator.clipboard?.writeText(text).then(()=>showToast('Copied','ok'),()=>showToast('Could not copy'));
+  }));
+}
+
+function renderProjectsView(){
+  const host=document.getElementById('projects-body');
+  if(!host)return;
+  const s=projectsState;
+  const claude=s.claude||{connected:false};
+  const claudeStatus=claude.connected
+    ? `<div><strong>Claude connected</strong>${claude.userEmail?` for ${esc(claude.userEmail)}`:''}${claude.lastSyncAt?` · last sync ${esc(fmtDate(claude.lastSyncAt))}`:''}${claude.lastProjectCount?` · ${claude.lastProjectCount} imported`:''}</div>`
+    : '<div><strong>Claude not connected</strong> · connect to import projects from your Claude account.</div>';
+  const claudeControls=claude.connected
+    ? `<div class="pj-connect-actions"><button class="btn-primary" id="pj-claude-sync">Sync Claude</button><button class="btn-out" id="pj-claude-connect">Change key</button><button class="btn-out" id="pj-claude-disconnect">Disconnect</button></div>`
+    : `<div class="pj-connect-actions"><button class="btn-primary" id="pj-claude-connect">Connect Claude</button></div>`;
+
+  const tabs=[['all','All'],['mine','Your projects'],['org','Organization'],['shared','Shared with you']];
+  const header=`<div class="pj-head">
+      <div><div class="pj-title">Projects</div>
+        <div class="pj-subtitle">Your Claude projects, run from the board${s.model?` · ${esc(s.model)}`:''}</div></div>
+      <div class="pj-controls">
+        <input class="filter-sel pj-search" id="pj-search" type="text" placeholder="Search projects…" value="${esc(projectsQuery)}" autocomplete="off">
+        ${s.canEdit?'<button class="btn-primary" id="pj-new">New project</button>':''}
+        <button class="btn-out" id="pj-refresh">Refresh</button>
       </div>
     </div>
-    <div class="ins-tabs">${tabs.map(([k,l])=>`<button class="ins-tab${quintaTab===k?' active':''}" data-q-tab="${k}">${esc(l)}</button>`).join('')}</div>
-    <div class="q-body">${quintaTab==='properties'?quintaPropertiesHtml():quintaDialogsHtml()}</div>`;
+    <div class="pj-connect-box">${claudeStatus}${claudeControls}</div>
+    <div class="ins-tabs">${tabs.map(([k,l])=>`<button class="ins-tab${projectsTab===k?' active':''}" data-pj-tab="${k}">${esc(l)}</button>`).join('')}</div>`;
 
-  host.querySelectorAll('[data-q-tab]').forEach(btn=>btn.addEventListener('click',()=>{
-    quintaTab=btn.dataset.qTab;renderQuintaView();loadQuintaTab();
-  }));
-  host.querySelectorAll('[data-q-raw]').forEach(btn=>btn.addEventListener('click',()=>{
-    const id=btn.dataset.qRaw;
-    if(quintaExpanded.has(id))quintaExpanded.delete(id);else quintaExpanded.add(id);
-    renderQuintaView();
-  }));
-  const search=host.querySelector('#q-search');
+  if(s.state==='loading'||s.state==='idle'){host.innerHTML=header+'<div class="pj-loading"><span class="spinner"></span> Loading projects…</div>';return;}
+  if(s.state==='error'){host.innerHTML=header+`<div class="pj-error-box">Could not load projects: ${esc(s.message||'')}</div>`;return;}
+
+  const rows=s.rows.filter(projectMatches);
+  const notConfigured=!s.configured
+    ? '<div class="pj-warn pj-warn-top">No <code>ANTHROPIC_API_KEY</code> is set on this deployment, so nothing can be run from here yet.</div>'
+    : '';
+  const grid=rows.length
+    ? `<div class="pj-grid">${rows.map(projectCardHtml).join('')}</div>`
+    : `<div class="pj-empty">${projectsQuery?'Nothing matches that search.':'No projects in this tab.'}</div>`;
+
+  host.innerHTML=header+notConfigured+grid;
+
+  host.querySelectorAll('[data-pj-tab]').forEach(b=>b.addEventListener('click',()=>{projectsTab=b.dataset.pjTab;renderProjectsView();}));
+  host.querySelector('#pj-refresh')?.addEventListener('click',loadProjects);
+  host.querySelector('#pj-claude-connect')?.addEventListener('click',openClaudeConnectModal);
+  host.querySelector('#pj-claude-sync')?.addEventListener('click',syncClaudeProjects);
+  host.querySelector('#pj-claude-disconnect')?.addEventListener('click',disconnectClaude);
+  host.querySelector('#pj-new')?.addEventListener('click',()=>openProjectEditor(null));
+  bindProjectCardHandlers(host);
+  // Re-rendering the panel on every keystroke would drop focus, so the search
+  // box only redraws the grid beneath it.
+  const search=host.querySelector('#pj-search');
   if(search)search.addEventListener('input',e=>{
-    quintaQuery=e.target.value;
-    // Re-rendering the whole panel would drop focus mid-keystroke, so only the
-    // list below the search box is redrawn.
-    const body=host.querySelector('.q-body');
-    if(body)body.innerHTML=quintaTab==='properties'?quintaPropertiesHtml():quintaDialogsHtml();
-    host.querySelectorAll('[data-q-raw]').forEach(btn=>btn.addEventListener('click',()=>{
-      const id=btn.dataset.qRaw;
-      if(quintaExpanded.has(id))quintaExpanded.delete(id);else quintaExpanded.add(id);
-      renderQuintaView();
-    }));
-  });
-  host.querySelector('#q-refresh')?.addEventListener('click',()=>{
-    quintaProperties={state:'idle',rows:[]};quintaDialogs={state:'idle',rows:[],categories:[]};
-    loadQuintaTab();
+    projectsQuery=e.target.value;
+    const filtered=s.rows.filter(projectMatches);
+    const gridEl=host.querySelector('.pj-grid')||host.querySelector('.pj-empty');
+    if(!gridEl)return;
+    const replacement=document.createElement('div');
+    replacement.innerHTML=filtered.length?`<div class="pj-grid">${filtered.map(projectCardHtml).join('')}</div>`:`<div class="pj-empty">Nothing matches that search.</div>`;
+    gridEl.replaceWith(replacement.firstElementChild);
+    bindProjectCardHandlers(host);
   });
 }
 
-document.getElementById('quinta-view-btn')?.addEventListener('click',()=>{if(viewMode==='quinta')showBoardView();else showQuintaView();});
+document.getElementById('projects-view-btn')?.addEventListener('click',()=>{if(viewMode==='projects')showBoardView();else showProjectsView();});
+document.getElementById('pj-e-save')?.addEventListener('click',saveProjectEditor);
+document.getElementById('pj-e-delete')?.addEventListener('click',deleteProjectFromEditor);
+document.getElementById('claude-connect-save')?.addEventListener('click',saveClaudeConnection);
 
-function renderActiveView(){if(viewMode==='board')renderBoard();else if(viewMode==='spam')renderSpamView();else if(viewMode==='archive')renderArchiveView();else if(viewMode==='kpi')renderKpiView();else if(viewMode==='assignlog')renderAssignLogView();else if(viewMode==='insights')renderInsightsView();else if(viewMode==='quinta')renderQuintaView();else if(viewMode==='qtSeize')return;else renderCompaniesView();}
+// A render that throws used to fail silently: the click that asked for it -
+// selecting a card, finishing a bulk action - appeared to do nothing at all,
+// and the board looked frozen with nothing to report. Say so instead, and
+// leave the detail in the console where it can be read back.
+function renderActiveView(){
+  try{
+    renderActiveViewInner();
+  }catch(error){
+    console.error('renderActiveView failed',error);
+    showToast('Could not redraw the board - see the browser console','warn');
+  }
+}
+function renderActiveViewInner(){if(viewMode==='board')renderBoard();else if(viewMode==='spam')renderSpamView();else if(viewMode==='archive')renderArchiveView();else if(viewMode==='kpi')renderKpiView();else if(viewMode==='assignlog')renderAssignLogView();else if(viewMode==='insights')renderInsightsView();else if(viewMode==='projects')renderProjectsView();else if(viewMode==='qtSeize')return;else renderCompaniesView();}
 
 // ---------------------------------------------------------------------------
 // Assignment Log
@@ -10886,6 +11667,13 @@ function makeCard(ticket,isNew=false){
   const jiraBtn=jiraKey
     ?`<a class="jira-badge-card" data-jira-open="${id}" href="${jiraHref}" ${JIRA_URL?'target="_blank"':''} title="Jira: ${esc(jiraKey)}"> ${esc(jiraKey)}</a>`
     :`<button class="jira-link-btn" data-jira-open="${id}" title="Link to Jira ticket" aria-label="Link to Jira ticket"><img class="jira-link-icon" src="/assets/jira-logo.svg" alt="" aria-hidden="true"></button>`;
+  // The chip above opens Jira once a link exists, which left no way back to the
+  // modal that can change one. This is that way, in the footer row where the
+  // Link button sits while the ticket is unlinked - so the control for "which
+  // issue is this?" is always in the same place, linked or not.
+  const jiraEditBtn=jiraKey
+    ?`<button class="jira-edit-btn" data-jira-edit="${id}" title="Link this ticket to a different Jira issue" aria-label="Change Jira link">Change</button>`
+    :'';
   const jiraLinkedQt=(jiraInfo?.linkedIssues||[]).filter(x=>String(x.key||'').startsWith('QT-'));
   const jiraLinkedHtml=jiraLinkedQt.length?jiraLinkedQt.slice(0,2).map(x=>`<span style="display:inline-flex;align-items:center;gap:4px;border:1px solid var(--indigo-200);border-radius:999px;padding:1px 7px;background:var(--indigo-50);color:var(--indigo-800);">${esc(x.key)} <span style="color:var(--slate-500);">${esc(x.status||'')}</span></span>`).join(' '):'<span style="color:var(--slate-400);">No QT linked</span>';
   const jiraCommentHtml=jiraInfo?.comments?.length?jiraInfo.comments.slice(-2).reverse().map(c=>`<div style="margin-top:3px;"><strong>${esc(c.author||'Unknown')}:</strong> ${esc(c.body||'').slice(0,140)}</div>`).join(''):'<div style="color:var(--slate-400);margin-top:3px;">No Jira comments</div>';
@@ -10964,6 +11752,7 @@ function makeCard(ticket,isNew=false){
       <div class="card-actions">
         <span class="card-date">${fmtDate(email.receivedDateTime)}</span>
         ${jiraBtn}
+        ${jiraEditBtn}
         ${hsTicketBtn}
         ${trControlsHtml}
         <button class="open-email-btn" data-oe="${id}"> Open</button>
@@ -10983,8 +11772,20 @@ function makeCard(ticket,isNew=false){
       </div>
     </div>
     ${inlineSectionHtml}`;
+  // The whole card is draggable, so a mousedown on any control inside it - a
+  // category select, the agent picker, Archive - arms a drag the browser then
+  // has to be talked out of. Worse, a control that opens a dialog or removes
+  // its own card mid-gesture leaves that armed drag with nothing to finish
+  // against, and the board stops accepting clicks until a reload. Disarm the
+  // drag for any gesture that starts on a control, and re-arm it after.
+  const armDrag=ev=>{div.draggable=!ev.target?.closest?.('button,select,a,textarea,input,label,.agent-assign-menu');};
+  const rearmDrag=()=>{div.draggable=true;};
+  div.addEventListener('pointerdown',armDrag);
+  div.addEventListener('mousedown',armDrag);
+  div.addEventListener('pointerup',rearmDrag);
+  div.addEventListener('mouseup',rearmDrag);
   div.addEventListener('dragstart',e=>{e.dataTransfer.setData('ticketId',id);setTimeout(()=>div.classList.add('dragging'),0);});
-  div.addEventListener('dragend',()=>div.classList.remove('dragging'));
+  div.addEventListener('dragend',()=>{div.classList.remove('dragging');rearmDrag();});
   div.querySelector('[data-pr]').addEventListener('click',e=>{e.stopPropagation();ticketPriority[id]=nextPriority(priority);saveState();renderBoard();});
   const agentWrap=div.querySelector('[data-agent-menu]');
   div.querySelector('[data-agent-trigger]').addEventListener('click',e=>{
@@ -11039,6 +11840,7 @@ function makeCard(ticket,isNew=false){
     applyTicketAgentSelection(id,agent,normalizeAgentCode(btn.dataset.agentPick));
   }));
     div.querySelector('[data-cat]').addEventListener('change',e=>{const newCat=e.target.value;ticketCategory[id]=newCat;if(newCat==='Spam'){const spamEmail=ticketClientEmail[id]||email.sender?.toLowerCase();if(spamEmail&&!isQuintaSender(spamEmail)){const rc=recordSpamSender(spamEmail);showToast(rc>1?` Spam recorded  ${rc} tickets marked`:' Spam sender recorded','spam-t');}}saveState();renderBoard();updateSpamBadge();});
+  div.querySelector('[data-jira-edit]')?.addEventListener('click',ev=>{ev.preventDefault();ev.stopPropagation();openJiraModal(id);});
   div.querySelector('[data-jira-open]').addEventListener('click',ev=>{ev.preventDefault();ev.stopPropagation();if(jiraKey&&JIRA_URL){window.open(`${JIRA_URL}${encodeURIComponent(jiraKey)}`,'_blank');return;}openJiraModal(id);});
   div.querySelector('[data-hs-open]')?.addEventListener('click',ev=>{ev.preventDefault();ev.stopPropagation();const hsId=ticketHubspotId[id];if(!hsId){showToast('Ticket not synced to HubSpot yet');return;}window.open(`https://app.hubspot.com/contacts/25445053/record/0-5/${encodeURIComponent(hsId)}`,'_blank');});
   div.querySelector('[data-hs-retry]')?.addEventListener('click',async ev=>{ev.preventDefault();ev.stopPropagation();const rs=await syncTicketToHubspot(ticket);if(rs?.ok&&ticketHubspotId[id]){window.open(`https://app.hubspot.com/contacts/25445053/record/0-5/${encodeURIComponent(ticketHubspotId[id])}`,'_blank');showToast('Ticket synced to HubSpot','ok');}else{const reason=rs?.reason||'unknown';if(reason==='missing_company_mapping')showToast('Cannot sync yet: this ticket has no mapped HubSpot company.');else if(reason==='missing_client_email')showToast('Cannot sync yet: no client email found for this ticket.');else if(reason==='api_error')showToast(`HubSpot sync failed: ${rs?.error||'api error'}`);else if(reason==='network_error')showToast(`HubSpot sync network error: ${rs?.error||'unknown'}`);else showToast('Unable to sync this ticket yet.');}renderBoard();});
@@ -11053,7 +11855,21 @@ function makeCard(ticket,isNew=false){
   div.querySelector('[data-oe]').addEventListener('click',ev=>{ev.stopPropagation();clearNewReplyGlow(id);openEmailModal(ticket);});
   div.querySelector('[data-edit-manual]')?.addEventListener('click',ev=>{ev.stopPropagation();openEditManualModal(ticket);});
   div.querySelectorAll('[data-dup-open]').forEach(btn=>btn.addEventListener('click',ev=>{ev.preventDefault();ev.stopPropagation();openDuplicateModal(id);}));
-  div.querySelector('[data-archive]')?.addEventListener('click',ev=>{ev.stopPropagation();if(!confirm('Archive this ticket?'))return;ticketArchived[id]={archivedAt:Date.now(),archivedBy:currentUser(),reason:'manual'};saveState('ticket_archived_manual');renderBoard();updateArchiveBadge();showToast('Ticket archived','ok');});
+  div.querySelector('[data-archive]')?.addEventListener('click',async ev=>{
+    ev.stopPropagation();
+    const answer=await confirmAction('Archive this ticket? It leaves the board and can be restored from the Archive view.',
+      {title:'Archive ticket',confirmLabel:'Archive',danger:true});
+    if(!answer)return;
+    if(isArchivedTicket(id))return;
+    ticketArchived[id]={archivedAt:Date.now(),archivedBy:currentUser(),reason:'manual'};
+    // A card that is leaving the board must leave the selection with it, so the
+    // bulk bar never counts a ticket nobody can see.
+    selectedTickets.delete(id);
+    if(lastSelectedId===id)lastSelectedId=null;
+    if(focusedCardId===id)focusedCardId=null;
+    saveState('ticket_archived_manual');
+    renderBoard();updateArchiveBadge();showToast('Ticket archived','ok');
+  });
   div.querySelector('[data-inline-toggle]')?.addEventListener('click',ev=>{ev.stopPropagation();inlineCommentOpen[id]=!inlineOpen;if(inlineCommentOpen[id]){markAlertFeedReadForTicket(id,currentUser());clearNewReplyGlow(id);}renderBoard();});
   div.querySelector('[data-inline-bell]')?.addEventListener('click',ev=>{ev.stopPropagation();inlineCommentOpen[id]=true;markAlertFeedReadForTicket(id,currentUser());clearNewReplyGlow(id);renderBoard();});
   div.querySelector('[data-inline-modal]')?.addEventListener('click',ev=>{ev.stopPropagation();clearNewReplyGlow(id);openComModal(ticket);});
@@ -11506,9 +12322,25 @@ function renderColumnHeader(col,count,headerEl){
 
 const selectedTickets = new Set();
 let lastSelectedId = null;
+let visibleBoardTicketIds = new Set();
 
 function isSelected(id){return selectedTickets.has(id);}
-function selectionList(){return [...selectedTickets].filter(id=>allTickets.some(t=>t.id===id));}
+function selectionList(){
+  const visibleIds = viewMode==='board' ? visibleBoardTicketIds : null;
+  return [...selectedTickets].filter(id=>allTickets.some(t=>t.id===id)&&(!visibleIds||visibleIds.has(id)));
+}
+function pruneSelectionToVisible(){
+  if(viewMode!=='board'){
+    if(selectedTickets.size)clearSelection();
+    return;
+  }
+  let changed=false;
+  selectedTickets.forEach(id=>{
+    if(!visibleBoardTicketIds.has(id)){selectedTickets.delete(id);changed=true;}
+  });
+  if(lastSelectedId&&!visibleBoardTicketIds.has(lastSelectedId)){lastSelectedId=null;changed=true;}
+  return changed;
+}
 
 // Shift-click selects the run between the last click and this one, in the order
 // the column is actually displayed rather than the order allTickets happens to
@@ -11530,7 +12362,10 @@ function toggleTicketSelection(id,{range=false}={}){
 }
 function clearSelection(){selectedTickets.clear();lastSelectedId=null;}
 function selectAllVisible(){
+  clearSelection();
   document.querySelectorAll('.card[data-id]').forEach(el=>selectedTickets.add(el.dataset.id));
+  const ids=[...selectedTickets];
+  lastSelectedId=ids.length?ids[ids.length-1]:null;
 }
 
 /* --- Undo -----------------------------------------------------------------
@@ -11549,7 +12384,13 @@ async function performUndo(){
   const entry=undoStack.pop();
   if(!entry)return showToast('Nothing to undo');
   try{
-    entry.restore();
+    // Awaited: most restores are a synchronous write into the local maps that
+    // the saveState below carries, but a server-owned field cannot be undone
+    // that way and has to go back through its own endpoint - see
+    // jiraLinkUndo(). await on a non-promise is a no-op, so the sync ones are
+    // unaffected, and an async restore's failure lands in the catch instead of
+    // becoming an unhandled rejection behind a "Undone" toast that lied.
+    await entry.restore();
     renderActiveView();
     await saveState('undo');
     showToast('Undone: '+entry.label,'ok');
@@ -11568,6 +12409,58 @@ function showUndoToast(label){
   host.querySelector('#undo-toast-x').addEventListener('click',()=>host.classList.remove('show'));
   clearTimeout(host._timer);
   host._timer=setTimeout(()=>host.classList.remove('show'),12000);
+}
+
+/* --- Confirmations --------------------------------------------------------
+   window.confirm() blocks the page in a nested event loop, in the middle of a
+   click whose handler then re-renders the board and destroys its own button on
+   the way out. That is the flow behind "archive a ticket and the board stops
+   letting me select anything until I reload": a gesture half-finished inside a
+   blocked event loop leaves the browser holding state - a pointer press, an
+   armed drag on the card the button sits in - that the page never gets the
+   events to unwind.
+
+   An in-app modal resolves a promise instead. The click that opened it has
+   already finished dispatching, nothing is blocked, and Escape or the backdrop
+   cancels. Keydown is bound in the capture phase so Enter and Escape answer
+   the dialog rather than reaching the board's own shortcuts. */
+function confirmAction(message,{title='Are you sure?',confirmLabel='Confirm',cancelLabel='Cancel',danger=false}={}){
+  const bg=document.getElementById('confirm-modal');
+  const titleEl=document.getElementById('confirm-title');
+  const messageEl=document.getElementById('confirm-message');
+  const ok=document.getElementById('confirm-ok');
+  const cancel=document.getElementById('confirm-cancel');
+  // Never leave a destructive action unconfirmable if the markup is missing.
+  if(!bg||!ok||!cancel||!messageEl)return Promise.resolve(window.confirm(message));
+  if(titleEl)titleEl.textContent=title;
+  messageEl.textContent=message;
+  ok.textContent=confirmLabel;
+  cancel.textContent=cancelLabel;
+  ok.className=danger?'btn-danger':'btn-primary';
+  bg.classList.add('open');
+  return new Promise(resolve=>{
+    const done=answer=>{
+      bg.classList.remove('open');
+      ok.removeEventListener('click',onOk);
+      cancel.removeEventListener('click',onCancel);
+      bg.removeEventListener('click',onBackdrop);
+      document.removeEventListener('keydown',onKey,true);
+      resolve(answer);
+    };
+    const onOk=e=>{e.stopPropagation();done(true);};
+    const onCancel=e=>{e.stopPropagation();done(false);};
+    const onBackdrop=e=>{if(e.target===bg)done(false);};
+    const onKey=e=>{
+      if(e.key==='Escape'){e.preventDefault();e.stopPropagation();done(false);}
+      else if(e.key==='Enter'){e.preventDefault();e.stopPropagation();done(true);}
+    };
+    ok.addEventListener('click',onOk);
+    cancel.addEventListener('click',onCancel);
+    bg.addEventListener('click',onBackdrop);
+    document.addEventListener('keydown',onKey,true);
+    // After the class change, so the button is focusable when it is focused.
+    setTimeout(()=>{try{ok.focus();}catch(_){}},0);
+  });
 }
 
 /* --- Bulk actions --------------------------------------------------------- */
@@ -11657,11 +12550,18 @@ async function bulkSnooze(until){
 async function bulkArchive(){
   const ids=selectionList();
   if(!ids.length)return;
-  if(!confirm(`Archive ${ids.length} ticket${ids.length===1?'':'s'}?`))return;
-  const before=captureTicketState(ids,['archived']);
+  const answer=await confirmAction(
+    `Archive ${ids.length} ticket${ids.length===1?'':'s'}? They leave the board and can be restored from the Archive view.`,
+    {title:`Archive ${ids.length} ticket${ids.length===1?'':'s'}`,confirmLabel:'Archive',danger:true});
+  if(!answer)return;
+  // The board may have moved on while the dialog was open - another session's
+  // patch, a poll, an expiring snooze. Only archive what is still selectable.
+  const stillThere=selectionList().filter(id=>ids.includes(id));
+  if(!stillThere.length)return showToast('Those tickets are no longer on the board');
+  const before=captureTicketState(stillThere,['archived']);
   const now=Date.now();
-  ids.forEach(id=>{ticketArchived[id]={archivedAt:now,archivedBy:currentUser(),reason:'manual'};});
-  pushUndo(`Archived ${ids.length} ticket${ids.length===1?'':'s'}`,()=>restoreTicketState(before,['archived']));
+  stillThere.forEach(id=>{ticketArchived[id]={archivedAt:now,archivedBy:currentUser(),reason:'manual'};});
+  pushUndo(`Archived ${stillThere.length} ticket${stillThere.length===1?'':'s'}`,()=>restoreTicketState(before,['archived']));
   clearSelection();renderActiveView();
   await saveState('bulk_archive');
 }
@@ -11669,6 +12569,11 @@ async function bulkArchive(){
 function renderSelectionBar(){
   const bar=document.getElementById('selection-bar');
   if(!bar)return;
+  if(viewMode!=='board'){
+    bar.classList.remove('show');bar.innerHTML='';
+    return;
+  }
+  pruneSelectionToVisible();
   const ids=selectionList();
   if(!ids.length){bar.classList.remove('show');bar.innerHTML='';return;}
   const stageOpts=STAGES.map(c=>`<option value="${c}">${esc(COL_NAMES[c])}</option>`).join('');
@@ -11914,6 +12819,20 @@ document.addEventListener('keydown',async e=>{
   }
 });
 
+// One malformed ticket used to take the whole render with it: the columns are
+// emptied before they are refilled, so a throw halfway through left the board
+// half-drawn AND skipped everything after the loop - the badges, and
+// renderSelectionBar(), which is why selection could appear to die with no
+// visible error. A card that cannot be built is now dropped and reported.
+function safeCard(ticket){
+  try{
+    return makeCard(ticket);
+  }catch(error){
+    console.error('Could not render ticket '+ticket?.id,error);
+    return null;
+  }
+}
+
 function renderBoard(){
   closeAllAgentMenus();
   closeSnoozeMenu();
@@ -11929,17 +12848,34 @@ function renderBoard(){
   document.getElementById('ticket-number-filter').value=activeTicketNumber;
   const agentFilter=enforcedAgentFilter();
   const visible=allTickets.filter(t=>ticketPassesBoardFilters(t,agentFilter));
+  visibleBoardTicketIds=new Set(visible.map(t=>t.id));
+  pruneSelectionToVisible();
 
   const laneBoard=document.getElementById('lane-board');
   const flatBoard=document.getElementById('main-board');
-  if(boardGrouping==='company'){
-    flatBoard.style.display='none';
-    laneBoard.style.display='block';
+  // renderBoard() redraws the board; it does not decide which view is on
+  // screen - hidePrimaryViews()/showBoardView() own that. It is called from
+  // other views on purpose, so the board is already correct when somebody
+  // returns to it: a restore from the Archive or the Spam Inbox, an action
+  // taken inside the email modal opened from one of those lists, a poll.
+  //
+  // Un-hiding the board from there is what broke "select a ticket, archive it,
+  // restore it, and now nothing selects". The restore redraws the archive list
+  // and then the board, which forced #main-board back to display:flex while
+  // #archive-view was still .active - they are siblings, so the board appeared
+  // below the archive list with viewMode still 'archive'. Clicking a card then
+  // did toggle the selection, but the renderActiveView() that follows redrew
+  // the ARCHIVE list, so the checkbox never filled in and the selection bar
+  // (hidden off-board) never came up. Selection looked dead while the board sat
+  // there looking live, and only a reload or a trip through the nav fixed it.
+  const showBoard=viewMode==='board';
+  const grouped=boardGrouping==='company';
+  flatBoard.style.display=showBoard&&!grouped?'flex':'none';
+  laneBoard.style.display=showBoard&&grouped?'block':'none';
+  if(grouped){
     renderLaneBoard(visible);
   }else{
-    laneBoard.style.display='none';
     laneBoard.innerHTML='';
-    flatBoard.style.display='flex';
     STAGES.forEach(col=>{
       const column=document.querySelector('.col-'+col);
       column.style.display=(activeStage!=='all'&&activeStage!==col)?'none':'';
@@ -11947,7 +12883,7 @@ function renderBoard(){
       const el=document.getElementById('col-'+col);
       el.innerHTML='';
       if(!tickets.length)el.innerHTML=`<div class="empty"><div class="empty-icon">${COL_EMPTY_ICONS[col]}</div>No tickets</div>`;
-      else tickets.forEach(t=>el.appendChild(makeCard(t)));
+      else tickets.forEach(t=>{const card=safeCard(t);if(card)el.appendChild(card);});
       renderColumnHeader(col,tickets.length,column.querySelector('.col-header'));
     });
   }
@@ -12004,7 +12940,7 @@ function renderLaneBoard(visible){
         bodyEl.className='col-body';
         bodyEl.dataset.col=col;
         if(!colTickets.length)bodyEl.innerHTML='<div class="empty empty-slim"></div>';
-        else colTickets.forEach(t=>bodyEl.appendChild(makeCard(t)));
+        else colTickets.forEach(t=>{const card=safeCard(t);if(card)bodyEl.appendChild(card);});
         bindColumnDropTarget(bodyEl);
         column.appendChild(bodyEl);
         body.appendChild(column);
@@ -12145,6 +13081,16 @@ function bindColumnDropTarget(col){
   });
 }
 document.querySelectorAll('.col-body').forEach(bindColumnDropTarget);
+
+// A drag that ends anywhere other than on a column - cancelled with Escape,
+// dropped outside the board, or interrupted by the card being re-rendered
+// underneath it - never reaches dragleave or drop, so the highlight and the
+// half-transparent card would stay behind. Swept from the document, where the
+// end of a drag is always heard.
+['dragend','drop'].forEach(ev=>document.addEventListener(ev,()=>{
+  document.querySelectorAll('.card.dragging').forEach(c=>{c.classList.remove('dragging');c.draggable=true;});
+  document.querySelectorAll('.col-body.drag-over').forEach(c=>c.classList.remove('drag-over'));
+}));
 document.querySelectorAll('[data-close]').forEach(b=>{b.addEventListener('click',()=>document.getElementById(b.dataset.close).classList.remove('open'));});
 document.querySelectorAll('.modal-bg').forEach(bg=>{bg.addEventListener('click',e=>{if(e.target===bg)bg.classList.remove('open');});});
 
@@ -12378,6 +13324,120 @@ function emSanitizeEmailHtml(html) {
 
   walk(template.content);
   return template.innerHTML;
+}
+
+
+/* ===========================================================================
+   The conversation, not just the last message
+   ---------------------------------------------------------------------------
+   The modal used to render one message: whichever reply arrived most recently.
+   Everything said before it was only visible in whatever quoted text the
+   sender's mail client happened to include - inconsistent, usually truncated,
+   and absent entirely when someone replies without quoting.
+
+   This fetches every message carrying the ticket's conversation id and stacks
+   them oldest first, with the newest expanded. Each body goes through the same
+   allowlist sanitiser as the single message did: they are still strangers'
+   HTML, and there are now more of them.
+   =========================================================================== */
+
+let emThread = { state: 'idle', messages: [] };
+let emThreadOpen = new Set();   // message ids the agent has expanded
+
+function emResetThread(){
+  emThread = { state: 'idle', messages: [] };
+  emThreadOpen = new Set();
+}
+
+async function emLoadThread(ticket){
+  if(!ticket||emThread.state==='loading')return;
+  const id=ticket.id;
+  emThread={state:'loading',messages:[]};
+  renderEmThread();
+  try{
+    const conversationId=String(ticket.email?.conversationId||'').trim();
+    const url='/api/tickets/'+encodeURIComponent(id)+'/thread'+(conversationId?'?conversationId='+encodeURIComponent(conversationId):'');
+    const res=await fetch(url,{credentials:'include'});
+    const data=await res.json();
+    // A slow fetch must not paint one ticket's conversation over another's.
+    if(!emCurrentTicket||emCurrentTicket.id!==id)return;
+    if(data?.error){emThread={state:'error',messages:[],message:data.message||data.error};}
+    else{
+      emThread={state:'done',messages:data.messages||[],note:data.note||''};
+      // The newest is the one being answered, so it starts open; the rest are
+      // collapsed to their first line so a long thread stays readable.
+      const last=emThread.messages[emThread.messages.length-1];
+      if(last)emThreadOpen.add(last.id);
+    }
+  }catch(error){
+    if(!emCurrentTicket||emCurrentTicket.id!==id)return;
+    emThread={state:'error',messages:[],message:String(error?.message||error)};
+  }
+  renderEmThread();
+}
+
+function emThreadWho(msg){
+  const address=String(msg.from||'').toLowerCase();
+  const internal=isInternalEmailAddress(address);
+  return {
+    label: msg.fromName || senderName(msg.from) || msg.from || 'Unknown',
+    address,
+    internal,
+    side: internal ? 'us' : 'them'
+  };
+}
+
+function emThreadMessageHtml(msg,index,total){
+  const who=emThreadWho(msg);
+  const open=emThreadOpen.has(msg.id);
+  const when=msg.receivedDateTime?fmtDate(msg.receivedDateTime):'';
+  return `<article class="emt-msg emt-${who.side}${open?' open':''}">
+    <button class="emt-head" data-emt-toggle="${esc(msg.id)}">
+      <span class="emt-who">${esc(who.label)}</span>
+      <span class="emt-badge">${who.internal?'us':'client'}</span>
+      <span class="emt-when">${esc(when)}</span>
+      ${msg.hasAttachments?'<span class="emt-clip" title="Has attachments">attachment</span>':''}
+      <span class="emt-index">${index+1}/${total}</span>
+    </button>
+    ${open
+      ? `<div class="emt-body">${emSanitizeEmailHtml(msg.bodyType==='text'?('<div style="white-space:pre-wrap">'+esc(msg.body)+'</div>'):msg.body)}</div>`
+      : `<div class="emt-preview">${esc(String(msg.preview||'').slice(0,180))}</div>`}
+  </article>`;
+}
+
+function renderEmThread(){
+  const host=document.getElementById('em-thread');
+  if(!host)return;
+  if(emThread.state==='idle'){host.innerHTML='';return;}
+  if(emThread.state==='loading'){host.innerHTML='<div class="emt-note"><span class="spinner-sm"></span> Loading the rest of the conversation…</div>';return;}
+  if(emThread.state==='error'){
+    host.innerHTML=`<div class="emt-note emt-err">Could not load the conversation: ${esc(emThread.message||'')}. The message below is the latest one.</div>`;
+    return;
+  }
+  const list=emThread.messages||[];
+  if(list.length<=1){
+    // Nothing gained by drawing a thread of one - the body below already is it.
+    host.innerHTML=list.length===1?'':'<div class="emt-note">No earlier messages in this conversation.</div>';
+    return;
+  }
+  host.innerHTML=`<div class="emt-bar"><strong>${list.length} messages</strong> in this conversation
+      <button class="btn-out emt-all" id="emt-expand">${emThreadOpen.size>=list.length?'Collapse all':'Expand all'}</button></div>`
+    +list.map((m,i)=>emThreadMessageHtml(m,i,list.length)).join('');
+
+  host.querySelectorAll('[data-emt-toggle]').forEach(btn=>btn.addEventListener('click',()=>{
+    const id=btn.dataset.emtToggle;
+    if(emThreadOpen.has(id))emThreadOpen.delete(id);else emThreadOpen.add(id);
+    renderEmThread();
+  }));
+  host.querySelector('#emt-expand')?.addEventListener('click',()=>{
+    if(emThreadOpen.size>=list.length)emThreadOpen=new Set();
+    else emThreadOpen=new Set(list.map(m=>m.id));
+    renderEmThread();
+  });
+  // Images inside the thread come from the mail store the same way the single
+  // message's do, and the same broken-image handling applies.
+  host.querySelectorAll('img').forEach(img=>img.addEventListener('error',()=>emReplaceBrokenImage(img)));
+  emSweepBrokenImages(host);
 }
 
 function renderEmailBodyWithImages(body,images){
@@ -13180,59 +14240,102 @@ function fbContext(){
   };
 }
 
+
+/* ===========================================================================
+   Feedback, as a conversation
+   ---------------------------------------------------------------------------
+   This was a header button that opened a modal with a form in it. A modal is a
+   task - it takes the screen, and the thing you were reporting on disappears
+   behind it, which is exactly the moment you needed to look at it. A bubble in
+   the corner is an aside: it sits over the board, the ticket stays visible
+   behind it, and it costs nothing to open and close again.
+
+   It is a chat only in shape. There is no thread and nothing replies for real;
+   what arrives back is the board saying honestly what happened to the report -
+   which leg delivered it, or that neither did. Dressing a failure up as a
+   cheerful "thanks!" would be the one thing worse than the old modal.
+   =========================================================================== */
+
+let fbOpen = false;
+let fbLog = [];          // the visible conversation
+let fbGreeted = false;
+
+const FB_CATEGORY_LABEL = { bug: 'Bug', idea: 'Idea', question: 'Question', other: 'Other' };
+
+function fbPush(role, text, tone){
+  fbLog.push({ role, text, tone: tone || '', at: Date.now() });
+  fbRenderLog();
+}
+
+function fbToggleChat(force){
+  fbOpen = force === undefined ? !fbOpen : !!force;
+  const panel = document.getElementById('fb-chat');
+  const launcher = document.getElementById('fb-launcher');
+  if(!panel) return;
+  panel.classList.toggle('open', fbOpen);
+  launcher?.classList.toggle('active', fbOpen);
+  launcher?.setAttribute('aria-expanded', String(fbOpen));
+  if(fbOpen){
+    if(!fbGreeted){
+      fbGreeted = true;
+      fbPush('bot','Something broken, missing, or worth changing? Tell me and it goes straight to the platform team.');
+    }
+    fbRenderContext();
+    setTimeout(()=>document.getElementById('fb-message')?.focus(), 60);
+  }
+}
+
+function fbRenderLog(){
+  const box = document.getElementById('fb-log');
+  if(!box) return;
+  box.innerHTML = fbLog.map(m =>
+    `<div class="fb-msg fb-${m.role}${m.tone?' fb-'+m.tone:''}">${esc(m.text)}</div>`
+  ).join('') + (fbSending?'<div class="fb-msg fb-bot fb-typing"><span></span><span></span><span></span></div>':'');
+  box.scrollTop = box.scrollHeight;
+}
+
+function fbRenderCats(){
+  const box = document.getElementById('fb-cats');
+  if(!box) return;
+  box.innerHTML = Object.entries(FB_CATEGORY_LABEL).map(([key,label]) =>
+    `<button class="fb-cat${fbCategory===key?' active':''}" type="button" data-fb-cat="${key}" aria-pressed="${fbCategory===key}">${esc(label)}</button>`
+  ).join('');
+  box.querySelectorAll('[data-fb-cat]').forEach(b=>b.addEventListener('click',()=>{
+    fbCategory=b.dataset.fbCat;
+    fbRenderCats();
+    document.getElementById('fb-message')?.focus();
+  }));
+}
+
 function fbRenderContext(){
   const box = document.getElementById('fb-context');
   if(!box) return;
   const c = fbContext();
-  const ticketLine = c.ticketId ? `<span>Ticket: ${esc(ticketDisplayNumber(c.ticketId)||c.ticketId)}</span>` : '';
-  box.innerHTML = `<strong>Attached automatically</strong>
-    <span>You: ${esc(currentUser())} &middot; View: ${esc(c.view)} &middot; Build: ${esc(c.build)}</span>
-    ${ticketLine}
-    <span>Screen: ${esc(c.viewport)} &middot; Theme: ${esc(c.theme)}</span>`;
+  const ticket = c.ticketId ? ` · ${esc(ticketDisplayNumber(c.ticketId)||c.ticketId)}` : '';
+  // One quiet line rather than a panel. It is reassurance, not content: the
+  // reporter should know their screen and build travel with the report without
+  // having to read a table about it.
+  box.textContent = `Sent with: ${currentUser()} · ${c.view}${ticket} · build ${c.build} · ${c.viewport}`;
 }
 
-function fbRenderCount(){
-  const el = document.getElementById('fb-count');
-  const value = String(document.getElementById('fb-message')?.value || '');
-  if(!el) return;
-  // Only worth showing once it is close to mattering - a character counter over
-  // an empty box is noise.
-  const left = FB_MAX - value.length;
-  el.textContent = value.length > FB_MAX - 500 ? `${left} characters left` : '';
-  el.classList.toggle('over', left < 0);
-}
-
-function fbSetCategory(category){
-  fbCategory = category;
-  document.querySelectorAll('[data-fb-cat]').forEach(btn=>{
-    btn.setAttribute('aria-pressed', btn.dataset.fbCat === category ? 'true' : 'false');
-  });
-}
-
-function openFeedbackModal(){
-  fbSetCategory('bug');
-  const box = document.getElementById('fb-message');
-  if(box) box.value = '';
-  const note = document.getElementById('fb-note');
-  // Says where it goes before it is written, not after. Not the address itself:
-  // that is the server's configuration to know, and the success toast names it.
-  if(note) note.textContent = 'Goes to the platform team';
-  fbRenderCount();
-  fbRenderContext();
-  document.getElementById('feedback-modal')?.classList.add('open');
-  setTimeout(()=>box?.focus(), 60);
-}
-
-async function sendFeedback(){
+async function fbSubmit(){
   if(fbSending) return;
   const box = document.getElementById('fb-message');
   const message = String(box?.value || '').trim();
-  if(!message){ showToast('Write what happened first','warn'); box?.focus(); return; }
-  if(message.length > FB_MAX){ showToast(`That is ${message.length - FB_MAX} characters too long`,'warn'); return; }
+  if(!message){ box?.focus(); return; }
+  if(message.length > FB_MAX){
+    fbPush('bot',`That is ${message.length - FB_MAX} characters too long to send.`,'bad');
+    return;
+  }
 
-  const btn = document.getElementById('fb-send');
+  fbPush('me', message);
+  if(box) box.value = '';
+  fbUpdateCount();
   fbSending = true;
-  if(btn){ btn.disabled = true; btn.textContent = 'Sending...'; }
+  fbRenderLog();
+  const send = document.getElementById('fb-send');
+  if(send) send.disabled = true;
+
   try{
     const res = await fetch('/api/feedback',{
       method:'POST',
@@ -13241,45 +14344,45 @@ async function sendFeedback(){
       body: JSON.stringify({ category: fbCategory, message, context: fbContext() })
     });
     const out = await res.json().catch(()=>({}));
+    fbSending = false;
+
     if(!res.ok || !out?.ok){
       const code = String(out?.error || '');
-      if(code === 'feedback_too_long') showToast('That report is too long to send','warn');
-      else if(res.status === 429) showToast('A few reports have just gone out - give it a minute','warn');
-      else showToast(`Could not send that: ${out?.detail || code || res.status}`,'warn');
+      if(res.status === 429) fbPush('bot','A few reports have just gone out - give it a minute and send that again.','warn');
+      else if(code === 'feedback_too_long') fbPush('bot','That report is too long to send.','warn');
+      else fbPush('bot',`That could not be sent: ${out?.detail || code || res.status}`,'bad');
       return;
     }
-    document.getElementById('feedback-modal')?.classList.remove('open');
-    if(box) box.value = '';
-    /* Three honest outcomes rather than one cheerful one. A report that was
-       written down but not delivered is not a failure - somebody will still see
-       it - but saying "sent" over it would be a lie. */
-    if(out.emailed || out.notified){
-      // `to` is a list now, and three addresses in a toast is noise - name the
-      // one recipient when there is one, and the count when there are more.
-      const to = Array.isArray(out.to) ? out.to : (out.to ? [out.to] : []);
-      const who = to.length === 1 ? to[0] : (to.length ? `${to.length} people on the platform team` : 'the team');
-      showToast(`Thanks - sent to ${who}`,'ok');
-    }else if(out.stored){
-      showToast('Recorded, but it could not be emailed yet - it is saved and will be seen','warn');
-    }else{
-      showToast('That could not be sent or saved. Please tell someone directly.','warn');
-    }
+
+    /* Which leg actually delivered it. Named rather than smoothed over: with
+       Outlook down and a Teams webhook set, "sent" alone would leave someone
+       wondering where it went - and when neither works, the reporter has to
+       know their words did not reach anyone. */
+    if(out.notified && out.emailed) fbPush('bot','Sent - posted to Teams and emailed to the platform team.','ok');
+    else if(out.notified) fbPush('bot','Sent - posted to the platform team on Teams.','ok');
+    else if(out.emailed) fbPush('bot','Sent - emailed to the platform team.','ok');
+    else if(out.stored) fbPush('bot','Written down, but it could not be delivered yet. It is saved and someone will see it.','warn');
+    else fbPush('bot','That could not be sent or saved. Please tell someone directly.','bad');
   }catch(err){
-    showToast(`Could not send that: ${String(err?.message||err)}`,'warn');
+    fbSending = false;
+    fbPush('bot',`That could not be sent: ${String(err?.message||err)}`,'bad');
   }finally{
     fbSending = false;
-    if(btn){ btn.disabled = false; btn.textContent = 'Send feedback'; }
+    if(send) send.disabled = false;
+    fbRenderLog();
+    document.getElementById('fb-message')?.focus();
   }
 }
 
-/* Proving the two delivery legs work, from the UI.
+function fbUpdateCount(){
+  const box = document.getElementById('fb-message');
+  const out = document.getElementById('fb-count');
+  if(!box||!out) return;
+  const left = FB_MAX - box.value.length;
+  out.textContent = left < 200 ? `${left} left` : '';
+  out.classList.toggle('over', left < 0);
+}
 
-   Setting this up is two environment variables and an Outlook consent, and each
-   of them fails invisibly from the outside: a webhook URL with a typo, a token
-   that predates Mail.Send, a flow somebody switched off. Without this the only
-   way to find out is to file a real report and wait to see if anything arrives -
-   and when nothing does, there is nothing to say which leg was at fault. This
-   sends one canned report and reports each leg separately. */
 async function sendFeedbackTest(){
   const btn = document.getElementById('fb-test');
   if(!btn || btn.disabled) return;
@@ -13308,15 +14411,22 @@ async function sendFeedbackTest(){
 }
 
 document.getElementById('feedback-btn')?.addEventListener('click', openFeedbackModal);
+document.getElementById('fb-launcher')?.addEventListener('click', ()=>fbToggleChat());
+document.getElementById('fb-close')?.addEventListener('click', ()=>fbToggleChat(false));
 document.getElementById('fb-test')?.addEventListener('click', sendFeedbackTest);
-document.getElementById('fb-send')?.addEventListener('click', sendFeedback);
-document.getElementById('fb-message')?.addEventListener('input', fbRenderCount);
-document.querySelectorAll('[data-fb-cat]').forEach(btn=>{
-  btn.addEventListener('click', ()=>fbSetCategory(btn.dataset.fbCat));
-});
-// Ctrl/Cmd+Enter sends, as it does in the reply composer.
+document.getElementById('fb-send')?.addEventListener('click', fbSubmit);
+document.getElementById('fb-message')?.addEventListener('input', fbUpdateCount);
+fbRenderCats();
+/* Enter sends, Shift+Enter is a new line - the way a chat box behaves. The
+   reply composer keeps Ctrl+Enter because a client reply is long and being
+   one stray Enter away from sending it would be the wrong trade there. */
 document.getElementById('fb-message')?.addEventListener('keydown', ev=>{
-  if((ev.ctrlKey||ev.metaKey) && ev.key === 'Enter'){ ev.preventDefault(); sendFeedback(); }
+  if(ev.key === 'Enter' && !ev.shiftKey){ ev.preventDefault(); fbSubmit(); }
+});
+// Escape closes it, but only when the composer has focus - it must not swallow
+// the key from the board behind.
+document.getElementById('fb-chat')?.addEventListener('keydown', ev=>{
+  if(ev.key === 'Escape'){ ev.stopPropagation(); fbToggleChat(false); }
 });
 
 /* ================= Open in Outlook, including when there is none ==========
@@ -13468,7 +14578,11 @@ async function openEmailModal(ticket){
   // "Seen before" is the panel worth paying for up front - it is the one that
   // changes what the agent writes. History waits until it is opened.
   emResetContext(ticket);
+  emResetThread();
   emLoadSimilar(id);
+  // The rest of the conversation, which used to be invisible unless the sender
+  // happened to quote it.
+  emLoadThread(ticket);
   // Any translation belongs to the message that was open before. Clear it
   // first, so nothing from the previous ticket can be reverted into this one.
   trResetEmailState(id);
