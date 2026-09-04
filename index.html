@@ -8192,7 +8192,7 @@ document.getElementById('emt-submit').addEventListener('click',async()=>{
 
 //  View switching
 function hidePrimaryViews(){stopKpiAutoRefresh();document.getElementById('main-board').style.display='none';document.getElementById('spam-view').classList.remove('active');document.getElementById('archive-view').classList.remove('active');document.getElementById('companies-view').style.display='none';document.getElementById('kpi-view').style.display='none';document.getElementById('insights-view').style.display='none';document.getElementById('projects-view').style.display='none';document.getElementById('qt-seize-view').style.display='none';document.getElementById('assignlog-view').style.display='none';document.getElementById('qt-detect-view').style.display='none';if(viewMode!=='board'){clearSelection();renderSelectionBar();}}
-function showBoardView(){viewMode='board';setBoardChromeVisible(true);hidePrimaryViews();document.getElementById('main-board').style.display='flex';setSideNavActive('board');saveLastWorkspaceSession('board');renderBoard();}
+function showBoardView(){viewMode='board';setBoardChromeVisible(true);hidePrimaryViews();setSideNavActive('board');saveLastWorkspaceSession('board');renderBoard();/* renderBoard() shows the flat board or the swimlanes, per boardGrouping */}
 function showSpamView(){viewMode='spam';setBoardChromeVisible(true);hidePrimaryViews();document.getElementById('spam-view').classList.add('active');setSideNavActive('spam');saveLastWorkspaceSession('spam');renderSpamView();}
 function showArchiveView(){viewMode='archive';setBoardChromeVisible(true);hidePrimaryViews();document.getElementById('archive-view').classList.add('active');setSideNavActive('archive');saveLastWorkspaceSession('archive');renderArchiveView();}
 function showDashboardView(){companiesViewType='report';viewMode='companies';setBoardChromeVisible(true);hidePrimaryViews();document.getElementById('companies-view').style.display='block';setSideNavActive('dashboard');saveLastWorkspaceSession('dashboard');renderCompaniesView();}
@@ -12735,14 +12735,29 @@ function renderBoard(){
 
   const laneBoard=document.getElementById('lane-board');
   const flatBoard=document.getElementById('main-board');
-  if(boardGrouping==='company'){
-    flatBoard.style.display='none';
-    laneBoard.style.display='block';
+  // renderBoard() redraws the board; it does not decide which view is on
+  // screen - hidePrimaryViews()/showBoardView() own that. It is called from
+  // other views on purpose, so the board is already correct when somebody
+  // returns to it: a restore from the Archive or the Spam Inbox, an action
+  // taken inside the email modal opened from one of those lists, a poll.
+  //
+  // Un-hiding the board from there is what broke "select a ticket, archive it,
+  // restore it, and now nothing selects". The restore redraws the archive list
+  // and then the board, which forced #main-board back to display:flex while
+  // #archive-view was still .active - they are siblings, so the board appeared
+  // below the archive list with viewMode still 'archive'. Clicking a card then
+  // did toggle the selection, but the renderActiveView() that follows redrew
+  // the ARCHIVE list, so the checkbox never filled in and the selection bar
+  // (hidden off-board) never came up. Selection looked dead while the board sat
+  // there looking live, and only a reload or a trip through the nav fixed it.
+  const showBoard=viewMode==='board';
+  const grouped=boardGrouping==='company';
+  flatBoard.style.display=showBoard&&!grouped?'flex':'none';
+  laneBoard.style.display=showBoard&&grouped?'block':'none';
+  if(grouped){
     renderLaneBoard(visible);
   }else{
-    laneBoard.style.display='none';
     laneBoard.innerHTML='';
-    flatBoard.style.display='flex';
     STAGES.forEach(col=>{
       const column=document.querySelector('.col-'+col);
       column.style.display=(activeStage!=='all'&&activeStage!==col)?'none':'';
