@@ -5814,8 +5814,14 @@ function projectRow(row, { includeInstructions = false } = {}) {
     accent: row.accent || 'slate',
     pinned: !!row.pinned,
     source: row.source || 'manual',
+    // Whether the project came from Claude at all - synced over the Compliance
+    // API, or pushed in by register_project, which writes createdBy 'mcp:'.
+    // The panel shows only these.
+    fromClaude: row.source === 'claude' || String(row.createdBy || '').startsWith('mcp:'),
     sourceUserEmail: row.sourceUserEmail || '',
     syncedAt: row.syncedAt || null,
+    runCount: Number(row.runCount || 0),
+    lastRunAt: row.lastRunAt || null,
     // Whether the project can actually be run yet. An empty instruction set is
     // the normal state for a freshly seeded project, not an error.
     ready: !!String(row.instructions || '').trim(),
@@ -5827,7 +5833,17 @@ function projectRow(row, { includeInstructions = false } = {}) {
 app.get('/api/projects', requireAuth, async (req, res) => {
   try {
     await ensureProjectTable();
-    const rows = await prisma.$queryRaw`SELECT * FROM "ClaudeProject" ORDER BY "pinned" DESC, "updatedAt" DESC`;
+    await ensureProjectRunTable();
+    // The card shows whether a project has ever produced anything, so the
+    // counts are joined here rather than fetched per card on open.
+    const rows = await prisma.$queryRaw`
+      SELECT p.*, COALESCE(r."n", 0)::int AS "runCount", r."last" AS "lastRunAt"
+      FROM "ClaudeProject" p
+      LEFT JOIN (
+        SELECT "projectId", count(*)::int AS "n", max("createdAt") AS "last"
+        FROM "ClaudeProjectRun" GROUP BY "projectId"
+      ) r ON r."projectId" = p."id"
+      ORDER BY p."pinned" DESC, p."updatedAt" DESC`;
     const isAdmin = isAdminRole(req.session.role);
     const list = (Array.isArray(rows) ? rows : []).map(r => projectRow(r, { includeInstructions: isAdmin }));
     const claudeTokens = await getClaudeConnectionForRequest(req);
@@ -6891,12 +6907,16 @@ async function mcpRegisterProject(apiUser, args) {
   const instructions = String(args?.instructions || '');
 
   await prisma.$executeRaw`
-    INSERT INTO "ClaudeProject" ("slug","name","description","scope","owner","instructions","inputs","accent","createdBy","updatedAt")
+    INSERT INTO "ClaudeProject" ("slug","name","description","scope","owner","instructions","inputs","accent","createdBy","updatedAt","source","syncedAt")
     VALUES (${slug}, ${name}, ${String(args?.description || '').slice(0, 600)}, ${scope}, ${String(args?.owner || '').slice(0, 80)},
-            ${instructions}, ${JSON.stringify(inputs)}::jsonb, ${String(args?.accent || 'slate')}, ${'mcp:' + (apiUser?.username || '')}, CURRENT_TIMESTAMP)
+            ${instructions}, ${JSON.stringify(inputs)}::jsonb, ${String(args?.accent || 'slate')}, ${'mcp:' + (apiUser?.username || '')}, CURRENT_TIMESTAMP,
+            'claude', CURRENT_TIMESTAMP)
     ON CONFLICT ("slug") DO UPDATE SET
       "name" = EXCLUDED."name", "description" = EXCLUDED."description", "scope" = EXCLUDED."scope",
       "owner" = EXCLUDED."owner", "inputs" = EXCLUDED."inputs", "accent" = EXCLUDED."accent",
+      -- Pushed over the connector IS from Claude. Without this the row landed
+      -- as 'manual', which is what the panel now filters out.
+      "source" = 'claude', "syncedAt" = CURRENT_TIMESTAMP,
       -- An empty instructions field means "leave what is there", so a partial
       -- re-register cannot wipe a project that was already set up properly.
       "instructions" = CASE WHEN ${instructions} = '' THEN "ClaudeProject"."instructions" ELSE ${instructions} END,

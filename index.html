@@ -4894,36 +4894,116 @@ th {
 
 
 /* ===== Projects ============================================================ */
-.pj-head { display:flex; align-items:flex-start; justify-content:space-between; gap:16px; flex-wrap:wrap; margin-bottom:14px; }
-.pj-title { font-family:Caladea,serif; font-size:26px; color:var(--text,#0f172a); }
-.pj-subtitle { font-size:11px; color:var(--muted,#64748b); margin-top:3px; }
+/* The panel is the catalogue and nothing else: no connect box, no scope tabs,
+   no create button. Projects arrive from Claude over the connector, so what
+   used to sit above the grid was describing a route the team does not use.
+   What is left is a title, a search box, and the projects. */
+.pj-head {
+  display:flex; align-items:flex-end; justify-content:space-between; gap:18px; flex-wrap:wrap;
+  margin:0 0 18px; padding-bottom:14px; border-bottom:1px solid var(--border,#e2e8f0);
+}
+.pj-title { font-family:Caladea,serif; font-size:27px; line-height:1.15; color:var(--text,#0f172a); letter-spacing:-.01em; }
+.pj-subtitle { display:flex; align-items:center; gap:7px; flex-wrap:wrap; font-size:11.5px; color:var(--muted,#64748b); margin-top:5px; }
+.pj-count {
+  font-size:10px; font-weight:800; letter-spacing:.04em; text-transform:uppercase;
+  background:var(--primary-soft,#eef2ff); color:var(--primary-dark,#4338ca);
+  border:1px solid var(--indigo-200,#c7d2fe); border-radius:999px; padding:2px 8px;
+}
 .pj-controls { display:flex; align-items:center; gap:9px; flex-wrap:wrap; }
-.pj-search { min-width:230px; }
+.pj-search { min-width:240px; }
 .pj-loading, .pj-empty { padding:40px 10px; text-align:center; color:var(--muted,#64748b); font-size:13px; }
 .pj-error-box { padding:14px; border-radius:10px; font-size:13px; background:var(--red-50,#fef2f2); border:1px solid var(--red-200,#fecaca); color:var(--red-700,#b91c1c); }
-.pj-connect-box { display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; margin:0 0 14px; padding:12px 14px; border:1px solid var(--border,#e2e8f0); border-radius:10px; background:var(--surface-soft,#f8fafc); font-size:12px; color:var(--text-soft,#334155); }
-.pj-connect-box strong { color:var(--text,#0f172a); }
 .pj-connect-actions { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
 .pj-secret { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:11px; }
 
-.pj-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(330px,1fr)); gap:12px; align-items:start; padding-bottom:30px; }
-.pj-card {
-  border:1px solid var(--border,#e2e8f0); border-radius:14px; background:var(--surface,#fff);
-  overflow:hidden; transition:box-shadow .15s ease, border-color .15s ease;
+/* Nothing on the board yet. This is the first screen the team sees, and the
+   one that has to teach the push route, so it gives the three steps rather
+   than one grey line of regret. */
+.pj-zero {
+  max-width:620px; margin:26px auto 40px; padding:30px 28px; text-align:center;
+  border:1px solid var(--border,#e2e8f0); border-radius:18px; background:var(--surface,#fff);
+  box-shadow:0 1px 3px rgba(15,23,42,.04);
 }
-.pj-card:hover { border-color:var(--border-strong,#cbd5e1); box-shadow:0 4px 14px rgba(15,23,42,.06); }
-.pj-card.open { grid-column:1 / -1; border-color:var(--indigo-400,#818cf8); box-shadow:0 8px 26px rgba(15,23,42,.10); }
-.pj-card-head { display:block; width:100%; text-align:left; border:0; background:transparent; cursor:pointer; padding:14px 16px; border-left:3px solid var(--pj-accent,#94a3b8); }
+.pj-zero-mark {
+  width:46px; height:46px; margin:0 auto 15px; border-radius:14px;
+  display:flex; align-items:center; justify-content:center; font-size:21px;
+  background:var(--primary-soft,#eef2ff); border:1px solid var(--indigo-200,#c7d2fe);
+}
+.pj-zero h3 { margin:0 0 7px; font-family:Caladea,serif; font-size:19px; font-weight:400; color:var(--text,#0f172a); }
+.pj-zero > p { margin:0 auto 20px; max-width:440px; font-size:12.5px; line-height:1.6; color:var(--muted,#64748b); }
+.pj-zero-steps { margin:0 0 20px; padding:0; list-style:none; text-align:left; counter-reset:pjstep; }
+.pj-zero-steps li {
+  position:relative; counter-increment:pjstep; padding:9px 0 9px 34px;
+  font-size:12.5px; line-height:1.55; color:var(--text-soft,#334155);
+  border-top:1px solid var(--border,#e2e8f0);
+}
+.pj-zero-steps li:first-child { border-top:0; }
+.pj-zero-steps li::before {
+  content:counter(pjstep); position:absolute; left:0; top:9px;
+  width:21px; height:21px; border-radius:50%; display:flex; align-items:center; justify-content:center;
+  font-size:10px; font-weight:800; background:var(--surface-muted,#f1f5f9);
+  color:var(--muted,#64748b); border:1px solid var(--border,#e2e8f0);
+}
+.pj-zero-steps b { color:var(--text,#0f172a); font-weight:650; }
+.pj-zero-prompt {
+  display:flex; align-items:center; gap:9px; text-align:left;
+  background:var(--surface-soft,#f8fafc); border:1px solid var(--border,#e2e8f0);
+  border-radius:11px; padding:9px 9px 9px 12px;
+}
+.pj-zero-prompt code {
+  flex:1; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:11px;
+  line-height:1.5; color:var(--text-soft,#334155); background:none; padding:0; word-break:break-word;
+}
+
+.pj-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(340px,1fr)); gap:14px; align-items:start; padding-bottom:34px; }
+.pj-card {
+  position:relative; border:1px solid var(--border,#e2e8f0); border-radius:15px; background:var(--surface,#fff);
+  overflow:hidden; transition:box-shadow .16s ease, border-color .16s ease, transform .16s ease;
+}
+/* The accent is the project's own colour, drawn as a hairline along the top
+   rather than a slab down the side - it reads as a tint, not a warning. */
+.pj-card::before {
+  content:""; position:absolute; inset:0 0 auto 0; height:3px;
+  background:linear-gradient(90deg, var(--pj-accent,#94a3b8), transparent 72%);
+  opacity:.9;
+}
+.pj-card:hover { border-color:var(--border-strong,#cbd5e1); box-shadow:0 6px 20px rgba(15,23,42,.07); transform:translateY(-1px); }
+.pj-card.open { grid-column:1 / -1; border-color:var(--pj-accent,#818cf8); box-shadow:0 10px 30px rgba(15,23,42,.11); transform:none; }
+.pj-card-head {
+  display:block; width:100%; text-align:left; border:0; background:transparent;
+  cursor:pointer; padding:16px 17px 14px; font:inherit; color:inherit;
+}
+.pj-card-head:hover { background:var(--surface-soft,#f8fafc); }
+.pj-card-head:focus-visible { outline:2px solid var(--primary,#4f46e5); outline-offset:-2px; }
 .pj-card-title { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
-.pj-name { font-size:14px; font-weight:700; color:var(--text,#0f172a); }
+.pj-name { font-size:14.5px; font-weight:700; color:var(--text,#0f172a); letter-spacing:-.01em; }
+.pj-chev { margin-left:auto; font-size:10px; color:var(--muted-light,#94a3b8); transition:transform .16s ease; }
+.pj-card.open .pj-chev { transform:rotate(90deg); }
 .pj-pin, .pj-nodraft {
   font-size:9px; font-weight:800; text-transform:uppercase; letter-spacing:.05em;
   padding:2px 7px; border-radius:999px;
-  background:var(--surface-muted,#f1f5f9); color:var(--muted,#64748b);
+  background:var(--surface-muted,#f1f5f9); color:var(--muted,#64748b); border:1px solid var(--border,#e2e8f0);
 }
-.pj-nodraft { background:var(--amber-50,#fffbeb); color:var(--amber-800,#92400e); border:1px solid var(--amber-300,#fcd34d); }
-.pj-desc { font-size:12px; color:var(--text-soft,#334155); margin-top:5px; line-height:1.5; }
-.pj-meta { font-size:10.5px; color:var(--muted,#64748b); margin-top:7px; }
+.pj-nodraft { background:var(--amber-50,#fffbeb); color:var(--amber-800,#92400e); border-color:var(--amber-300,#fcd34d); }
+.pj-desc { display:block; font-size:12px; color:var(--text-soft,#334155); margin-top:6px; line-height:1.55; }
+/* One line of provenance per card, reading left to right: who owns it, what it
+   asks for, and whether it has produced anything yet. */
+.pj-foot { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-top:11px; font-size:10.5px; color:var(--muted,#64748b); }
+.pj-foot-dot { width:3px; height:3px; border-radius:50%; background:var(--muted-light,#94a3b8); flex:none; }
+.pj-foot-runs {
+  margin-left:auto; font-weight:700; color:var(--text-soft,#334155);
+  background:var(--surface-muted,#f1f5f9); border:1px solid var(--border,#e2e8f0);
+  border-radius:999px; padding:2px 8px; white-space:nowrap;
+}
+.pj-foot-none { margin-left:auto; color:var(--muted-light,#94a3b8); white-space:nowrap; }
+
+.pj-accent-indigo { --pj-accent:var(--indigo-600,#4f46e5); }
+.pj-accent-teal { --pj-accent:#0d9488; }
+.pj-accent-amber { --pj-accent:var(--amber-500,#f59e0b); }
+.pj-accent-violet { --pj-accent:#7c3aed; }
+.pj-accent-rose { --pj-accent:#e11d48; }
+.pj-accent-emerald { --pj-accent:#059669; }
+.pj-accent-slate { --pj-accent:#64748b; }
 
 .pj-accent-indigo { --pj-accent:var(--indigo-600,#4f46e5); }
 .pj-accent-teal { --pj-accent:#0d9488; }
@@ -8979,7 +9059,6 @@ document.getElementById('insights-view-btn')?.addEventListener('click',()=>{if(v
    =========================================================================== */
 
 let projectsState = { state: 'idle', rows: [], canEdit: false, configured: false, model: '', claude: { connected: false } };
-let projectsTab = 'all';
 let projectsQuery = '';
 let projectOpen = null;      // slug of the project whose form is showing
 let projectValues = {};      // slug -> { fieldKey: value }
@@ -9135,9 +9214,16 @@ async function loadProjects(){
   renderProjectsView();
 }
 
+// Only what Claude put here. A project registered over the connector or synced
+// from a Claude account is the catalogue; anything else is a leftover, and the
+// panel no longer offers a way to make one.
+function projectFromClaude(p){
+  return !!p.fromClaude||p.source==='claude';
+}
+
 function projectMatches(p){
+  if(!projectFromClaude(p))return false;
   const q=projectsQuery.trim().toLowerCase();
-  if(projectsTab!=='all'&&p.scope!==projectsTab)return false;
   if(!q)return true;
   return [p.name,p.description,p.owner,...(p.inputs||[]).map(f=>f.label)]
     .some(v=>String(v||'').toLowerCase().includes(q));
@@ -9261,6 +9347,27 @@ async function loadProjectRuns(slug){
   renderProjectsView();
 }
 
+/* The catalogue is empty. Since the only way to fill it is from Claude's side,
+   this screen is the instructions for doing that - including the sentence to
+   paste, because that is the part people get wrong. */
+function projectsZeroHtml(){
+  const prompt='Register this project on the support board, then run it and post the result there.';
+  return `<div class="pj-zero">
+    <div class="pj-zero-mark">&#9671;</div>
+    <h3>No projects yet</h3>
+    <p>The board does not fetch projects &mdash; Claude pushes them. Open a project in Claude with the support connector enabled and ask it to register itself.</p>
+    <ol class="pj-zero-steps">
+      <li><b>Open the project</b> on claude.ai, with the support connector switched on for that conversation.</li>
+      <li><b>Ask it to register itself.</b> It sends its own instructions and the inputs it asks for, and the board turns those into a form.</li>
+      <li><b>Ask it to post results here.</b> They arrive rendered, and that route needs no API key on this deployment.</li>
+    </ol>
+    <div class="pj-zero-prompt">
+      <code id="pj-zero-prompt">${esc(prompt)}</code>
+      <button class="btn-out pj-copy" type="button" id="pj-zero-copy">Copy</button>
+    </div>
+  </div>`;
+}
+
 function projectCardHtml(p){
   const open=projectOpen===p.slug;
   const fields=p.inputs||[];
@@ -9270,16 +9377,25 @@ function projectCardHtml(p){
   const runBlocked=!p.ready
     ? 'This project has no instructions saved, so there is nothing to run.'
     : (!projectsState.configured ? 'Running from the board needs ANTHROPIC_API_KEY on this deployment. Until it is set, run this project inside Claude.' : '');
+  // Everything on the card is now a span: this is the inside of a button, and
+  // a div in there was never valid markup.
+  const foot=[
+    p.owner?`<span>${esc(p.owner)}</span>`:'',
+    fields.length?`<span>${fields.length} input${fields.length===1?'':'s'}</span>`:'<span>no inputs</span>'
+  ].filter(Boolean).join('<span class="pj-foot-dot"></span>');
+  const runs=p.runCount
+    ? `<span class="pj-foot-runs" title="${p.lastRunAt?'Last result '+esc(fmtDate(p.lastRunAt)):''}">${p.runCount} result${p.runCount===1?'':'s'}</span>`
+    : '<span class="pj-foot-none">No results yet</span>';
   return `<div class="pj-card pj-accent-${esc(p.accent||'slate')}${open?' open':''}">
     <button class="pj-card-head" data-pj-open="${esc(p.slug)}">
-      <div class="pj-card-title">
+      <span class="pj-card-title">
         <span class="pj-name">${esc(p.name)}</span>
         ${p.pinned?'<span class="pj-pin" title="Pinned">Pinned</span>':''}
-        ${p.source==='claude'?'<span class="pj-pin" title="Synced from Claude">Claude</span>':''}
         ${p.ready?'':'<span class="pj-nodraft" title="No instructions saved yet">Needs setup</span>'}
-      </div>
-      <div class="pj-desc">${esc(p.description||'')}</div>
-      <div class="pj-meta">${esc(p.owner?('by '+p.owner):'')}${fields.length?` · ${fields.length} input${fields.length===1?'':'s'}`:''}${p.syncedAt?' · synced '+fmtDate(p.syncedAt):''}</div>
+        <span class="pj-chev">&#9654;</span>
+      </span>
+      ${p.description?`<span class="pj-desc">${esc(p.description)}</span>`:''}
+      <span class="pj-foot">${foot}${runs}</span>
     </button>
     ${open?`<div class="pj-body">
       ${p.ready?'':`<div class="pj-warn">This project cannot run until its instructions are saved.${projectsState.canEdit?' Use <strong>Edit</strong> below.':''}</div>`}
@@ -9573,42 +9689,50 @@ function renderProjectsView(){
   if(!host)return;
   const s=projectsState;
   const claude=s.claude||{connected:false};
-  const claudeStatus=claude.connected
-    ? `<div><strong>Claude connected</strong>${claude.userEmail?` for ${esc(claude.userEmail)}`:''}${claude.lastSyncAt?` · last sync ${esc(fmtDate(claude.lastSyncAt))}`:''}${claude.lastProjectCount?` · ${claude.lastProjectCount} imported`:''}</div>`
-    : '<div><strong>Claude not connected</strong> · a Compliance key imports your claude.ai Projects. Without one, open a project in Claude with the support connector on and ask it to register itself here.</div>';
-  const claudeControls=claude.connected
-    ? `<div class="pj-connect-actions"><button class="btn-primary" id="pj-claude-sync">Sync Claude</button><button class="btn-out" id="pj-claude-connect">Change key</button><button class="btn-out" id="pj-claude-disconnect">Disconnect</button></div>`
-    : `<div class="pj-connect-actions"><button class="btn-primary" id="pj-claude-connect">Connect Claude</button></div>`;
-
-  const tabs=[['all','All'],['mine','Your projects'],['org','Organization'],['shared','Shared with you']];
+  const all=s.rows||[];
+  const mine=all.filter(projectFromClaude);
+  const rows=all.filter(projectMatches);
+  // The Compliance route only works for an eligible org, so its controls
+  // appear only once a key is actually stored - the panel stays clean for
+  // everyone who pushes projects over the connector instead. Disconnect has to
+  // come with it: a key that is rejected on every sync would otherwise be
+  // stored with nothing on screen able to clear it.
+  const syncBtn=claude.connected
+    ? '<button class="btn-out" id="pj-claude-sync">Sync from Claude</button>'
+      +'<button class="btn-out" id="pj-claude-disconnect">Disconnect</button>'
+    : '';
+  const bits=[];
+  if(mine.length)bits.push(`<span class="pj-count">${mine.length} project${mine.length===1?'':'s'}</span>`);
+  bits.push('<span>Pushed here from Claude</span>');
+  if(s.model)bits.push(`<span>&middot; ${esc(s.model)}</span>`);
   const header=`<div class="pj-head">
       <div><div class="pj-title">Projects</div>
-        <div class="pj-subtitle">Your Claude projects, run from the board${s.model?` · ${esc(s.model)}`:''}</div></div>
+        <div class="pj-subtitle">${bits.join('')}</div></div>
       <div class="pj-controls">
         <input class="filter-sel pj-search" id="pj-search" type="text" placeholder="Search projects…" value="${esc(projectsQuery)}" autocomplete="off">
-        ${s.canEdit?'<button class="btn-primary" id="pj-new">New project</button>':''}
+        ${syncBtn}
         <button class="btn-out" id="pj-refresh">Refresh</button>
       </div>
-    </div>
-    <div class="pj-connect-box">${claudeStatus}${claudeControls}</div>
-    <div class="ins-tabs">${tabs.map(([k,l])=>`<button class="ins-tab${projectsTab===k?' active':''}" data-pj-tab="${k}">${esc(l)}</button>`).join('')}</div>`;
+    </div>`;
 
   if(s.state==='loading'||s.state==='idle'){host.innerHTML=header+'<div class="pj-loading"><span class="spinner"></span> Loading projects…</div>';return;}
   if(s.state==='error'){host.innerHTML=header+`<div class="pj-error-box">Could not load projects: ${esc(s.message||'')}</div>`;return;}
 
-  const rows=s.rows.filter(projectMatches);
-  const grid=rows.length
+  const body=rows.length
     ? `<div class="pj-grid">${rows.map(projectCardHtml).join('')}</div>`
-    : `<div class="pj-empty">${projectsQuery?'Nothing matches that search.':'No projects here yet. Open a project in Claude with the support connector on and ask it to register itself on the board.'}</div>`;
+    : (projectsQuery
+      ? '<div class="pj-empty">Nothing matches that search.</div>'
+      : projectsZeroHtml());
 
-  host.innerHTML=header+grid;
+  host.innerHTML=header+body;
 
-  host.querySelectorAll('[data-pj-tab]').forEach(b=>b.addEventListener('click',()=>{projectsTab=b.dataset.pjTab;renderProjectsView();}));
   host.querySelector('#pj-refresh')?.addEventListener('click',loadProjects);
-  host.querySelector('#pj-claude-connect')?.addEventListener('click',openClaudeConnectModal);
   host.querySelector('#pj-claude-sync')?.addEventListener('click',syncClaudeProjects);
   host.querySelector('#pj-claude-disconnect')?.addEventListener('click',disconnectClaude);
-  host.querySelector('#pj-new')?.addEventListener('click',()=>openProjectEditor(null));
+  host.querySelector('#pj-zero-copy')?.addEventListener('click',()=>{
+    const text=host.querySelector('#pj-zero-prompt')?.textContent||'';
+    navigator.clipboard?.writeText(text).then(()=>showToast('Copied','ok'),()=>showToast('Could not copy'));
+  });
   bindProjectCardHandlers(host);
   // Re-rendering the panel on every keystroke would drop focus, so the search
   // box only redraws the grid beneath it.
