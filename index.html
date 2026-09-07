@@ -4949,7 +4949,6 @@ th {
   border:1px solid var(--amber-300,#fcd34d); background:var(--amber-50,#fffbeb);
   color:var(--amber-800,#92400e); border-radius:9px; padding:9px 11px; font-size:11.5px; line-height:1.5; margin:12px 0;
 }
-.pj-warn-top { margin:0 0 14px; max-width:760px; }
 
 .pj-result { margin-top:14px; border-radius:10px; font-size:12.5px; line-height:1.6; }
 .pj-running { padding:12px; color:var(--muted,#64748b); background:var(--surface-soft,#f8fafc); border:1px solid var(--border,#e2e8f0); }
@@ -4987,6 +4986,109 @@ th {
 }
 .pj-followup-input:focus { outline:none; border-color:var(--indigo-600,#4f46e5); }
 .pj-followup-actions { display:flex; gap:8px; flex-wrap:wrap; }
+
+/* ---------------------------------------------------------------------------
+   A rendered answer.
+   Project output is markdown, and it used to be dropped into a pre-wrap box,
+   so a table arrived as pipes and a heading as a hash. Everything below styles
+   the parsed form of it. Colours come from the same variables as the rest of
+   the board, so the dark theme needs no second set of rules.
+   --------------------------------------------------------------------------- */
+.pj-md { padding:13px 15px; max-height:560px; overflow:auto; color:var(--text,#0f172a); font-size:12.5px; line-height:1.68; }
+.pj-md > *:first-child { margin-top:0; }
+.pj-md > *:last-child { margin-bottom:0; }
+.pj-p { margin:0 0 10px; word-break:break-word; }
+.pj-h { margin:17px 0 8px; line-height:1.35; font-weight:700; color:var(--text,#0f172a); letter-spacing:-.01em; }
+.pj-h1 { font-size:16px; }
+.pj-h2 { font-size:14.5px; }
+.pj-h3 { font-size:13px; }
+.pj-h4, .pj-h5, .pj-h6 { font-size:12.5px; color:var(--text-soft,#334155); }
+/* The first heading of an answer should not push itself off the top edge. */
+.pj-md > .pj-h:first-child { margin-top:2px; }
+.pj-h1, .pj-h2 { padding-bottom:5px; border-bottom:1px solid var(--border,#e2e8f0); }
+.pj-list { margin:0 0 11px; padding-left:20px; }
+.pj-list li { margin:3px 0; word-break:break-word; }
+.pj-list li::marker { color:var(--pj-accent,#64748b); font-weight:600; }
+.pj-quote {
+  margin:0 0 11px; padding:7px 12px; border-left:3px solid var(--pj-accent,#64748b);
+  background:var(--surface-muted,#f1f5f9); border-radius:0 8px 8px 0; color:var(--text-soft,#334155);
+}
+.pj-hr { border:0; border-top:1px solid var(--border,#e2e8f0); margin:15px 0; }
+.pj-md a { color:var(--primary,#4f46e5); text-decoration:underline; text-underline-offset:2px; word-break:break-all; }
+.pj-code-in {
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:11px;
+  background:var(--surface-muted,#f1f5f9); border:1px solid var(--border,#e2e8f0);
+  border-radius:5px; padding:1px 5px; word-break:break-word;
+}
+.pj-codeblock { margin:0 0 12px; border:1px solid var(--border,#e2e8f0); border-radius:9px; overflow:hidden; background:var(--surface,#fff); }
+.pj-codeblock-head {
+  display:flex; align-items:center; gap:8px; padding:5px 10px;
+  background:var(--surface-muted,#f1f5f9); border-bottom:1px solid var(--border,#e2e8f0);
+  font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:.04em; color:var(--muted,#64748b);
+}
+.pj-codeblock-head span { flex:1; }
+.pj-codeblock pre { margin:0; padding:11px 12px; overflow-x:auto; background:transparent; }
+.pj-codeblock code {
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:11px; line-height:1.6;
+  color:var(--text,#0f172a); white-space:pre; background:none; border:0; padding:0;
+}
+.pj-tablewrap { margin:0 0 12px; overflow-x:auto; border:1px solid var(--border,#e2e8f0); border-radius:9px; }
+.pj-table { border-collapse:collapse; width:100%; font-size:11.5px; }
+.pj-table th, .pj-table td { padding:7px 10px; text-align:left; border-bottom:1px solid var(--border,#e2e8f0); vertical-align:top; }
+.pj-table th { background:var(--surface-muted,#f1f5f9); font-weight:700; color:var(--text,#0f172a); white-space:nowrap; }
+.pj-table tr:last-child td { border-bottom:0; }
+.pj-table tbody tr:hover { background:var(--surface-soft,#f8fafc); }
+
+/* Working. A bar that moves, because these runs take a while and a static
+   line reads as a hung request. */
+.pj-progress { display:flex; align-items:center; gap:10px; padding:11px 13px; }
+.pj-progress-text { font-size:11.5px; color:var(--muted,#64748b); }
+.pj-progress-text strong { color:var(--text,#0f172a); font-weight:600; }
+.pj-progress-bar { flex:1; height:3px; border-radius:3px; background:var(--surface-muted,#f1f5f9); overflow:hidden; position:relative; }
+.pj-progress-bar::after {
+  content:''; position:absolute; inset:0 auto 0 0; width:35%; border-radius:3px;
+  background:var(--pj-accent,#4f46e5); animation:pj-slide 1.25s ease-in-out infinite;
+}
+@keyframes pj-slide { 0% { left:-35%; } 100% { left:100%; } }
+@media (prefers-reduced-motion: reduce) { .pj-progress-bar::after { animation:none; left:0; width:100%; opacity:.45; } }
+
+/* Stored results: what the board ran, and what Claude ran and handed over. */
+.pj-runs { margin-top:16px; border-top:1px solid var(--border,#e2e8f0); padding-top:13px; }
+.pj-runs-head { display:flex; align-items:center; gap:9px; margin-bottom:9px; }
+.pj-runs-title { font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.05em; color:var(--muted,#64748b); }
+.pj-runs-count { font-size:10.5px; color:var(--muted-light,#94a3b8); flex:1; }
+.pj-run { border:1px solid var(--border,#e2e8f0); border-radius:10px; margin-bottom:8px; overflow:hidden; background:var(--surface,#fff); }
+.pj-run.open { border-color:var(--pj-accent,#cbd5e1); box-shadow:0 1px 3px rgba(15,23,42,.06); }
+.pj-run-head {
+  display:flex; align-items:center; gap:9px; width:100%; padding:9px 12px;
+  background:none; border:0; cursor:pointer; text-align:left; font:inherit; color:inherit;
+}
+.pj-run-head:hover { background:var(--surface-soft,#f8fafc); }
+.pj-run-label { font-size:12px; font-weight:600; color:var(--text,#0f172a); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.pj-run-when { font-size:10.5px; color:var(--muted,#64748b); margin-left:auto; white-space:nowrap; font-variant-numeric:tabular-nums; }
+.pj-run-chev { font-size:9px; color:var(--muted-light,#94a3b8); transition:transform .15s ease; }
+.pj-run.open .pj-run-chev { transform:rotate(90deg); }
+.pj-badge {
+  font-size:9.5px; font-weight:700; text-transform:uppercase; letter-spacing:.04em;
+  border-radius:999px; padding:2px 7px; white-space:nowrap; border:1px solid transparent;
+}
+.pj-badge-claude { background:var(--primary-soft,#eef2ff); color:var(--primary-dark,#4338ca); border-color:var(--indigo-200,#c7d2fe); }
+.pj-badge-board { background:var(--surface-muted,#f1f5f9); color:var(--muted,#64748b); border-color:var(--border,#e2e8f0); }
+.pj-run-panel { border-top:1px solid var(--border,#e2e8f0); }
+.pj-run-meta {
+  display:flex; align-items:center; gap:8px; flex-wrap:wrap; padding:8px 12px;
+  background:var(--surface-soft,#f8fafc); border-bottom:1px solid var(--border,#e2e8f0);
+  font-size:10.5px; color:var(--muted,#64748b);
+}
+.pj-run-meta span { flex:1; }
+.pj-chip {
+  display:inline-flex; gap:4px; max-width:100%; align-items:baseline;
+  background:var(--surface-muted,#f1f5f9); border:1px solid var(--border,#e2e8f0);
+  border-radius:6px; padding:2px 7px; font-size:10.5px; color:var(--text-soft,#334155);
+}
+.pj-chip b { font-weight:600; color:var(--muted,#64748b); }
+.pj-chip i { font-style:normal; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:230px; }
+.pj-runs-empty { font-size:11px; color:var(--muted,#64748b); line-height:1.5; }
 
 
 /* A break that is on cooldown stays visible and greyed - hiding it would just
@@ -5445,6 +5547,7 @@ th {
   <div class="modal-head"><h2>Connect Claude</h2><button class="modal-close-x" data-close="claude-connect-modal"></button></div>
   <div class="modal-body-scroll" style="padding:14px 18px;">
     <p class="pj-help" style="margin-top:0;">Use a Claude Compliance Access Key with <code>read:compliance_user_data</code>. The board imports matching claude.ai Projects into QT Tools for this signed-in user.</p>
+    <p class="pj-help">No Compliance key? You do not need one. Open the project on claude.ai with the support connector enabled and ask it to register itself on the board &mdash; it passes its own instructions and inputs over, one project per conversation.</p>
     <label class="pj-field"><span>Claude account email <em>(optional filter)</em></span><input class="form-input" id="claude-connect-email" type="email" autocomplete="email"></label>
     <label class="pj-field"><span>Compliance Access Key</span><input class="form-input pj-secret" id="claude-connect-credential" type="password" autocomplete="off" spellcheck="false" placeholder="sk-ant-api01-..."></label>
     <label class="pj-field"><span>Authentication</span><select class="form-input" id="claude-connect-auth"><option value="auto">Auto</option><option value="api_key">API key header</option><option value="bearer">Bearer token</option></select></label>
@@ -8886,7 +8989,126 @@ let projectValues = {};      // slug -> { fieldKey: value }
 // prompt on every turn. The transcript lives here rather than in Postgres -
 // it is a working session, not a record the board owes anyone.
 let projectThread = {};
+// slug -> { state, rows } for the stored results of a project: what the board
+// ran itself, and what Claude ran on its side and posted over the connector.
+// Loaded when a card is opened rather than with the list, so the panel does
+// not carry every project's history it may never show.
+let projectRuns = {};
+let projectRunOpen = {};     // "slug:runId" -> true for an expanded result
 let projectEditorOpen = false;
+
+/* ---------------------------------------------------------------------------
+   Markdown, rendered.
+   Project answers are markdown and were being shown as plain text, so a table
+   arrived as pipes and a heading as a hash. This is a deliberately small
+   subset - headings, lists, tables, quotes, rules, fenced and inline code,
+   bold, italic, strike, links - and it is built to be safe rather than
+   complete: the text is escaped ONCE, up front, and every rule after that
+   works on escaped text and emits only its own tags. Nothing here puts
+   caller-supplied characters back into markup unescaped, which is why no
+   sanitiser is needed and no library is loaded.
+   --------------------------------------------------------------------------- */
+function mdInline(s){
+  return String(s)
+    // Inline code first: whatever is inside it must not then be read as bold.
+    .replace(/`([^`\n]+)`/g,(m,c)=>'<code class="pj-code-in">'+c+'</code>')
+    .replace(/\*\*([^*\n]+)\*\*/g,'<strong>$1</strong>')
+    .replace(/(^|[^*\w])\*([^*\n]+)\*(?!\*)/g,'$1<em>$2</em>')
+    .replace(/~~([^~\n]+)~~/g,'<del>$1</del>')
+    // Only http(s). A javascript: or data: href is not a link we will render.
+    .replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g,
+      (m,label,href)=>'<a href="'+href+'" target="_blank" rel="noopener noreferrer">'+label+'</a>');
+}
+
+function mdToHtml(raw){
+  const lines=esc(String(raw||'')).split(/\r?\n/);
+  const FENCE=/^\s*```+\s*([A-Za-z0-9_+#.-]*)\s*$/;
+  const FENCE_END=/^\s*```+\s*$/;
+  const BULLET=/^\s*([-*+]|\d+[.)])\s+/;
+  const ROW=/^\s*\|.*\|\s*$/;
+  const RULE=/^\s*([-*_])(\s*\1){2,}\s*$/;
+  const QUOTE=/^\s*&gt;\s?/;
+  // A line that opens a block of its own, so a paragraph knows where to stop.
+  const opensBlock=l=>/^\s*(#{1,6}\s|```|&gt;|[-*+]\s|\d+[.)]\s|\|)/.test(l)||RULE.test(l);
+  const out=[];
+  let i=0;
+  while(i<lines.length){
+    const line=lines[i];
+
+    const fence=line.match(FENCE);
+    if(fence){
+      const lang=fence[1]||'';
+      const buf=[];
+      i++;
+      while(i<lines.length&&!FENCE_END.test(lines[i])){buf.push(lines[i]);i++;}
+      i++;
+      out.push('<div class="pj-codeblock"><div class="pj-codeblock-head"><span>'+(esc(lang)||'code')+'</span>'
+        +'<button class="btn-out pj-copy pj-copy-code" type="button">Copy</button></div>'
+        +'<pre><code>'+buf.join('\n')+'</code></pre></div>');
+      continue;
+    }
+
+    // A table needs its separator row to be a table at all, which is what
+    // keeps an ordinary sentence containing a pipe out of one.
+    if(ROW.test(line)&&i+1<lines.length&&/^\s*\|[\s:|-]+\|\s*$/.test(lines[i+1])){
+      const cells=r=>r.trim().replace(/^\|/,'').replace(/\|$/,'').split('|').map(c=>c.trim());
+      const head=cells(line);
+      i+=2;
+      const body=[];
+      while(i<lines.length&&ROW.test(lines[i])){body.push(cells(lines[i]));i++;}
+      out.push('<div class="pj-tablewrap"><table class="pj-table"><thead><tr>'
+        +head.map(h=>'<th>'+mdInline(h)+'</th>').join('')
+        +'</tr></thead><tbody>'
+        +body.map(r=>'<tr>'+r.map(c=>'<td>'+mdInline(c)+'</td>').join('')+'</tr>').join('')
+        +'</tbody></table></div>');
+      continue;
+    }
+
+    const head=line.match(/^\s*(#{1,6})\s+(.*)$/);
+    if(head){
+      const lvl=head[1].length;
+      out.push('<h'+lvl+' class="pj-h pj-h'+lvl+'">'+mdInline(head[2])+'</h'+lvl+'>');
+      i++;continue;
+    }
+
+    if(RULE.test(line)){out.push('<hr class="pj-hr">');i++;continue;}
+
+    if(QUOTE.test(line)){
+      const buf=[];
+      while(i<lines.length&&QUOTE.test(lines[i])){buf.push(lines[i].replace(QUOTE,''));i++;}
+      out.push('<blockquote class="pj-quote">'+buf.map(b=>mdInline(b)).join('<br>')+'</blockquote>');
+      continue;
+    }
+
+    if(BULLET.test(line)){
+      const ordered=/^\s*\d+[.)]\s+/.test(line);
+      const items=[];
+      // Same kind of bullet only: a numbered list directly under a dashed one
+      // is a second list, and merging them would renumber it.
+      while(i<lines.length&&BULLET.test(lines[i])&&/^\s*\d+[.)]\s+/.test(lines[i])===ordered){
+        let item=lines[i].replace(BULLET,'');
+        i++;
+        // An indented continuation belongs to the bullet above it, not to a
+        // paragraph of its own.
+        while(i<lines.length&&/^\s{2,}\S/.test(lines[i])&&!BULLET.test(lines[i])){
+          item+=' '+lines[i].trim();i++;
+        }
+        items.push(item);
+      }
+      const tag=ordered?'ol':'ul';
+      out.push('<'+tag+' class="pj-list">'+items.map(it=>'<li>'+mdInline(it)+'</li>').join('')+'</'+tag+'>');
+      continue;
+    }
+
+    if(!line.trim()){i++;continue;}
+
+    const buf=[];
+    while(i<lines.length&&lines[i].trim()&&!opensBlock(lines[i])){buf.push(lines[i]);i++;}
+    if(buf.length)out.push('<p class="pj-p">'+buf.map(b=>mdInline(b)).join('<br>')+'</p>');
+    else i++;
+  }
+  return out.join('')||'<p class="pj-p">(no output)</p>';
+}
 
 function showProjectsView(){
   viewMode='projects';
@@ -8951,10 +9173,14 @@ function projectThreadHtml(slug){
     return `<div class="pj-turn pj-turn-claude">
       <div class="pj-turn-who"><strong>${i===0?'Result':'Claude'}</strong><span>${esc(meta)}</span>
         <button class="btn-out pj-copy" data-pj-copy="${esc(slug)}" data-pj-turn="${i}">Copy</button></div>
-      <div class="pj-turn-body">${esc(turn.content)}</div>
+      <div class="pj-md">${mdToHtml(turn.content)}</div>
     </div>`;
   });
-  if(t.running)parts.push('<div class="pj-result pj-running"><span class="spinner"></span> Working… this can take a minute on a long job.</div>');
+  if(t.running)parts.push(`<div class="pj-result pj-running pj-progress">
+    <span class="spinner"></span>
+    <span class="pj-progress-text"><strong>Working…</strong> a long job can take a minute.</span>
+    <span class="pj-progress-bar"></span>
+  </div>`);
   if(t.error)parts.push(`<div class="pj-result pj-error">${esc(t.error)}</div>`);
   // Nothing to follow up on until the project has answered once.
   if(turns.length&&!t.running){
@@ -8969,9 +9195,81 @@ function projectThreadHtml(slug){
   return parts.length?`<div class="pj-thread">${parts.join('')}</div>`:'';
 }
 
+/* The stored results of one project: what the board ran, and what Claude ran
+   on its side and posted over the connector. Newest first, newest expanded.
+   This is the half of the panel that works with no ANTHROPIC_API_KEY - the
+   board renders an answer it did not have to pay for. */
+function projectRunsHtml(slug){
+  const p=projectsState.rows.find(x=>x.slug===slug);
+  const state=projectRuns[slug];
+  if(!p||!state)return '';
+  if(state.state==='loading')return `<div class="pj-runs"><div class="pj-runs-head"><span class="pj-runs-title">Results</span></div>
+    <div class="pj-runs-empty"><span class="spinner"></span> Loading results…</div></div>`;
+  if(state.state==='error')return `<div class="pj-runs"><div class="pj-runs-head"><span class="pj-runs-title">Results</span></div>
+    <div class="pj-runs-empty">Could not load results: ${esc(state.message||'')}</div></div>`;
+  const rows=state.rows||[];
+  const body=rows.length?rows.map((run,idx)=>{
+    const key=slug+':'+run.id;
+    // The newest result is the one someone opened the card to read, so it is
+    // expanded unless they have since collapsed it themselves.
+    const open=projectRunOpen[key]!==undefined?projectRunOpen[key]:idx===0;
+    const badge=run.source==='claude'
+      ?'<span class="pj-badge pj-badge-claude">From Claude</span>'
+      :'<span class="pj-badge pj-badge-board">Ran here</span>';
+    const meta=[
+      run.model?esc(run.model):'',
+      run.ms?`${(run.ms/1000).toFixed(1)}s`:'',
+      run.usage?.outputTokens?`${run.usage.outputTokens} output tokens`:'',
+      run.createdBy?`by ${esc(run.createdBy)}`:''
+    ].filter(Boolean).join(' · ');
+    const chips=(run.inputs||[]).map(f=>`<span class="pj-chip"><b>${esc(f.label)}</b><i>${esc(f.value)}</i></span>`).join('');
+    return `<div class="pj-run${open?' open':''}">
+      <button class="pj-run-head" type="button" data-pj-run-toggle="${esc(key)}">
+        <span class="pj-run-chev">&#9654;</span>
+        ${badge}
+        <span class="pj-run-label">${esc(run.title||'Result')}</span>
+        <span class="pj-run-when">${esc(fmtDate(run.createdAt))}</span>
+      </button>
+      ${open?`<div class="pj-run-panel">
+        <div class="pj-run-meta">${chips}<span>${meta}</span>
+          <button class="btn-out pj-copy" type="button" data-pj-run-copy="${esc(key)}">Copy</button></div>
+        <div class="pj-md">${mdToHtml(run.output)}</div>
+      </div>`:''}
+    </div>`;
+  }).join(''):`<div class="pj-runs-empty">No results kept yet. Run it here, or run the project in Claude and ask it to post the result to the board &mdash; that route needs no API key on this deployment.</div>`;
+  return `<div class="pj-runs">
+    <div class="pj-runs-head"><span class="pj-runs-title">Results</span>
+      <span class="pj-runs-count">${rows.length?`${rows.length} kept`:''}</span>
+      <button class="btn-out pj-copy" type="button" data-pj-runs-refresh="${esc(slug)}">Refresh</button></div>
+    ${body}</div>`;
+}
+
+async function loadProjectRuns(slug){
+  const p=projectsState.rows.find(x=>x.slug===slug);
+  if(!p)return;
+  projectRuns[slug]={state:'loading',rows:[]};
+  renderProjectsView();
+  try{
+    const res=await fetch(`/api/projects/${p.id}/runs`,{credentials:'include'});
+    const data=await res.json();
+    projectRuns[slug]=(!res.ok||data.ok===false)
+      ?{state:'error',rows:[],message:data?.message||data?.error||`HTTP ${res.status}`}
+      :{state:'done',rows:data.rows||[]};
+  }catch(error){
+    projectRuns[slug]={state:'error',rows:[],message:String(error?.message||error)};
+  }
+  renderProjectsView();
+}
+
 function projectCardHtml(p){
   const open=projectOpen===p.slug;
   const fields=p.inputs||[];
+  // Run is disabled without instructions or without a key. The banner that used
+  // to explain the second case is gone, so the button carries the reason itself
+  // rather than sitting dead with nothing to say.
+  const runBlocked=!p.ready
+    ? 'This project has no instructions saved, so there is nothing to run.'
+    : (!projectsState.configured ? 'Running from the board needs ANTHROPIC_API_KEY on this deployment. Until it is set, run this project inside Claude.' : '');
   return `<div class="pj-card pj-accent-${esc(p.accent||'slate')}${open?' open':''}">
     <button class="pj-card-head" data-pj-open="${esc(p.slug)}">
       <div class="pj-card-title">
@@ -8987,11 +9285,12 @@ function projectCardHtml(p){
       ${p.ready?'':`<div class="pj-warn">This project cannot run until its instructions are saved.${projectsState.canEdit?' Use <strong>Edit</strong> below.':''}</div>`}
       ${fields.length?fields.map(f=>projectFieldHtml(p.slug,f)).join(''):'<p class="pj-help">This project takes no inputs.</p>'}
       <div class="pj-actions">
-        <button class="btn-primary" data-pj-run="${esc(p.slug)}"${(!p.ready||!projectsState.configured||projectThread[p.slug]?.running)?' disabled':''}>${projectThread[p.slug]?.turns?.length?'Run again':'Run'}</button>
+        <button class="btn-primary" data-pj-run="${esc(p.slug)}"${runBlocked?` title="${esc(runBlocked)}"`:''}${(!p.ready||!projectsState.configured||projectThread[p.slug]?.running)?' disabled':''}>${projectThread[p.slug]?.turns?.length?'Run again':'Run'}</button>
         ${projectsState.canEdit?`<button class="btn-out" data-pj-edit="${esc(p.slug)}">Edit</button>`:''}
         <span class="pj-model">${esc(p.model||projectsState.model||'')}</span>
       </div>
       ${projectThreadHtml(p.slug)}
+      ${projectRunsHtml(p.slug)}
     </div>`:''}
   </div>`;
 }
@@ -9021,6 +9320,9 @@ async function runProject(slug){
   }
   t.running=false;
   renderProjectsView();
+  // The server keeps what it just ran, so the Results list below is now a
+  // result behind until it is re-read.
+  if(!t.error)loadProjectRuns(slug);
 }
 
 // A follow-up replays the whole thread. The server puts the project's
@@ -9064,6 +9366,7 @@ async function askProjectFollowUp(slug){
   }
   t.running=false;
   renderProjectsView();
+  if(!t.error)loadProjectRuns(slug);
 }
 
 function resetProjectThread(slug){
@@ -9205,6 +9508,9 @@ function bindProjectCardHandlers(host){
     const slug=b.dataset.pjOpen;
     projectOpen=projectOpen===slug?null:slug;
     renderProjectsView();
+    // The stored results are fetched on open rather than with the list, so
+    // opening a card is what pays for its history.
+    if(projectOpen===slug)loadProjectRuns(slug);
   }));
   host.querySelectorAll('[data-pj-field]').forEach(el=>el.addEventListener('input',e=>{
     const slug=e.target.dataset.pjSlug,key=e.target.dataset.pjField;
@@ -9233,6 +9539,33 @@ function bindProjectCardHandlers(host){
     const text=turns[Number(b.dataset.pjTurn)]?.content||'';
     navigator.clipboard?.writeText(text).then(()=>showToast('Copied','ok'),()=>showToast('Could not copy'));
   }));
+  // A stored result is keyed slug:runId. Slugs cannot contain a colon, so the
+  // last one is always the separator.
+  const runKeySlug=key=>String(key||'').slice(0,String(key||'').lastIndexOf(':'));
+  const runByKey=key=>{
+    const slug=runKeySlug(key);
+    return (projectRuns[slug]?.rows||[]).find(r=>slug+':'+r.id===key)||null;
+  };
+  host.querySelectorAll('[data-pj-run-toggle]').forEach(b=>b.addEventListener('click',()=>{
+    const key=b.dataset.pjRunToggle;
+    const slug=runKeySlug(key);
+    const rows=projectRuns[slug]?.rows||[];
+    const idx=rows.findIndex(r=>slug+':'+r.id===key);
+    // Matches the default in projectRunsHtml: newest open, the rest closed.
+    const open=projectRunOpen[key]!==undefined?projectRunOpen[key]:idx===0;
+    projectRunOpen[key]=!open;
+    renderProjectsView();
+  }));
+  host.querySelectorAll('[data-pj-run-copy]').forEach(b=>b.addEventListener('click',()=>{
+    const run=runByKey(b.dataset.pjRunCopy);
+    navigator.clipboard?.writeText(run?.output||'').then(()=>showToast('Copied','ok'),()=>showToast('Could not copy'));
+  }));
+  host.querySelectorAll('[data-pj-runs-refresh]').forEach(b=>b.addEventListener('click',()=>loadProjectRuns(b.dataset.pjRunsRefresh)));
+  // Copy on a fenced code block reads the block it sits in, so it carries no id.
+  host.querySelectorAll('.pj-copy-code').forEach(b=>b.addEventListener('click',()=>{
+    const text=b.closest('.pj-codeblock')?.querySelector('code')?.textContent||'';
+    navigator.clipboard?.writeText(text).then(()=>showToast('Copied','ok'),()=>showToast('Could not copy'));
+  }));
 }
 
 function renderProjectsView(){
@@ -9242,7 +9575,7 @@ function renderProjectsView(){
   const claude=s.claude||{connected:false};
   const claudeStatus=claude.connected
     ? `<div><strong>Claude connected</strong>${claude.userEmail?` for ${esc(claude.userEmail)}`:''}${claude.lastSyncAt?` · last sync ${esc(fmtDate(claude.lastSyncAt))}`:''}${claude.lastProjectCount?` · ${claude.lastProjectCount} imported`:''}</div>`
-    : '<div><strong>Claude not connected</strong> · connect to import projects from your Claude account.</div>';
+    : '<div><strong>Claude not connected</strong> · a Compliance key imports your claude.ai Projects. Without one, open a project in Claude with the support connector on and ask it to register itself here.</div>';
   const claudeControls=claude.connected
     ? `<div class="pj-connect-actions"><button class="btn-primary" id="pj-claude-sync">Sync Claude</button><button class="btn-out" id="pj-claude-connect">Change key</button><button class="btn-out" id="pj-claude-disconnect">Disconnect</button></div>`
     : `<div class="pj-connect-actions"><button class="btn-primary" id="pj-claude-connect">Connect Claude</button></div>`;
@@ -9264,14 +9597,11 @@ function renderProjectsView(){
   if(s.state==='error'){host.innerHTML=header+`<div class="pj-error-box">Could not load projects: ${esc(s.message||'')}</div>`;return;}
 
   const rows=s.rows.filter(projectMatches);
-  const notConfigured=!s.configured
-    ? '<div class="pj-warn pj-warn-top">No <code>ANTHROPIC_API_KEY</code> is set on this deployment, so nothing can be run from here yet.</div>'
-    : '';
   const grid=rows.length
     ? `<div class="pj-grid">${rows.map(projectCardHtml).join('')}</div>`
-    : `<div class="pj-empty">${projectsQuery?'Nothing matches that search.':'No projects in this tab.'}</div>`;
+    : `<div class="pj-empty">${projectsQuery?'Nothing matches that search.':'No projects here yet. Open a project in Claude with the support connector on and ask it to register itself on the board.'}</div>`;
 
-  host.innerHTML=header+notConfigured+grid;
+  host.innerHTML=header+grid;
 
   host.querySelectorAll('[data-pj-tab]').forEach(b=>b.addEventListener('click',()=>{projectsTab=b.dataset.pjTab;renderProjectsView();}));
   host.querySelector('#pj-refresh')?.addEventListener('click',loadProjects);

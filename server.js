@@ -5434,85 +5434,105 @@ async function ensureProjectTable() {
   await prisma.$executeRaw`CREATE INDEX IF NOT EXISTS "ClaudeProject_sourceUserId_idx" ON "ClaudeProject"("sourceUserId")`;
 }
 
-/* The projects already in use, with the inputs each one asks for in its own
-   description. Seeded once, on an empty table, so the panel opens with the real
-   catalogue rather than a blank page and an "add your first project" prompt.
-   Instructions are left empty on purpose - only the people who wrote each
-   project can supply those, and a guessed system prompt would be worse than an
-   honest gap. Until one is filled in, the project says so and cannot be run. */
-const PROJECT_SEED = [
-  {
-    slug: 'q-seo-implementation', name: 'Q-SEO Implementation', scope: 'org', owner: 'you', accent: 'indigo', pinned: true,
-    description: 'Implementation steps for Q-SEO on a hotel site, for the stack the site actually runs on.',
-    inputs: [
-      { key: 'websiteUrl', label: 'Website URL', type: 'url', required: true, placeholder: 'https://hotel.example' },
-      { key: 'accountId', label: 'Quinta account ID', type: 'text', required: true },
-      { key: 'licenseKey', label: 'License key', type: 'text', required: true },
-      { key: 'serverLanguage', label: 'Server language', type: 'select', required: true, options: ['Node.js', 'Python', 'PHP'] }
-    ]
-  },
-  {
-    slug: 'q-share-mapping', name: 'Q-Share Mapping', scope: 'org', owner: 'you', accent: 'teal', pinned: true,
-    description: 'Q-Share mapping files for hotel webmasters, from a website URL and a teamId.',
-    inputs: [
-      { key: 'websiteUrl', label: 'Website URL', type: 'url', required: true, placeholder: 'https://hotel.example' },
-      { key: 'teamId', label: 'Team ID', type: 'text', required: true, placeholder: '401' }
-    ]
-  },
-  {
-    slug: 'global-check-agent', name: 'Global Check Agent V0.3', scope: 'org', owner: 'JAT Quinta', accent: 'amber',
-    description: 'Full check for one hotel. The name must match the one on the Dashboard exactly.',
-    inputs: [
-      { key: 'hotelName', label: 'Hotel name', type: 'text', required: true, help: 'Must match the name on the Dashboard.' },
-      { key: 'qtId', label: 'QT ID', type: 'text', required: true },
-      { key: 'officialUrl', label: "Hotel's official URL", type: 'url', required: true }
-    ]
-  },
-  {
-    slug: 'q-sync-check', name: 'Q-sync Check', scope: 'org', owner: 'Vincent', accent: 'violet',
-    description: 'Confirms Q-data is set correctly before Q-Sync is launched. Takes one or more hotel IDs.',
-    inputs: [
-      { key: 'hotelIds', label: 'Hotel IDs', type: 'textarea', required: true, placeholder: '401\n252\n19919', help: 'One per line, or comma separated.' }
-    ]
-  },
-  {
-    slug: 'b-signature-mcp', name: 'B Signature MCP', scope: 'mine', owner: 'you', accent: 'rose',
-    description: 'Q-MCP assistant for the six B Signature properties.',
-    inputs: [
-      { key: 'question', label: 'What do you need?', type: 'textarea', required: true, placeholder: 'Ask about any of the six B Signature properties…' }
-    ]
-  },
-  {
-    slug: 'quinta-onboarding-agent', name: 'Quinta Onboarding Agent V2', scope: 'org', owner: 'Quinta', accent: 'emerald',
-    description: 'Walks a new property through onboarding.',
-    inputs: [
-      { key: 'hotelName', label: 'Hotel name', type: 'text', required: true },
-      { key: 'notes', label: 'Anything specific to this onboarding', type: 'textarea', required: false }
-    ]
-  },
-  {
-    slug: 'qa-audit-conversation', name: 'QA AUDIT - Check Conversation', scope: 'org', owner: 'Quinta', accent: 'slate',
-    description: 'Audits a bot conversation for quality issues.',
-    inputs: [
-      { key: 'conversation', label: 'Conversation', type: 'textarea', required: true, placeholder: 'Paste the conversation transcript…' },
-      { key: 'hotelName', label: 'Hotel', type: 'text', required: false }
-    ]
-  }
-];
+/* The catalogue starts empty on purpose.
+   It used to be seeded with the seven projects the team was already running,
+   so the panel opened with something in it. Those rows carried no instructions
+   - nobody but the project's author can supply those - so they could never be
+   run, and an empty table refilled itself the moment it was cleared.
+   Claude fills the catalogue instead, from its own end: register_project over
+   the MCP connector, which reads a project's real instructions out of the
+   conversation running inside it, or a Compliance API sync where the org has a
+   key for it. Either route arrives runnable; a placeholder never did. */
 
-async function seedProjectsIfEmpty() {
-  await ensureProjectTable();
-  const rows = await prisma.$queryRaw`SELECT count(*)::int AS n FROM "ClaudeProject"`;
-  if ((Array.isArray(rows) ? rows[0]?.n : 0) > 0) return 0;
-  for (const p of PROJECT_SEED) {
-    await prisma.$executeRaw`
-      INSERT INTO "ClaudeProject" ("slug","name","description","scope","owner","instructions","inputs","accent","pinned","createdBy","updatedAt")
-      VALUES (${p.slug}, ${p.name}, ${p.description || ''}, ${p.scope}, ${p.owner || ''}, ${''},
-              ${JSON.stringify(p.inputs || [])}::jsonb, ${p.accent || 'slate'}, ${!!p.pinned}, ${'seed'}, CURRENT_TIMESTAMP)
-      ON CONFLICT ("slug") DO NOTHING
-    `;
+/* Results, kept.
+   A project thread in the panel lives in the browser and dies with the tab,
+   which is right for a working session and wrong for the thing the team
+   actually wants to keep: the answer. So a finished run is written here.
+   Two things write to it. The board writes what it ran itself, when a key is
+   set. Claude writes what IT ran, over post_project_run on the connector -
+   which is the only route that works on a deployment with no
+   ANTHROPIC_API_KEY, because the model call happens on Claude's side and only
+   the text comes back. Same table, same panel, a badge saying which. */
+const PROJECT_RUN_KEEP = Math.min(100, Math.max(5, Number(process.env.PROJECT_RUN_KEEP || 20)));
+const PROJECT_RUN_MAX_CHARS = 200_000;
+
+async function ensureProjectRunTable() {
+  await prisma.$executeRaw`
+    CREATE TABLE IF NOT EXISTS "ClaudeProjectRun" (
+      "id" SERIAL PRIMARY KEY,
+      "projectId" INTEGER NOT NULL,
+      "source" TEXT NOT NULL DEFAULT 'board',
+      "title" TEXT NOT NULL DEFAULT '',
+      "inputs" JSONB NOT NULL DEFAULT '[]'::jsonb,
+      "output" TEXT NOT NULL DEFAULT '',
+      "model" TEXT NOT NULL DEFAULT '',
+      "ms" INTEGER,
+      "inputTokens" INTEGER,
+      "outputTokens" INTEGER,
+      "createdBy" TEXT NOT NULL DEFAULT '',
+      "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+  `;
+  await prisma.$executeRaw`CREATE INDEX IF NOT EXISTS "ClaudeProjectRun_projectId_idx" ON "ClaudeProjectRun"("projectId","createdAt" DESC)`;
+}
+
+// The inputs a run was given, flattened to label/value pairs so the panel can
+// show what was asked without needing the project's field list beside it.
+function projectRunInputPairs(project, values) {
+  const fields = Array.isArray(project?.inputs) ? project.inputs : [];
+  const supplied = (values && typeof values === 'object' && !Array.isArray(values)) ? values : {};
+  if (fields.length) {
+    return fields
+      .map(f => ({ label: String(f.label || f.key), value: String(supplied[f.key] ?? '').trim() }))
+      .filter(pair => pair.value)
+      .map(pair => ({ label: pair.label.slice(0, 120), value: pair.value.slice(0, 400) }));
   }
-  return PROJECT_SEED.length;
+  return Object.entries(supplied)
+    .filter(([, v]) => String(v ?? '').trim())
+    .slice(0, 20)
+    .map(([k, v]) => ({ label: String(k).slice(0, 120), value: String(v).trim().slice(0, 400) }));
+}
+
+async function saveProjectRun(entry) {
+  const output = String(entry?.output || '').slice(0, PROJECT_RUN_MAX_CHARS);
+  if (!output.trim()) return null;
+  await ensureProjectRunTable();
+  const rows = await prisma.$queryRaw`
+    INSERT INTO "ClaudeProjectRun" ("projectId","source","title","inputs","output","model","ms","inputTokens","outputTokens","createdBy")
+    VALUES (${Number(entry.projectId)}, ${entry.source === 'claude' ? 'claude' : 'board'}, ${String(entry.title || '').slice(0, 200)},
+            ${JSON.stringify(entry.inputs || [])}::jsonb, ${output}, ${String(entry.model || '').slice(0, 80)},
+            ${entry.ms == null ? null : Number(entry.ms)}, ${entry.inputTokens == null ? null : Number(entry.inputTokens)},
+            ${entry.outputTokens == null ? null : Number(entry.outputTokens)}, ${String(entry.createdBy || '').slice(0, 120)})
+    RETURNING "id"
+  `;
+  // Only the last few runs of a project are worth keeping; the panel shows a
+  // history, not an archive, and the output column is large.
+  await prisma.$executeRaw`
+    DELETE FROM "ClaudeProjectRun"
+    WHERE "projectId" = ${Number(entry.projectId)}
+      AND "id" NOT IN (
+        SELECT "id" FROM "ClaudeProjectRun"
+        WHERE "projectId" = ${Number(entry.projectId)}
+        ORDER BY "createdAt" DESC, "id" DESC
+        LIMIT ${PROJECT_RUN_KEEP}
+      )
+  `;
+  return Array.isArray(rows) ? rows[0]?.id ?? null : null;
+}
+
+function projectRunRow(row) {
+  return {
+    id: row.id,
+    source: row.source === 'claude' ? 'claude' : 'board',
+    title: row.title || '',
+    inputs: Array.isArray(row.inputs) ? row.inputs : [],
+    output: row.output || '',
+    model: row.model || '',
+    ms: row.ms == null ? null : Number(row.ms),
+    usage: { inputTokens: row.inputTokens ?? null, outputTokens: row.outputTokens ?? null },
+    createdBy: row.createdBy || '',
+    createdAt: row.createdAt
+  };
 }
 
 function normalizeProjectInputs(raw) {
@@ -5806,7 +5826,7 @@ function projectRow(row, { includeInstructions = false } = {}) {
 
 app.get('/api/projects', requireAuth, async (req, res) => {
   try {
-    await seedProjectsIfEmpty();
+    await ensureProjectTable();
     const rows = await prisma.$queryRaw`SELECT * FROM "ClaudeProject" ORDER BY "pinned" DESC, "updatedAt" DESC`;
     const isAdmin = isAdminRole(req.session.role);
     const list = (Array.isArray(rows) ? rows : []).map(r => projectRow(r, { includeInstructions: isAdmin }));
@@ -6095,11 +6115,48 @@ async function handleProjectRun(req, res, { withHistory }) {
       ...history.turns
     ]);
     const result = projectRunResponse(message, project, started);
+    // Persisted after the response is built but before it is sent, so a stored
+    // run and the one on screen cannot disagree. A failure to store is logged
+    // and swallowed: losing the history entry is not worth losing the answer.
+    if (result.body?.ok && result.body.text) {
+      try {
+        await saveProjectRun({
+          projectId: project.id,
+          source: 'board',
+          title: withHistory ? 'Follow-up' : 'Run',
+          inputs: projectRunInputPairs(project, req.body?.values),
+          output: result.body.text,
+          model: String(project.model || PROJECT_MODEL),
+          ms: result.body.ms,
+          inputTokens: result.body.usage?.inputTokens,
+          outputTokens: result.body.usage?.outputTokens,
+          createdBy: req.session?.username || ''
+        });
+      } catch (storeError) {
+        console.error('Project run not stored:', storeError?.message || storeError);
+      }
+    }
     return res.status(result.status).json(result.body);
   } catch (error) {
     return projectRunError(error, res);
   }
 }
+
+app.get('/api/projects/:id/runs', requireAuth, async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: 'invalid_id' });
+  try {
+    await ensureProjectRunTable();
+    const limit = Math.min(Math.max(Number(req.query.limit) || 10, 1), PROJECT_RUN_KEEP);
+    const rows = await prisma.$queryRaw`
+      SELECT * FROM "ClaudeProjectRun" WHERE "projectId" = ${id}
+      ORDER BY "createdAt" DESC, "id" DESC LIMIT ${limit}`;
+    return res.json({ ok: true, rows: (Array.isArray(rows) ? rows : []).map(projectRunRow) });
+  } catch (error) {
+    console.error('Project run history failed:', error?.message || error);
+    return res.status(500).json({ error: 'project_runs_failed' });
+  }
+});
 
 app.post('/api/projects/:id/run', requireAuth, projectRunLimiter, async (req, res) => {
   return handleProjectRun(req, res, { withHistory: false });
@@ -6874,6 +6931,64 @@ async function mcpListBoardProjects() {
   }));
 }
 
+// Claude ran the project on its own side and hands the answer over. This is
+// what makes the panel useful on a deployment with no ANTHROPIC_API_KEY: the
+// board never calls a model, it stores and renders what came back.
+//
+// Not admin-gated, unlike register_project. Registering changes what the board
+// offers; posting a result adds one, and every token here belongs to a member
+// of the team. The row records which token wrote it either way.
+async function mcpPostProjectRun(apiUser, args) {
+  const wanted = String(args?.project || '').trim();
+  if (!wanted) throw Object.assign(new Error('project_required'), { status: 400 });
+  const output = String(args?.output || '').trim();
+  if (!output) throw Object.assign(new Error('output_required: pass the result text as output'), { status: 400 });
+
+  await ensureProjectTable();
+  const slug = projectSlugFromName(wanted);
+  const rows = await prisma.$queryRaw`
+    SELECT "id","name","slug","inputs" FROM "ClaudeProject"
+    WHERE "slug" = ${slug} OR lower("name") = ${wanted.toLowerCase()} OR "slug" = ${wanted}
+    LIMIT 1`;
+  const project = Array.isArray(rows) ? rows[0] : null;
+  if (!project) {
+    const known = await prisma.$queryRaw`SELECT "name" FROM "ClaudeProject" ORDER BY "name" LIMIT 25`;
+    const names = (Array.isArray(known) ? known : []).map(r => r.name).join(', ');
+    throw Object.assign(new Error(
+      `project_not_found: nothing on the board matches "${wanted}". ${names ? `On the board: ${names}.` : 'The board has no projects yet.'} Call register_project first.`
+    ), { status: 404 });
+  }
+
+  // inputs arrive either as the label/value pairs the panel shows, or as a
+  // plain object of field values, which is what a project's own form produces.
+  const raw = args?.inputs;
+  const pairs = Array.isArray(raw)
+    ? raw.map(p => ({ label: String(p?.label || p?.key || '').slice(0, 120), value: String(p?.value ?? '').trim().slice(0, 400) }))
+        .filter(p => p.label && p.value).slice(0, 20)
+    : projectRunInputPairs(project, raw);
+
+  const id = await saveProjectRun({
+    projectId: project.id,
+    source: 'claude',
+    title: String(args?.title || '').trim() || 'Run from Claude',
+    inputs: pairs,
+    output,
+    model: String(args?.model || '').trim(),
+    createdBy: 'mcp:' + (apiUser?.username || ''),
+    ms: null,
+    inputTokens: null,
+    outputTokens: null
+  });
+
+  return {
+    ok: true,
+    runId: id,
+    project: project.name,
+    stored: output.length,
+    status: `Result stored against "${project.name}". The team can read it in QT-Tools -> Projects, on that project's card under Results.`
+  };
+}
+
 async function mcpShiftHandover(hours) {
   const windowHours = Math.min(168, Math.max(1, Number(hours) || 12));
   const since = new Date(Date.now() - windowHours * 3600000);
@@ -7347,6 +7462,27 @@ function buildKanbanMcpServer(apiUser, { McpServer, z }) {
     },
     async () => {
       try { return mcpTextResult(await mcpListBoardProjects()); } catch (error) { return mcpErrorResult(error); }
+    }
+  );
+
+  server.registerTool(
+    'post_project_run',
+    {
+      title: 'Put a result on the support board',
+      description: "Hand the board the result of running a project, so the team can read it in QT-Tools without opening Claude. Use this after you have run a registered project's work for someone: pass the project name and the finished answer as output. This is the route that works when the board has no ANTHROPIC_API_KEY of its own - you do the run, the board keeps and renders the answer. Markdown in output is rendered (headings, lists, tables, code). Register the project first with register_project if it is not on the board yet.",
+      inputSchema: {
+        project: z.string().min(1).describe('The project name or slug as it appears on the board. Check with list_board_projects.'),
+        output: z.string().min(1).describe('The finished result, verbatim. Markdown is rendered on the board.'),
+        title: z.string().optional().describe('A short label for this run, e.g. the hotel or URL it was about. Shown in the history list.'),
+        model: z.string().optional().describe('Which model produced it, if worth recording.'),
+        inputs: z.array(z.object({
+          label: z.string().describe('What was asked for, e.g. Website URL.'),
+          value: z.string().describe('What was supplied.')
+        })).optional().describe('The inputs this run was given, so the board can show what the answer was for.')
+      }
+    },
+    async (args) => {
+      try { return mcpTextResult(await mcpPostProjectRun(apiUser, args)); } catch (error) { return mcpErrorResult(error); }
     }
   );
 
