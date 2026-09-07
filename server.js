@@ -8420,6 +8420,60 @@ function ticketAttachmentRow(row) {
   };
 }
 
+function feedbackAttachmentKey(logId) {
+  return `feedback:${Number(logId)}`;
+}
+
+function attachmentError(code, status, message) {
+  return Object.assign(new Error(message || code), { code, status });
+}
+
+/* Validates and stores a batch of base64 files against one key.
+   Throws on the first thing it will not take, rather than storing half a batch
+   and reporting success: a reporter who attached three files and got one is
+   worse off than one who was told which file was refused. */
+async function saveAttachmentFiles({ key, files, uploadedBy }) {
+  const list = Array.isArray(files) ? files : [];
+  if (!list.length) throw attachmentError('no_files', 400, 'No files were sent.');
+  if (list.length > TICKET_ATTACH_MAX_FILES) {
+    throw attachmentError('too_many_files', 400, `Up to ${TICKET_ATTACH_MAX_FILES} files at a time.`);
+  }
+  await ensureTicketAttachmentTable();
+  const existing = await prisma.$queryRaw`
+    SELECT COALESCE(sum("size"), 0)::bigint AS total FROM "TicketAttachment" WHERE "ticketExternalId" = ${key}`;
+  let running = Number(Array.isArray(existing) ? existing[0]?.total || 0 : 0);
+
+  const rows = [];
+  for (const file of list) {
+    const type = String(file?.type || '').toLowerCase().split(';')[0].trim();
+    const filename = safeAttachmentName(file?.name);
+    if (!TICKET_ATTACH_TYPES.has(type)) {
+      throw attachmentError('unsupported_type', 415, `"${filename}" is a ${type || 'unknown'} file, which cannot be attached.`);
+    }
+    // Base64 rather than multipart: express.json already accepts 25mb, and a
+    // multipart parser would be a new dependency for two routes. The cost is
+    // the 33% encoding overhead on the wire.
+    const buffer = Buffer.from(String(file?.data || ''), 'base64');
+    if (!buffer.length) throw attachmentError('empty_file', 400, `"${filename}" arrived empty.`);
+    if (buffer.length > TICKET_ATTACH_MAX_BYTES) {
+      throw attachmentError('file_too_large', 413, `"${filename}" is ${(buffer.length / 1048576).toFixed(1)}MB; the limit is ${TICKET_ATTACH_MAX_BYTES / 1048576}MB per file.`);
+    }
+    running += buffer.length;
+    if (running > TICKET_ATTACH_MAX_TOTAL) {
+      throw attachmentError('quota', 413, `That would go over ${TICKET_ATTACH_MAX_TOTAL / 1048576}MB of attachments here.`);
+    }
+    const width = Number.isFinite(Number(file?.width)) ? Math.max(0, Math.min(20000, Number(file.width))) : null;
+    const height = Number.isFinite(Number(file?.height)) ? Math.max(0, Math.min(20000, Number(file.height))) : null;
+    const saved = await prisma.$queryRaw`
+      INSERT INTO "TicketAttachment" ("ticketExternalId","filename","contentType","size","width","height","data","uploadedBy")
+      VALUES (${key}, ${filename}, ${type}, ${buffer.length}, ${width}, ${height}, ${buffer}, ${String(uploadedBy || '')})
+      RETURNING "id","filename","contentType","size","width","height","uploadedBy","createdAt"`;
+    const row = Array.isArray(saved) ? saved[0] : null;
+    if (row) rows.push(ticketAttachmentRow(row));
+  }
+  return { rows };
+}
+
 app.get('/api/tickets/:externalId/attachments', requireAuth, async (req, res) => {
   const externalId = String(req.params.externalId || '').trim();
   if (!externalId) return res.status(400).json({ error: 'missing_ticket' });
@@ -8439,48 +8493,17 @@ app.get('/api/tickets/:externalId/attachments', requireAuth, async (req, res) =>
 app.post('/api/tickets/:externalId/attachments', requireAuth, attachmentUploadLimiter, async (req, res) => {
   const externalId = String(req.params.externalId || '').trim();
   if (!externalId) return res.status(400).json({ error: 'missing_ticket' });
-  const files = Array.isArray(req.body?.files) ? req.body.files : [];
-  if (!files.length) return res.status(400).json({ error: 'no_files' });
-  if (files.length > TICKET_ATTACH_MAX_FILES) {
-    return res.status(400).json({ error: 'too_many_files', message: `Up to ${TICKET_ATTACH_MAX_FILES} files at a time.` });
-  }
-
   try {
-    await ensureTicketAttachmentTable();
-    const existing = await prisma.$queryRaw`
-      SELECT COALESCE(sum("size"), 0)::bigint AS total FROM "TicketAttachment" WHERE "ticketExternalId" = ${externalId}`;
-    let running = Number(Array.isArray(existing) ? existing[0]?.total || 0 : 0);
-
-    const saved = [];
-    for (const file of files) {
-      const type = String(file?.type || '').toLowerCase().split(';')[0].trim();
-      const filename = safeAttachmentName(file?.name);
-      if (!TICKET_ATTACH_TYPES.has(type)) {
-        return res.status(415).json({ error: 'unsupported_type', message: `"${filename}" is a ${type || 'unknown'} file, which cannot be attached.` });
-      }
-      // Base64 rather than multipart: express.json already accepts 25mb, and a
-      // multipart parser would be a new dependency for one route. The cost is
-      // the 33% encoding overhead on the wire.
-      const buffer = Buffer.from(String(file?.data || ''), 'base64');
-      if (!buffer.length) return res.status(400).json({ error: 'empty_file', message: `"${filename}" arrived empty.` });
-      if (buffer.length > TICKET_ATTACH_MAX_BYTES) {
-        return res.status(413).json({ error: 'file_too_large', message: `"${filename}" is ${(buffer.length / 1048576).toFixed(1)}MB; the limit is ${TICKET_ATTACH_MAX_BYTES / 1048576}MB per file.` });
-      }
-      running += buffer.length;
-      if (running > TICKET_ATTACH_MAX_TOTAL) {
-        return res.status(413).json({ error: 'ticket_quota', message: `That would put this ticket over ${TICKET_ATTACH_MAX_TOTAL / 1048576}MB of attachments.` });
-      }
-      const width = Number.isFinite(Number(file?.width)) ? Math.max(0, Math.min(20000, Number(file.width))) : null;
-      const height = Number.isFinite(Number(file?.height)) ? Math.max(0, Math.min(20000, Number(file.height))) : null;
-      const rows = await prisma.$queryRaw`
-        INSERT INTO "TicketAttachment" ("ticketExternalId","filename","contentType","size","width","height","data","uploadedBy")
-        VALUES (${externalId}, ${filename}, ${type}, ${buffer.length}, ${width}, ${height}, ${buffer}, ${req.session?.username || ''})
-        RETURNING "id","filename","contentType","size","width","height","uploadedBy","createdAt"`;
-      const row = Array.isArray(rows) ? rows[0] : null;
-      if (row) saved.push(ticketAttachmentRow(row));
-    }
-    return res.json({ ok: true, rows: saved });
+    const { rows } = await saveAttachmentFiles({
+      key: externalId,
+      files: req.body?.files,
+      uploadedBy: req.session?.username || ''
+    });
+    return res.json({ ok: true, rows });
   } catch (error) {
+    if (error?.code) {
+      return res.status(error.status || 400).json({ error: error.code, message: error.message });
+    }
     console.error('Attachment upload failed:', error?.message || error);
     return res.status(500).json({ error: 'attachment_upload_failed', message: String(error?.message || error).slice(0, 200) });
   }
@@ -9214,7 +9237,19 @@ function feedbackFacts(context, actor, sentAt) {
   ];
 }
 
-function buildFeedbackEmailHtml({ category, message, context, actor, sentAt }) {
+function feedbackAttachmentLinks(attachments, base) {
+  const list = Array.isArray(attachments) ? attachments : [];
+  if (!list.length) return '';
+  const items = list.map(a =>
+    `<li style="margin:2px 0;"><a href="${escapeHtml(base + a.url)}" style="color:#4f46e5;">${escapeHtml(a.filename)}</a>`
+    + ` <span style="color:#98a2b3;">(${Math.max(1, Math.round((a.size || 0) / 1024))} KB)</span></li>`
+  ).join('');
+  return `<div style="margin-top:14px;font-size:12px;"><strong>Attached</strong>`
+    + `<ul style="margin:5px 0 0;padding-left:18px;">${items}</ul>`
+    + `<div style="margin-top:5px;font-size:11px;color:#98a2b3;">Opening these needs a board login.</div></div>`;
+}
+
+function buildFeedbackEmailHtml({ category, message, context, actor, sentAt, attachments }) {
   const meta = FEEDBACK_CATEGORIES[category] || FEEDBACK_CATEGORIES.other;
   const rows = feedbackFacts(context, actor, sentAt)
     .map(([key, value]) => `<tr><td style="padding:3px 12px 3px 0;color:#667085;font-size:12px;white-space:nowrap;vertical-align:top;">${escapeHtml(key)}</td><td style="padding:3px 0;font-size:12px;color:#0f172a;word-break:break-all;">${escapeHtml(value)}</td></tr>`)
@@ -9226,17 +9261,23 @@ function buildFeedbackEmailHtml({ category, message, context, actor, sentAt }) {
     // hand and the part that has to be read.
     `<div style="margin:10px 0 16px;padding:13px 15px;border-left:3px solid #${meta.colour};background:#f8fafc;border-radius:0 8px 8px 0;white-space:pre-wrap;font-size:14px;">${escapeHtml(message)}</div>`,
     `<table style="border-collapse:collapse;">${rows}</table>`,
+    feedbackAttachmentLinks(attachments, APP_BASE_URL),
     '<div style="margin-top:14px;font-size:11px;color:#98a2b3;">Sent by the Feedback button on the support board. Reply to this mail to answer the reporter.</div>',
     '</div>'
   ].join('');
 }
 
-function buildFeedbackWebhookPayload({ category, message, context, actor, sentAt }) {
+function buildFeedbackWebhookPayload({ category, message, context, actor, sentAt, attachments }) {
   const meta = FEEDBACK_CATEGORIES[category] || FEEDBACK_CATEGORIES.other;
   const title = `${meta.emoji} ${meta.label} from ${actor.label}`;
   const when = sentAt || new Date().toISOString();
   const ticket = context.ticketLabel || context.ticketId || '';
   const facts = feedbackFacts(context, actor, when).map(([name, value]) => ({ name, value }));
+  const files = (Array.isArray(attachments) ? attachments : []).map(a => ({
+    name: a.filename,
+    size: a.size,
+    url: APP_BASE_URL + a.url
+  }));
   return {
     // Read by a Power Automate flow, or by anything else pointed at this URL.
     //
@@ -9251,6 +9292,10 @@ function buildFeedbackWebhookPayload({ category, message, context, actor, sentAt
     ...(ticket ? { ticket } : {}),
     time: when,
     message,
+    // Named files, not attachments: this payload already carries an
+    // attachments array for the Adaptive Card, and the later key in an object
+    // literal wins - which silently ate this field the first time.
+    ...(files.length ? { files } : {}),
     // Rendered by a Teams incoming webhook without a flow in between.
     '@type': 'MessageCard',
     '@context': 'https://schema.org/extensions',
@@ -9258,7 +9303,7 @@ function buildFeedbackWebhookPayload({ category, message, context, actor, sentAt
     summary: title,
     title,
     text: message,
-    sections: [{ facts, markdown: false }],
+    sections: [{ facts: facts.concat(files.length ? [{ name: 'Attached', value: files.map(f => f.name).join(', ') }] : []), markdown: false }],
     /* And the Adaptive Card, for Teams Workflows.
 
        Microsoft retired the Office 365 connector that consumed the MessageCard
@@ -9278,7 +9323,12 @@ function buildFeedbackWebhookPayload({ category, message, context, actor, sentAt
         body: [
           { type: 'TextBlock', text: title, weight: 'Bolder', size: 'Medium', wrap: true },
           { type: 'TextBlock', text: message, wrap: true, spacing: 'Small' },
-          { type: 'FactSet', facts: facts.map(f => ({ title: f.name, value: f.value })), spacing: 'Medium' }
+          { type: 'FactSet', facts: facts.map(f => ({ title: f.name, value: f.value })), spacing: 'Medium' },
+          ...(files.length ? [{
+            type: 'TextBlock',
+            text: files.map(f => `[${f.name}](${f.url})`).join('  ·  '),
+            wrap: true, spacing: 'Small', isSubtle: true
+          }] : [])
         ],
         actions: actor.email
           ? [{ type: 'Action.OpenUrl', title: `Email ${actor.username || 'the reporter'}`, url: `mailto:${actor.email}` }]
@@ -9341,7 +9391,7 @@ async function sendFeedbackEmail({ req, subject, html, actor }) {
   return 'graph';
 }
 
-async function deliverFeedback({ req, category, message, context, actor }) {
+async function deliverFeedback({ req, category, message, context, actor, attachments }) {
   const meta = FEEDBACK_CATEGORIES[category] || FEEDBACK_CATEGORIES.other;
   const subject = `[Kanban ${meta.label}] ${feedbackFirstLine(message)}`;
   const sentAt = new Date().toISOString();
@@ -9349,7 +9399,7 @@ async function deliverFeedback({ req, category, message, context, actor }) {
 
   if (FEEDBACK_WEBHOOK_URL) {
     try {
-      await postJson(FEEDBACK_WEBHOOK_URL, buildFeedbackWebhookPayload({ category, message, context, actor, sentAt }));
+      await postJson(FEEDBACK_WEBHOOK_URL, buildFeedbackWebhookPayload({ category, message, context, actor, sentAt, attachments }));
       result.notified = true;
     } catch (error) {
       result.webhookError = String(error?.message || error).slice(0, 300);
@@ -9364,7 +9414,7 @@ async function deliverFeedback({ req, category, message, context, actor }) {
   // is a mail flow (safe to try) or no Teams webhook either (the only leg left).
   if (MAIL_WEBHOOK_URL || !FEEDBACK_WEBHOOK_URL) {
     try {
-      result.emailVia = await sendFeedbackEmail({ req, subject, html: buildFeedbackEmailHtml({ category, message, context, actor, sentAt }), actor });
+      result.emailVia = await sendFeedbackEmail({ req, subject, html: buildFeedbackEmailHtml({ category, message, context, actor, sentAt, attachments }), actor });
       result.emailed = true;
     } catch (error) {
       result.emailError = String(error?.message || error).slice(0, 300);
@@ -9468,30 +9518,26 @@ app.post('/api/feedback', requireAuth, feedbackLimiter, async (req, res) => {
     console.error('Feedback could not be recorded:', String(error?.message || error).slice(0, 200));
   }
 
-  const meta = FEEDBACK_CATEGORIES[category];
-  const subject = `[Kanban ${meta.label}] ${message.split(/\r?\n/)[0].slice(0, 90)}`;
-  let emailed = false;
-  let emailError = '';
-  let emailVia = '';
-  try {
-    emailVia = await sendFeedbackEmail({ req, subject, html: buildFeedbackEmailHtml({ category, message, context, actor }), actor });
-    emailed = true;
-  } catch (error) {
-    emailError = String(error?.message || error).slice(0, 200);
-    console.warn('Feedback email failed:', emailError);
-  }
-
-  let notified = false;
-  let webhookError = '';
-  if (FEEDBACK_WEBHOOK_URL) {
+  // Files the reporter attached, stored against the record that was just
+  // written so a screenshot cannot outlive the report it belongs to.
+  let attachments = [];
+  if (logId && Array.isArray(req.body?.files) && req.body.files.length) {
     try {
-      await postJson(FEEDBACK_WEBHOOK_URL, buildFeedbackWebhookPayload({ category, message, context, actor }));
-      notified = true;
+      const saved = await saveAttachmentFiles({
+        key: feedbackAttachmentKey(logId),
+        files: req.body.files,
+        uploadedBy: username
+      });
+      attachments = saved.rows;
     } catch (error) {
-      webhookError = String(error?.message || error).slice(0, 200);
-      console.warn('Feedback webhook failed:', webhookError);
+      // A report that arrives without its screenshot is worth far more than no
+      // report, so this is logged and the send continues.
+      console.warn('Feedback attachments not stored:', String(error?.message || error).slice(0, 200));
     }
   }
+
+  const { emailed, notified, emailError, webhookError, emailVia } =
+    await deliverFeedback({ req, category, message, context, actor, attachments });
 
   if (logId) {
     // What actually happened to it, on the record itself - so a report nobody

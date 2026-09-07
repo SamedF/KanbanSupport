@@ -5312,6 +5312,84 @@ th {
 .emt-body img { max-width: 100%; height: auto; }
 
 
+/* ===== Received mail =====================================================
+   A reconciliation view, so it is laid out as a ledger rather than an inbox:
+   one row per message, and the rightmost column is always what the board did
+   with it.
+   ========================================================================= */
+.mv-head {
+  display: flex; align-items: flex-end; justify-content: space-between; gap: 18px; flex-wrap: wrap;
+  margin: 0 0 16px; padding-bottom: 13px; border-bottom: 1px solid var(--border, #e2e8f0);
+}
+.mv-title { font-family: Caladea, serif; font-size: 27px; line-height: 1.15; color: var(--text, #0f172a); letter-spacing: -.01em; }
+.mv-sub { font-size: 11.5px; color: var(--muted, #64748b); margin-top: 5px; }
+.mv-controls { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
+.mv-search { min-width: 220px; }
+
+/* The counts, and the reason they exist: fetched should equal the sum of the
+   rest, and when it does not that is the thing worth looking at. */
+.mv-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(132px, 1fr)); gap: 10px; margin-bottom: 16px; }
+.mv-tile {
+  border: 1px solid var(--border, #e2e8f0); border-radius: 12px; padding: 11px 13px;
+  background: var(--surface, #fff); cursor: pointer; text-align: left;
+  transition: border-color .13s ease, box-shadow .13s ease;
+}
+.mv-tile:hover { border-color: var(--border-strong, #cbd5e1); box-shadow: 0 3px 10px rgba(15, 23, 42, .06); }
+.mv-tile.on { border-color: var(--primary, #4f46e5); box-shadow: 0 0 0 2px var(--indigo-100, #e0e7ff); }
+.mv-tile-n { font-size: 21px; font-weight: 800; color: var(--text, #0f172a); font-variant-numeric: tabular-nums; line-height: 1.1; }
+.mv-tile-l { font-size: 10.5px; color: var(--muted, #64748b); margin-top: 3px; }
+.mv-tile-alert .mv-tile-n { color: var(--red-600, #dc2626); }
+
+.mv-list { border: 1px solid var(--border, #e2e8f0); border-radius: 12px; overflow: hidden; background: var(--surface, #fff); }
+.mv-row {
+  display: flex; align-items: flex-start; gap: 12px; padding: 10px 13px;
+  border-bottom: 1px solid var(--border, #e2e8f0); cursor: pointer;
+  transition: background .12s ease;
+}
+.mv-row:last-child { border-bottom: 0; }
+.mv-row:hover { background: var(--surface-soft, #f8fafc); }
+.mv-when {
+  flex: 0 0 118px; font-size: 10.5px; color: var(--muted, #64748b);
+  font-variant-numeric: tabular-nums; padding-top: 2px;
+}
+.mv-main { flex: 1; min-width: 0; }
+.mv-subject {
+  font-size: 12.5px; font-weight: 600; color: var(--text, #0f172a);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.mv-from { font-size: 11px; color: var(--text-soft, #334155); margin-top: 2px; }
+.mv-preview {
+  font-size: 11px; color: var(--muted, #64748b); margin-top: 3px; line-height: 1.45;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+.mv-side { flex: 0 0 auto; display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
+.mv-pill {
+  font-size: 9.5px; font-weight: 800; text-transform: uppercase; letter-spacing: .04em;
+  border-radius: 999px; padding: 3px 9px; white-space: nowrap; border: 1px solid transparent;
+}
+.mv-pill-ticket { background: var(--emerald-50, #ecfdf5); color: var(--emerald-700, #047857); border-color: var(--emerald-200, #a7f3d0); }
+.mv-pill-merged { background: var(--primary-soft, #eef2ff); color: var(--primary-dark, #4338ca); border-color: var(--indigo-200, #c7d2fe); }
+.mv-pill-filtered { background: var(--surface-muted, #f1f5f9); color: var(--muted, #64748b); border-color: var(--border, #e2e8f0); }
+.mv-pill-spam { background: var(--amber-50, #fffbeb); color: var(--amber-800, #92400e); border-color: var(--amber-300, #fcd34d); }
+.mv-pill-missing { background: var(--red-50, #fef2f2); color: var(--red-700, #b91c1c); border-color: var(--red-200, #fecaca); }
+.mv-why { font-size: 10px; color: var(--muted-light, #94a3b8); max-width: 210px; text-align: right; line-height: 1.4; }
+.mv-tag {
+  font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em;
+  color: var(--muted, #64748b); background: var(--surface-muted, #f1f5f9);
+  border: 1px solid var(--border, #e2e8f0); border-radius: 4px; padding: 0 5px; margin-left: 5px;
+}
+.mv-empty, .mv-loading { padding: 40px 10px; text-align: center; color: var(--muted, #64748b); font-size: 13px; }
+.mv-error {
+  padding: 14px; border-radius: 10px; font-size: 13px;
+  background: var(--red-50, #fef2f2); border: 1px solid var(--red-200, #fecaca); color: var(--red-700, #b91c1c);
+}
+@media (max-width: 720px) {
+  .mv-row { flex-wrap: wrap; }
+  .mv-when { flex-basis: 100%; }
+  .mv-side { flex-direction: row; align-items: center; }
+  .mv-why { text-align: left; max-width: none; }
+}
+
 /* ===== Feedback, as a bubble in the corner ================================ */
 .fb-launcher {
   position: fixed; right: 22px; bottom: 22px; z-index: 3200;
@@ -5486,6 +5564,38 @@ th {
    look like the board quietly deciding things on their behalf. */
 .fb-cat.auto { box-shadow: 0 0 0 2px var(--indigo-100, #e0e7ff); }
 
+/* Staged files, above the composer. Small tiles: this is a screenshot of an
+   error dialog, not a gallery. */
+.fb-files { display: flex; gap: 7px; flex-wrap: wrap; padding: 9px 13px 0; }
+.fb-file {
+  position: relative; display: flex; align-items: center; gap: 6px;
+  border: 1px solid var(--border, #e2e8f0); border-radius: 9px;
+  background: var(--surface, #fff); padding: 4px 7px 4px 5px; max-width: 100%;
+}
+.fb-file-thumb { width: 26px; height: 26px; border-radius: 6px; object-fit: cover; background: var(--surface-muted, #f1f5f9); flex: none; }
+.fb-file-ext {
+  width: 26px; height: 26px; border-radius: 6px; flex: none;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--surface-muted, #f1f5f9); color: var(--muted, #64748b);
+  font-size: 8px; font-weight: 800; letter-spacing: .03em;
+}
+.fb-file-meta { min-width: 0; }
+.fb-file-name { font-size: 10.5px; font-weight: 600; color: var(--text, #0f172a); max-width: 132px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fb-file-size { font-size: 9.5px; color: var(--muted, #64748b); font-variant-numeric: tabular-nums; }
+.fb-file-x {
+  border: 0; background: none; cursor: pointer; padding: 0 2px; flex: none;
+  color: var(--muted-light, #94a3b8); font-size: 13px; line-height: 1;
+}
+.fb-file-x:hover { color: var(--red-600, #dc2626); }
+.fb-clip {
+  flex: 0 0 auto; width: 34px; height: 34px; border-radius: 50%; margin-bottom: 2px;
+  border: 1px solid var(--border, #e2e8f0); background: var(--surface, #fff);
+  color: var(--muted, #64748b); font-size: 14px; cursor: pointer; line-height: 1;
+  transition: border-color .13s ease, background .13s ease;
+}
+.fb-clip:hover { border-color: var(--indigo-300, #a5b4fc); background: var(--primary-soft, #eef2ff); }
+.fb-clip.has { border-color: var(--indigo-400, #818cf8); background: var(--primary-soft, #eef2ff); color: var(--primary-dark, #4338ca); }
+
 .fb-compose { display: flex; align-items: flex-end; gap: 8px; padding: 10px 13px; }
 .fb-textarea {
   flex: 1; resize: none; min-height: 40px; max-height: 132px;
@@ -5614,6 +5724,7 @@ th {
         </div>
         <button class="crm-nav-btn" id="spam-view-btn"> Spam Inbox <span class="spam-count-badge" id="spam-count" style="display:none">0</span></button>
         <button class="crm-nav-btn" id="archive-view-btn"> Archive Inbox <span class="spam-count-badge" id="archive-count" style="display:none">0</span></button>
+        <button class="crm-nav-btn" id="mail-view-btn"> Received Mail</button>
         <button class="crm-nav-btn" id="companies-view-btn"> Companies</button>
         <button class="crm-nav-btn" id="dashboard-view-btn"> Data Hygiene</button>
         <button class="crm-nav-btn" id="assignlog-view-btn"> Assignment Log</button>
@@ -5753,6 +5864,38 @@ th {
     </div>
   </div>
   <div id="companies-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(min(320px,100%),1fr));gap:12px;"></div>
+</div>
+<!-- What the helpdesk mailbox actually holds, next to what the board made of
+     it. The board ingests mail through filters - automatic senders dropped,
+     replies merged into the thread they belong to - and every one of those is
+     invisible from the board itself: a mail that never became a card leaves no
+     trace of having been considered. This view is that trace. -->
+<div id="mail-view" style="display:none;min-height:calc(100dvh - 175px);padding:var(--content-pad);">
+  <div class="mv-head">
+    <div>
+      <div class="mv-title">Received mail</div>
+      <div class="mv-sub" id="mv-sub">helpdesk@quinta.im</div>
+    </div>
+    <div class="mv-controls">
+      <input class="filter-sel mv-search" id="mv-search" type="text" placeholder="Search sender or subject…" autocomplete="off">
+      <select class="filter-sel" id="mv-window">
+        <option value="24">Last 24 hours</option>
+        <option value="96" selected>Last 4 days</option>
+        <option value="336">Last 14 days</option>
+        <option value="720">Last 30 days</option>
+      </select>
+      <select class="filter-sel" id="mv-filter">
+        <option value="all">Everything</option>
+        <option value="ticket">On the board</option>
+        <option value="merged">Merged into a thread</option>
+        <option value="filtered">Filtered out</option>
+        <option value="missing">Unaccounted for</option>
+      </select>
+      <button class="btn-out" id="mv-refresh">Fetch</button>
+    </div>
+  </div>
+  <div class="mv-tiles" id="mv-tiles"></div>
+  <div class="mv-body" id="mv-body"></div>
 </div>
 <div id="assignlog-view" style="display:none;min-height:calc(100dvh - 175px);padding:var(--content-pad);">
   <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px;">
@@ -6071,7 +6214,11 @@ th {
   <div class="fb-log" id="fb-log" aria-live="polite"></div>
   <div class="fb-cats" id="fb-cats" role="group" aria-label="What kind of feedback"></div>
   <div class="fb-chips" id="fb-chips" role="group" aria-label="What travels with this report, and openers"></div>
+  <div class="fb-files" id="fb-files"></div>
   <div class="fb-compose">
+    <button class="fb-clip" id="fb-clip" type="button" title="Attach a screenshot or file" aria-label="Attach a file">&#128206;</button>
+    <input id="fb-file-input" type="file" multiple
+      accept="image/*,application/pdf,text/plain,text/csv,application/json,application/zip,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.eml,.msg" style="display:none;">
     <textarea class="fb-textarea" id="fb-message" rows="2" spellcheck="true"
       placeholder="What happened, and what did you expect instead?"></textarea>
     <button class="fb-send" id="fb-send" type="button" aria-label="Send">&#10148;</button>
@@ -7922,6 +8069,7 @@ function setSideNavActive(mode){
   document.getElementById('projects-view-btn')?.classList.toggle('active',mode==='projects');
   document.getElementById('assignlog-view-btn')?.classList.toggle('active',mode==='assignlog');
   document.getElementById('qt-detect-view-btn')?.classList.toggle('active',mode==='qtDetect');
+  document.getElementById('mail-view-btn')?.classList.toggle('active',mode==='mail');
 }
 function setBoardChromeVisible(visible){
   const display=visible?'':'none';
@@ -9063,7 +9211,7 @@ document.getElementById('emt-submit').addEventListener('click',async()=>{
 });
 
 //  View switching
-function hidePrimaryViews(){stopKpiAutoRefresh();document.getElementById('main-board').style.display='none';document.getElementById('spam-view').classList.remove('active');document.getElementById('archive-view').classList.remove('active');document.getElementById('companies-view').style.display='none';document.getElementById('kpi-view').style.display='none';document.getElementById('insights-view').style.display='none';document.getElementById('projects-view').style.display='none';document.getElementById('qt-seize-view').style.display='none';document.getElementById('assignlog-view').style.display='none';document.getElementById('qt-detect-view').style.display='none';if(viewMode!=='board'){clearSelection();renderSelectionBar();}}
+function hidePrimaryViews(){stopKpiAutoRefresh();document.getElementById('main-board').style.display='none';document.getElementById('spam-view').classList.remove('active');document.getElementById('archive-view').classList.remove('active');document.getElementById('companies-view').style.display='none';document.getElementById('kpi-view').style.display='none';document.getElementById('insights-view').style.display='none';document.getElementById('projects-view').style.display='none';document.getElementById('qt-seize-view').style.display='none';document.getElementById('assignlog-view').style.display='none';document.getElementById('qt-detect-view').style.display='none';document.getElementById('mail-view').style.display='none';if(viewMode!=='board'){clearSelection();renderSelectionBar();}}
 function showBoardView(){viewMode='board';setBoardChromeVisible(true);hidePrimaryViews();setSideNavActive('board');saveLastWorkspaceSession('board');renderBoard();/* renderBoard() shows the flat board or the swimlanes, per boardGrouping */}
 function showSpamView(){viewMode='spam';setBoardChromeVisible(true);hidePrimaryViews();document.getElementById('spam-view').classList.add('active');setSideNavActive('spam');saveLastWorkspaceSession('spam');renderSpamView();}
 function showArchiveView(){viewMode='archive';setBoardChromeVisible(true);hidePrimaryViews();document.getElementById('archive-view').classList.add('active');setSideNavActive('archive');saveLastWorkspaceSession('archive');renderArchiveView();}
@@ -10359,7 +10507,7 @@ function renderActiveView(){
     showToast('Could not redraw the board - see the browser console','warn');
   }
 }
-function renderActiveViewInner(){if(viewMode==='board')renderBoard();else if(viewMode==='spam')renderSpamView();else if(viewMode==='archive')renderArchiveView();else if(viewMode==='kpi')renderKpiView();else if(viewMode==='assignlog')renderAssignLogView();else if(viewMode==='insights')renderInsightsView();else if(viewMode==='projects')renderProjectsView();else if(viewMode==='qtSeize')return;else renderCompaniesView();}
+function renderActiveViewInner(){if(viewMode==='board')renderBoard();else if(viewMode==='spam')renderSpamView();else if(viewMode==='archive')renderArchiveView();else if(viewMode==='kpi')renderKpiView();else if(viewMode==='assignlog')renderAssignLogView();else if(viewMode==='insights')renderInsightsView();else if(viewMode==='projects')renderProjectsView();else if(viewMode==='mail')renderMailView();else if(viewMode==='qtSeize')return;else renderCompaniesView();}
 
 // ---------------------------------------------------------------------------
 // Assignment Log
@@ -15258,6 +15406,237 @@ async function emSendReply(){
   }
 }
 
+/* ====================== Received mail ====================================
+
+   What the helpdesk mailbox holds, beside what the board made of each message.
+
+   The board does not turn every mail into a card, and that is correct: an
+   automatic sender is dropped, a reply is merged into the thread it belongs
+   to. What was missing is any way to see it happen. From the board, a mail
+   that never became a card and a mail that was never fetched look identical -
+   both are simply absent - so "did we get that email?" could only be answered
+   by opening Outlook.
+
+   This asks the same mailbox the poller asks, through the same call, and then
+   says for each message which of those things happened to it. The counts at
+   the top are the point: fetched should equal on-board plus merged plus
+   filtered, and anything left over is unaccounted for and worth a look.
+   ========================================================================= */
+let mailViewState = { state: 'idle', rows: [], at: 0, message: '' };
+let mailViewQuery = '';
+let mailViewFilter = 'all';
+let mailViewHours = 96;
+
+/* Why a message is not a card, in the same order the ingest decides it. This
+   mirrors the filter in ingestEmails - if that changes, this has to change
+   with it, and saying nothing would be better than saying something stale. */
+function mailViewClassify(msg) {
+  const onBoard = allTickets.find(t => t && t.id === msg.id);
+  if (onBoard) {
+    const stage = String(ticketState[msg.id] || 'new');
+    const cat = String(ticketCategory[msg.id] || '');
+    const archived = ticketArchived && ticketArchived[msg.id];
+    if (cat === 'Spam') return { kind: 'spam', pill: 'Spam', why: 'On the board, filed as spam.', ticket: onBoard };
+    return {
+      kind: 'ticket',
+      pill: ticketDisplayNumber(msg.id),
+      why: `${archived ? 'Archived' : 'On the board'}${stage ? ' &middot; ' + esc(String(stage).toUpperCase()) : ''}`,
+      ticket: onBoard
+    };
+  }
+
+  // Automatic mail is dropped before a ticket is ever considered.
+  if (isAutomatic(msg)) {
+    return { kind: 'filtered', pill: 'Filtered', why: mailViewAutoReason(msg) };
+  }
+
+  // A reply lands on the ticket that owns its thread rather than making a new
+  // one, so the message id is nowhere on the board even though the mail was
+  // read and used.
+  const owner = findExistingTicketForEmail(msg);
+  if (owner) {
+    return {
+      kind: 'merged',
+      pill: 'Merged',
+      why: `Folded into ${ticketDisplayNumber(owner.id)} as a reply on that thread.`,
+      ticket: owner
+    };
+  }
+
+  return {
+    kind: 'missing',
+    pill: 'Not on board',
+    why: 'Fetched, not filtered, and no thread claims it. Worth a look.'
+  };
+}
+
+// Which of the automatic rules caught it. A bare "filtered" invites the next
+// question immediately, and the answer is cheap to give.
+function mailViewAutoReason(msg) {
+  const sl = String(msg.sender || '').toLowerCase();
+  if (!sl) return 'No sender.';
+  if (sl === SUPPORT_BOX) return 'Sent by the helpdesk mailbox itself.';
+  if (typeof BLOCKED_EMAILS !== 'undefined' && BLOCKED_EMAILS.has(sl)) return 'Sender is on the blocked list.';
+  const domain = sl.split('@')[1] || '';
+  if (typeof BLOCKED_DOMAINS !== 'undefined' && BLOCKED_DOMAINS.has(domain)) return `Domain ${esc(domain)} is blocked.`;
+  if (typeof NO_REPLY_PATTERNS !== 'undefined' && NO_REPLY_PATTERNS.some(p => sl.includes(p))) return 'Looks like a no-reply address.';
+  if (!msg.subject && !msg.summary) return 'No subject and no body.';
+  return 'Matched an automatic-mail rule (newsletter, meeting invite, or similar).';
+}
+
+async function loadMailView() {
+  mailViewState = { ...mailViewState, state: 'loading' };
+  renderMailView();
+  try {
+    // The same call the poller makes, against the same mailbox, so this view
+    // cannot disagree with the ingest about what is there.
+    const res = await window.cowork.callMcpTool(SEARCH_TOOL, {
+      limit: MAIL_FETCH_LIMIT,
+      mailboxOwnerEmail: SUPPORT_BOX,
+      afterDateTime: isoHoursAgo(mailViewHours)
+    });
+    if (res?.isError) throw new Error(res.error || 'mailbox_unavailable');
+    const rows = Array.isArray(res?.structuredContent) ? res.structuredContent : [];
+    rows.sort((a, b) => new Date(b?.receivedDateTime || 0) - new Date(a?.receivedDateTime || 0));
+    mailViewState = { state: 'done', rows, at: Date.now(), message: '' };
+  } catch (error) {
+    mailViewState = { state: 'error', rows: [], at: Date.now(), message: String(error?.message || error) };
+  }
+  renderMailView();
+}
+
+function mailViewMatches(row, verdict) {
+  if (mailViewFilter !== 'all' && verdict.kind !== mailViewFilter) {
+    // Spam sits under "on the board", since that is where the mail went.
+    if (!(mailViewFilter === 'ticket' && verdict.kind === 'spam')) return false;
+  }
+  const q = mailViewQuery.trim().toLowerCase();
+  if (!q) return true;
+  return [row.subject, row.sender, row.summary].some(v => String(v || '').toLowerCase().includes(q));
+}
+
+function renderMailView() {
+  const host = document.getElementById('mv-body');
+  const tiles = document.getElementById('mv-tiles');
+  const sub = document.getElementById('mv-sub');
+  if (!host) return;
+  const s = mailViewState;
+
+  if (sub) {
+    sub.textContent = s.at
+      ? `${SUPPORT_BOX} · ${s.rows.length} message${s.rows.length === 1 ? '' : 's'} fetched · read ${fmtDate(new Date(s.at).toISOString())}`
+      : `${SUPPORT_BOX} · press Fetch to read the mailbox`;
+  }
+
+  if (s.state === 'loading') {
+    if (tiles) tiles.innerHTML = '';
+    host.innerHTML = '<div class="mv-loading"><span class="spinner"></span> Reading the mailbox…</div>';
+    return;
+  }
+  if (s.state === 'error') {
+    if (tiles) tiles.innerHTML = '';
+    host.innerHTML = `<div class="mv-error">Could not read the mailbox: ${esc(s.message)}</div>`;
+    return;
+  }
+  if (s.state === 'idle') {
+    if (tiles) tiles.innerHTML = '';
+    host.innerHTML = '<div class="mv-empty">Press <strong>Fetch</strong> to read what the helpdesk mailbox is holding.</div>';
+    return;
+  }
+
+  const judged = s.rows.map(row => ({ row, verdict: mailViewClassify(row) }));
+  const count = kind => judged.filter(j => j.verdict.kind === kind).length;
+  const counts = {
+    all: judged.length,
+    ticket: count('ticket') + count('spam'),
+    merged: count('merged'),
+    filtered: count('filtered'),
+    missing: count('missing')
+  };
+
+  if (tiles) {
+    const tile = (key, label, alert) => `<button class="mv-tile${mailViewFilter === key ? ' on' : ''}${alert && counts[key] ? ' mv-tile-alert' : ''}" type="button" data-mv-tile="${key}">
+        <div class="mv-tile-n">${counts[key]}</div><div class="mv-tile-l">${label}</div></button>`;
+    tiles.innerHTML = tile('all', 'Fetched')
+      + tile('ticket', 'On the board')
+      + tile('merged', 'Merged into a thread')
+      + tile('filtered', 'Filtered out')
+      + tile('missing', 'Unaccounted for', true);
+    tiles.querySelectorAll('[data-mv-tile]').forEach(b => b.addEventListener('click', () => {
+      mailViewFilter = b.dataset.mvTile;
+      const sel = document.getElementById('mv-filter');
+      if (sel) sel.value = mailViewFilter;
+      renderMailView();
+    }));
+  }
+
+  const shown = judged.filter(j => mailViewMatches(j.row, j.verdict));
+  if (!shown.length) {
+    host.innerHTML = `<div class="mv-empty">${s.rows.length ? 'No message here matches that.' : 'The mailbox returned nothing for this window.'}</div>`;
+    return;
+  }
+
+  host.innerHTML = `<div class="mv-list">${shown.map(({ row, verdict }) => {
+    const internal = isInternalEmailAddress(row.sender) ? '<span class="mv-tag">internal</span>' : '';
+    return `<div class="mv-row" data-mv-open="${esc(row.id)}">
+      <div class="mv-when">${esc(fmtDate(row.receivedDateTime))}</div>
+      <div class="mv-main">
+        <div class="mv-subject">${esc(row.subject || '(no subject)')}</div>
+        <div class="mv-from">${esc(row.sender || 'unknown sender')}${internal}</div>
+        ${row.summary ? `<div class="mv-preview">${esc(row.summary)}</div>` : ''}
+      </div>
+      <div class="mv-side">
+        <span class="mv-pill mv-pill-${verdict.kind}">${esc(verdict.pill)}</span>
+        <span class="mv-why">${verdict.why}</span>
+      </div>
+    </div>`;
+  }).join('')}</div>`;
+
+  // Clicking a row goes to the ticket when there is one, and to Outlook when
+  // there is not - which is the only place left to look at that point.
+  host.querySelectorAll('[data-mv-open]').forEach(el => el.addEventListener('click', () => {
+    const hit = judged.find(j => String(j.row.id) === el.dataset.mvOpen);
+    if (!hit) return;
+    if (hit.verdict.ticket) {
+      showBoardView();
+      openEmailModal(hit.verdict.ticket);
+      return;
+    }
+    if (hit.row.webLink) window.open(hit.row.webLink, '_blank', 'noopener');
+    else showToast('No ticket and no Outlook link for that message');
+  }));
+}
+
+function showMailView() {
+  viewMode = 'mail';
+  setBoardChromeVisible(false);
+  hidePrimaryViews();
+  document.getElementById('mail-view').style.display = 'block';
+  setSideNavActive('mail');
+  saveLastWorkspaceSession('mail');
+  renderMailView();
+  // Fetched on first open rather than on every visit: it is a live Graph call
+  // and re-reading the mailbox on a tab switch would be rude to the throttle.
+  if (mailViewState.state === 'idle') loadMailView();
+}
+
+document.getElementById('mail-view-btn')?.addEventListener('click', () => {
+  if (viewMode === 'mail') showBoardView(); else showMailView();
+});
+document.getElementById('mv-refresh')?.addEventListener('click', loadMailView);
+document.getElementById('mv-window')?.addEventListener('change', e => {
+  mailViewHours = Number(e.target.value) || 96;
+  loadMailView();
+});
+document.getElementById('mv-filter')?.addEventListener('change', e => {
+  mailViewFilter = e.target.value || 'all';
+  renderMailView();
+});
+document.getElementById('mv-search')?.addEventListener('input', e => {
+  mailViewQuery = e.target.value;
+  renderMailView();
+});
+
 /* ====================== Feedback, from wherever you are ==================
 
    The button is in the header and the report goes to /api/feedback, which
@@ -15569,6 +15948,69 @@ function fbGrow() {
   box.style.height = Math.min(132, Math.max(40, box.scrollHeight)) + 'px';
 }
 
+/* Files staged for the next report. Same helpers as the manual-ticket form:
+   images are downscaled in the browser, so the screenshot of an error dialog
+   that started as six megabytes arrives as a few hundred KB. */
+let fbFiles = [];
+
+function fbRenderFiles() {
+  const box = document.getElementById('fb-files');
+  const clip = document.getElementById('fb-clip');
+  if (clip) clip.classList.toggle('has', fbFiles.length > 0);
+  if (!box) return;
+  box.innerHTML = fbFiles.map(f => `<div class="fb-file">
+    ${f.previewUrl
+      ? `<img class="fb-file-thumb" src="${esc(f.previewUrl)}" alt="${esc(f.name)}">`
+      : `<span class="fb-file-ext">${esc(atExtLabel(f.name, f.type))}</span>`}
+    <span class="fb-file-meta">
+      <span class="fb-file-name" title="${esc(f.name)}">${esc(f.name)}</span>
+      <span class="fb-file-size">${atFmtSize(f.size)}</span>
+    </span>
+    <button class="fb-file-x" type="button" data-fb-drop="${esc(f.key)}" title="Remove" aria-label="Remove ${esc(f.name)}">&times;</button>
+  </div>`).join('');
+  box.querySelectorAll('[data-fb-drop]').forEach(b => b.addEventListener('click', () => {
+    const gone = fbFiles.find(f => f.key === b.dataset.fbDrop);
+    if (gone?.previewUrl) URL.revokeObjectURL(gone.previewUrl);
+    fbFiles = fbFiles.filter(f => f.key !== b.dataset.fbDrop);
+    fbRenderFiles();
+    fbUpdateCount();
+  }));
+}
+
+async function fbStageFiles(fileList) {
+  const incoming = Array.from(fileList || []);
+  if (!incoming.length) return;
+  const refused = [];
+  for (const file of incoming) {
+    if (fbFiles.length >= AT_MAX_FILES) { refused.push(`Only ${AT_MAX_FILES} files can go with one report.`); break; }
+    const type = String(file.type || '').toLowerCase().split(';')[0];
+    if (!AT_OK_TYPES.has(type)) { refused.push(`${file.name || 'That file'} is a ${type || 'unknown'} file and cannot be attached.`); continue; }
+    const shrunk = await atShrinkImage(file);
+    const blob = shrunk?.blob || file;
+    if (blob.size > AT_MAX_BYTES) { refused.push(`${file.name} is ${atFmtSize(blob.size)}; the limit is ${atFmtSize(AT_MAX_BYTES)}.`); continue; }
+    const stamped = new Date().toISOString().slice(0, 16).replace(/[:T]/g, '-');
+    fbFiles.push({
+      key: 'fb' + Date.now() + Math.random().toString(36).slice(2, 7),
+      name: file.name && file.name !== 'image.png' ? file.name : `screenshot-${stamped}.png`,
+      type, size: blob.size, blob,
+      previewUrl: type.startsWith('image/') ? URL.createObjectURL(blob) : '',
+      width: shrunk?.width || null, height: shrunk?.height || null
+    });
+  }
+  fbRenderFiles();
+  fbUpdateCount();
+  if (refused.length) await fbSay(refused.join(' '), 'warn', 200);
+  else if (fbFiles.length) await fbSay(`Got ${fbFiles.length} file${fbFiles.length === 1 ? '' : 's'} - they go with the report when you send it.`, '', 260);
+}
+
+function fbClearFiles() {
+  fbFiles.forEach(f => { if (f.previewUrl) URL.revokeObjectURL(f.previewUrl); });
+  fbFiles = [];
+  const input = document.getElementById('fb-file-input');
+  if (input) input.value = '';
+  fbRenderFiles();
+}
+
 function fbSaveDraft() {
   const box = document.getElementById('fb-message');
   if (!box) return;
@@ -15638,7 +16080,19 @@ async function fbSubmit() {
   fbAwaitingDetail = false;
 
   const ticket = fbIncludeTicket ? fbTicketNow() : null;
-  fbPush('me', message);
+  // Encoded before the request so a failure here is reported as a failure to
+  // attach rather than a failure to send.
+  const staged = fbFiles.slice();
+  let sending = [];
+  try {
+    for (const f of staged) {
+      sending.push({ name: f.name, type: f.type, width: f.width, height: f.height, data: await atBlobToBase64(f.blob) });
+    }
+  } catch (error) {
+    await fbSay(`Could not read the attachment: ${String(error?.message || error)}`, 'bad', 200);
+    return;
+  }
+  fbPush('me', message + (staged.length ? `\n\n(${staged.length} attachment${staged.length === 1 ? '' : 's'})` : ''));
   const mine = fbLog[fbLog.length - 1];
   if (box) box.value = '';
   fbUpdateCount();
@@ -15655,7 +16109,7 @@ async function fbSubmit() {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'include',
-      body: JSON.stringify({ category: fbCategory, message, context: fbContext() })
+      body: JSON.stringify({ category: fbCategory, message, context: fbContext(), files: sending })
     });
     const out = await res.json().catch(() => ({}));
     fbSending = false;
@@ -15679,7 +16133,8 @@ async function fbSubmit() {
 
     // Exactly what left the building, so nobody has to wonder afterwards what
     // was attached to their name.
-    await fbSay(`They got: you, your email${ticket ? ', ' + ticket.label : ''}, the time, and what you wrote.`, '', 420);
+    await fbSay(`They got: you, your email${ticket ? ', ' + ticket.label : ''}, the time, what you wrote${staged.length ? `, and ${staged.length} file${staged.length === 1 ? '' : 's'}` : ''}.`, '', 420);
+    fbClearFiles();
     // A fresh report starts clean: the guessed category and a ticket named in
     // the last message should not leak into the next one.
     fbPinnedTicket = null;
@@ -15710,7 +16165,7 @@ function fbUpdateCount() {
   out.classList.toggle('over', left < 0);
   // Nothing to send, or too much of it: the button says so rather than waiting
   // to be pressed and then refusing.
-  if (send && !fbSending) send.disabled = !box.value.trim() || left < 0;
+  if (send && !fbSending) send.disabled = (!box.value.trim() && !fbFiles.length) || left < 0;
 }
 
 async function sendFeedbackTest(){
@@ -15750,6 +16205,20 @@ document.getElementById('fb-close')?.addEventListener('click', ()=>fbToggleChat(
 document.getElementById('fb-test')?.addEventListener('click', sendFeedbackTest);
 document.getElementById('fb-send')?.addEventListener('click', fbSubmit);
 document.getElementById('fb-message')?.addEventListener('input', fbOnType);
+document.getElementById('fb-clip')?.addEventListener('click', () => document.getElementById('fb-file-input')?.click());
+document.getElementById('fb-file-input')?.addEventListener('change', e => {
+  fbStageFiles(e.target.files);
+  e.target.value = '';
+});
+// Bound to the panel rather than the clip: nobody clicks a paperclip before
+// pressing Ctrl+V, and a paste of text still goes into the box untouched.
+document.getElementById('fb-chat')?.addEventListener('paste', e => {
+  const files = Array.from(e.clipboardData?.items || [])
+    .filter(i => i.kind === 'file').map(i => i.getAsFile()).filter(Boolean);
+  if (!files.length) return;
+  e.preventDefault();
+  fbStageFiles(files);
+});
 fbRenderCats();
 /* Enter sends, Shift+Enter is a new line - the way a chat box behaves. The
    reply composer keeps Ctrl+Enter because a client reply is long and being
