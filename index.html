@@ -2786,6 +2786,95 @@ header {
   white-space: nowrap;
 }
 
+/* ===== Attachments on a manual ticket ====================================
+   A drop zone that is also a paste target. The paste half is the one that
+   matters: the thing an agent has when they open this modal is usually a
+   screenshot already on the clipboard, and making them save it to Downloads
+   first and then go and find it is the whole friction this removes.
+   ========================================================================= */
+.at-zone {
+  position:relative; border:1.5px dashed var(--border-strong,#cbd5e1); border-radius:12px;
+  background:var(--surface-soft,#f8fafc); padding:16px 14px; text-align:center;
+  cursor:pointer; transition:border-color .15s ease, background .15s ease;
+}
+.at-zone:hover { border-color:var(--primary,#4f46e5); background:var(--primary-soft,#eef2ff); }
+.at-zone:focus-visible { outline:2px solid var(--primary,#4f46e5); outline-offset:2px; }
+.at-zone.dragging { border-color:var(--primary,#4f46e5); background:var(--primary-soft,#eef2ff); border-style:solid; }
+.at-zone-icon { font-size:19px; line-height:1; }
+.at-zone-main { display:block; margin-top:6px; font-size:12px; font-weight:600; color:var(--text,#0f172a); }
+.at-zone-sub { display:block; margin-top:3px; font-size:10.5px; color:var(--muted,#64748b); line-height:1.5; }
+.at-kbd {
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:9.5px;
+  background:var(--surface,#fff); border:1px solid var(--border-strong,#cbd5e1);
+  border-bottom-width:2px; border-radius:4px; padding:1px 4px; color:var(--text-soft,#334155);
+}
+
+.at-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(112px,1fr)); gap:9px; margin-top:11px; }
+.at-item {
+  position:relative; border:1px solid var(--border,#e2e8f0); border-radius:10px;
+  background:var(--surface,#fff); overflow:hidden;
+}
+.at-thumb {
+  display:block; width:100%; height:76px; object-fit:cover; background:var(--surface-muted,#f1f5f9);
+  border:0; padding:0; cursor:zoom-in;
+}
+.at-thumb-file {
+  display:flex; align-items:center; justify-content:center; width:100%; height:76px;
+  background:var(--surface-muted,#f1f5f9); font-size:9.5px; font-weight:800;
+  letter-spacing:.06em; color:var(--muted,#64748b); border:0; cursor:default;
+}
+.at-meta { padding:5px 7px 6px; }
+.at-name { font-size:10.5px; font-weight:600; color:var(--text,#0f172a); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.at-size { font-size:9.5px; color:var(--muted,#64748b); font-variant-numeric:tabular-nums; }
+.at-shrunk { color:var(--success,#16a34a); }
+.at-x {
+  position:absolute; top:5px; right:5px; width:20px; height:20px; border-radius:50%;
+  border:0; cursor:pointer; font-size:12px; line-height:1;
+  background:rgba(15,23,42,.62); color:#fff; display:flex; align-items:center; justify-content:center;
+}
+.at-x:hover { background:rgba(190,18,60,.92); }
+.at-note { margin-top:8px; font-size:10.5px; line-height:1.5; }
+.at-note-bad { color:var(--red-700,#b91c1c); }
+.at-note-busy { color:var(--muted,#64748b); }
+
+/* On the ticket itself, once it exists. */
+.at-strip { margin:14px 0 4px; }
+.at-strip-head {
+  display:flex; align-items:center; gap:8px; margin-bottom:8px;
+  font-size:10.5px; font-weight:800; text-transform:uppercase; letter-spacing:.05em; color:var(--muted,#64748b);
+}
+.at-strip-head span { flex:1; }
+.at-dl { font-size:10px; color:var(--primary,#4f46e5); text-decoration:none; font-weight:600; }
+.at-dl:hover { text-decoration:underline; }
+
+/* Full-size viewer. Its own layer, above the modals, because an attachment is
+   opened from inside one. */
+.at-lightbox {
+  position:fixed; inset:0; z-index:12000; display:none;
+  background:rgba(8,12,22,.9); align-items:center; justify-content:center; padding:34px 20px;
+}
+.at-lightbox.open { display:flex; }
+.at-lb-img { max-width:100%; max-height:100%; object-fit:contain; border-radius:8px; box-shadow:0 18px 50px rgba(0,0,0,.5); }
+.at-lb-bar {
+  position:absolute; top:0; left:0; right:0; display:flex; align-items:center; gap:12px;
+  padding:9px 14px; background:rgba(8,12,22,.72); color:#e8eefc; font-size:11.5px;
+}
+.at-lb-bar strong { font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.at-lb-bar .at-lb-spacer { flex:1; }
+.at-lb-btn {
+  background:rgba(255,255,255,.12); border:1px solid rgba(255,255,255,.22); color:#e8eefc;
+  border-radius:7px; padding:3px 10px; font-size:11px; cursor:pointer; text-decoration:none;
+}
+.at-lb-btn:hover { background:rgba(255,255,255,.22); }
+.at-lb-nav {
+  position:absolute; top:50%; transform:translateY(-50%); width:38px; height:56px;
+  background:rgba(8,12,22,.55); border:1px solid rgba(255,255,255,.16); color:#e8eefc;
+  font-size:17px; cursor:pointer; border-radius:9px;
+}
+.at-lb-nav:hover { background:rgba(8,12,22,.8); }
+.at-lb-prev { left:14px; }
+.at-lb-next { right:14px; }
+
 .modal-actions {
   padding: 12px 18px;
   border-top: 1px solid var(--border);
@@ -5304,6 +5393,29 @@ th {
 .fb-typing span:nth-child(3) { animation-delay: .36s; }
 @keyframes fb-blink { 0%, 80%, 100% { opacity: .25; } 40% { opacity: 1; } }
 
+/* Each message is a row so a timestamp can sit under it without pushing the
+   bubble around. */
+.fb-row { display: flex; flex-direction: column; gap: 2px; }
+.fb-row-me { align-items: flex-end; }
+.fb-row-bot { align-items: flex-start; }
+.fb-stamp { font-size: 9px; color: var(--muted-light, #94a3b8); padding: 0 4px; font-variant-numeric: tabular-nums; }
+
+/* What travels with the report, and a few openers. One tap each. */
+.fb-chips { display: flex; gap: 6px; padding: 8px 13px 0; flex-wrap: wrap; }
+.fb-chip {
+  border: 1px solid var(--border, #e2e8f0); background: var(--surface, #fff);
+  color: var(--muted, #64748b); border-radius: 999px; padding: 3px 9px;
+  font-size: 10.5px; cursor: pointer; font-family: inherit; line-height: 1.5;
+}
+.fb-chip:hover { border-color: var(--border-strong, #cbd5e1); color: var(--text, #0f172a); }
+.fb-chip-on {
+  background: var(--indigo-50, #eef2ff); border-color: var(--indigo-300, #a5b4fc);
+  color: var(--indigo-800, #3730a3); font-weight: 600;
+}
+.fb-chip-x { opacity: .55; margin-left: 1px; }
+.fb-chip-on:hover .fb-chip-x { opacity: 1; }
+.fb-chip-open { font-style: italic; }
+
 .fb-cats { display: flex; gap: 6px; padding: 9px 13px 0; flex-wrap: wrap; }
 .fb-cat {
   font-size: 11px; font-weight: 600; padding: 3px 11px; border-radius: 999px;
@@ -5889,6 +6001,7 @@ th {
   </header>
   <div class="fb-log" id="fb-log" aria-live="polite"></div>
   <div class="fb-cats" id="fb-cats" role="group" aria-label="What kind of feedback"></div>
+  <div class="fb-chips" id="fb-chips" role="group" aria-label="What travels with this report, and openers"></div>
   <div class="fb-compose">
     <textarea class="fb-textarea" id="fb-message" rows="2" spellcheck="true"
       placeholder="What happened, and what did you expect instead?"></textarea>
@@ -6000,6 +6113,7 @@ th {
 </div>
 
 <!--  Create Ticket modal  -->
+<div class="at-lightbox" id="at-lightbox" role="dialog" aria-label="Attachment viewer"></div>
 <div class="modal-bg" id="create-modal">
   <div class="modal" style="max-width:500px;">
     <div class="modal-head"><h2> New Manual Ticket</h2><button class="modal-close-x" data-close="create-modal"></button></div>
@@ -6043,6 +6157,17 @@ th {
       <div class="form-field">
         <label>Assign to</label>
         <select id="ct-agent" class="form-input"></select>
+      </div>
+      <div class="form-field">
+        <label style="display:flex;align-items:center;justify-content:space-between;">Attachments <span style="color:var(--slate-400);font-weight:400;font-size:11px;">screenshots, logs, PDFs</span></label>
+        <div class="at-zone" id="ct-at-zone" tabindex="0" role="button" aria-label="Add attachments: click to browse, drag files here, or paste a screenshot">
+          <div class="at-zone-icon">&#128206;</div>
+          <span class="at-zone-main">Drop files here, or click to browse</span>
+          <span class="at-zone-sub">Paste a screenshot with <span class="at-kbd">Ctrl</span>+<span class="at-kbd">V</span> &middot; images are shrunk before upload &middot; up to 10 files, 10MB each</span>
+        </div>
+        <input id="ct-at-input" type="file" multiple accept="image/*,application/pdf,text/plain,text/csv,application/json,application/zip,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.eml,.msg" style="display:none;">
+        <div class="at-grid" id="ct-at-grid"></div>
+        <div class="at-note" id="ct-at-note"></div>
       </div>
     </div>
     <div class="modal-actions">
@@ -8384,6 +8509,376 @@ document.getElementById('jira-settings-save').addEventListener('click',async()=>
   showToast('Jira connected','ok');
 });
 
+/* ====================== Attachments on a manual ticket ====================
+
+   Three ways in, because an agent arrives holding the file in three different
+   ways: a click for something saved, a drag for something on the desktop, and
+   a paste for the screenshot they just took - which is the common one, and the
+   one the old form could not take at all.
+
+   Images are downscaled here, in the browser, before anything is sent. A
+   phone or 4K screenshot is six to twelve megabytes of pixels nobody needs to
+   read an error dialog; at 1600px on the long edge it is a few hundred KB.
+   That is what makes it defensible to keep the bytes in Postgres rather than
+   standing up a bucket for this.
+
+   Staged files live here until the ticket exists. The ticket id is minted
+   before the upload (manual_<timestamp>), so the sequence is: create the
+   ticket, then post the files against its id.
+   ========================================================================= */
+const AT_MAX_FILES = 10;
+const AT_MAX_BYTES = 10 * 1024 * 1024;
+const AT_IMAGE_MAX_EDGE = 1600;
+// Mirrors TICKET_ATTACH_TYPES on the server. Checked here too so a wrong file
+// is refused before it is read and encoded rather than after a round trip.
+const AT_OK_TYPES = new Set([
+  'image/png', 'image/jpeg', 'image/gif', 'image/webp', 'image/avif',
+  'application/pdf', 'text/plain', 'text/csv', 'application/json',
+  'application/zip', 'message/rfc822', 'application/vnd.ms-outlook',
+  'application/msword', 'application/vnd.ms-excel',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  'application/vnd.openxmlformats-officedocument.presentationml.presentation'
+]);
+
+let ctAttachments = [];          // staged: {key,name,type,size,originalSize,blob,previewUrl,width,height}
+let ticketAttachmentCount = {};  // ticketId -> how many are stored, for the board badge
+let atLightbox = { items: [], index: 0 };
+
+function atFmtSize(bytes) {
+  const n = Number(bytes) || 0;
+  if (n < 1024) return n + ' B';
+  if (n < 1048576) return (n / 1024).toFixed(0) + ' KB';
+  return (n / 1048576).toFixed(1) + ' MB';
+}
+
+function atExtLabel(name, type) {
+  const ext = String(name || '').split('.').pop();
+  if (ext && ext.length <= 5 && ext !== name) return ext.toUpperCase();
+  return String(type || 'file').split('/').pop().slice(0, 5).toUpperCase();
+}
+
+function atNote(text, kind) {
+  const el = document.getElementById('ct-at-note');
+  if (!el) return;
+  el.className = 'at-note' + (kind === 'bad' ? ' at-note-bad' : (kind === 'busy' ? ' at-note-busy' : ''));
+  el.innerHTML = text || '';
+}
+
+/* Downscale an image to AT_IMAGE_MAX_EDGE on its longest side. Returns the
+   original blob unchanged when it is already small enough, or when anything
+   goes wrong - a failed re-encode must not lose the agent's file. PNG is kept
+   as PNG (screenshots of text stay crisp and stay small); anything else is
+   re-encoded as JPEG, where the quality setting actually buys something. */
+function atShrinkImage(file) {
+  return new Promise(resolve => {
+    if (!String(file.type || '').startsWith('image/') || file.type === 'image/gif') return resolve(null);
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      const longest = Math.max(img.naturalWidth, img.naturalHeight);
+      if (!longest) { URL.revokeObjectURL(url); return resolve(null); }
+      const scale = Math.min(1, AT_IMAGE_MAX_EDGE / longest);
+      const w = Math.max(1, Math.round(img.naturalWidth * scale));
+      const h = Math.max(1, Math.round(img.naturalHeight * scale));
+      // Already small and already a sane size on disk: leave it alone.
+      if (scale === 1 && file.size <= 900 * 1024) {
+        URL.revokeObjectURL(url);
+        return resolve({ blob: file, width: w, height: h });
+      }
+      try {
+        const canvas = document.createElement('canvas');
+        canvas.width = w; canvas.height = h;
+        const ctx = canvas.getContext('2d');
+        ctx.imageSmoothingQuality = 'high';
+        ctx.drawImage(img, 0, 0, w, h);
+        const asPng = file.type === 'image/png';
+        canvas.toBlob(blob => {
+          URL.revokeObjectURL(url);
+          // Keep whichever is actually smaller. Re-encoding a small PNG can
+          // make it bigger, and shipping the bigger one would be silly.
+          if (!blob || blob.size >= file.size) return resolve({ blob: file, width: img.naturalWidth, height: img.naturalHeight });
+          resolve({ blob, width: w, height: h });
+        }, asPng ? 'image/png' : 'image/jpeg', asPng ? undefined : 0.85);
+      } catch (_) {
+        URL.revokeObjectURL(url);
+        resolve(null);
+      }
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); resolve(null); };
+    img.src = url;
+  });
+}
+
+function atRenderGrid() {
+  const grid = document.getElementById('ct-at-grid');
+  if (!grid) return;
+  grid.innerHTML = ctAttachments.map(f => {
+    const shrunk = f.originalSize && f.originalSize > f.size
+      ? ` <span class="at-shrunk">&darr;${Math.round((1 - f.size / f.originalSize) * 100)}%</span>`
+      : '';
+    const thumb = f.previewUrl
+      ? `<img class="at-thumb" src="${esc(f.previewUrl)}" alt="${esc(f.name)}" data-at-zoom="${esc(f.key)}">`
+      : `<div class="at-thumb-file">${esc(atExtLabel(f.name, f.type))}</div>`;
+    return `<div class="at-item">
+      ${thumb}
+      <button class="at-x" type="button" data-at-drop="${esc(f.key)}" title="Remove" aria-label="Remove ${esc(f.name)}">&times;</button>
+      <div class="at-meta">
+        <div class="at-name" title="${esc(f.name)}">${esc(f.name)}</div>
+        <div class="at-size">${atFmtSize(f.size)}${shrunk}</div>
+      </div>
+    </div>`;
+  }).join('');
+
+  grid.querySelectorAll('[data-at-drop]').forEach(b => b.addEventListener('click', e => {
+    e.stopPropagation();
+    const key = b.dataset.atDrop;
+    const gone = ctAttachments.find(f => f.key === key);
+    if (gone?.previewUrl) URL.revokeObjectURL(gone.previewUrl);
+    ctAttachments = ctAttachments.filter(f => f.key !== key);
+    atRenderGrid();
+    atNote(ctAttachments.length ? '' : '');
+  }));
+  grid.querySelectorAll('[data-at-zoom]').forEach(b => b.addEventListener('click', e => {
+    e.stopPropagation();
+    const images = ctAttachments.filter(f => f.previewUrl)
+      .map(f => ({ url: f.previewUrl, filename: f.name, contentType: f.type, isImage: true, inline: true }));
+    atOpenLightbox(images, images.findIndex(i => i.filename === ctAttachments.find(f => f.key === b.dataset.atZoom)?.name));
+  }));
+}
+
+async function atStage(fileList) {
+  const incoming = Array.from(fileList || []);
+  if (!incoming.length) return;
+  const problems = [];
+  atNote('<span class="spinner"></span> Preparing ' + incoming.length + ' file' + (incoming.length === 1 ? '' : 's') + '…', 'busy');
+
+  for (const file of incoming) {
+    if (ctAttachments.length >= AT_MAX_FILES) { problems.push(`Only ${AT_MAX_FILES} files can be attached; the rest were skipped.`); break; }
+    const type = String(file.type || '').toLowerCase().split(';')[0];
+    if (!AT_OK_TYPES.has(type)) { problems.push(`${file.name || 'That file'} is a ${type || 'unknown'} file and cannot be attached.`); continue; }
+
+    const shrunk = await atShrinkImage(file);
+    const blob = shrunk?.blob || file;
+    if (blob.size > AT_MAX_BYTES) { problems.push(`${file.name} is ${atFmtSize(blob.size)}; the limit is ${atFmtSize(AT_MAX_BYTES)}.`); continue; }
+
+    // A pasted screenshot arrives as "image.png" with no useful name, so give
+    // it one that will still mean something in a week.
+    const stamped = new Date().toISOString().slice(0, 16).replace(/[:T]/g, '-');
+    const name = file.name && file.name !== 'image.png' ? file.name : `screenshot-${stamped}.png`;
+    ctAttachments.push({
+      key: 'at' + Date.now() + Math.random().toString(36).slice(2, 7),
+      name, type, size: blob.size, originalSize: file.size, blob,
+      previewUrl: type.startsWith('image/') ? URL.createObjectURL(blob) : '',
+      width: shrunk?.width || null, height: shrunk?.height || null
+    });
+  }
+
+  atRenderGrid();
+  atNote(problems.length ? problems.join('<br>') : '', problems.length ? 'bad' : '');
+}
+
+function atBlobToBase64(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const out = String(reader.result || '');
+      const comma = out.indexOf(',');
+      resolve(comma >= 0 ? out.slice(comma + 1) : '');
+    };
+    reader.onerror = () => reject(new Error('Could not read ' + (blob.name || 'the file')));
+    reader.readAsDataURL(blob);
+  });
+}
+
+/* Posts the staged files against a ticket that now exists. Returns how many
+   landed. A failure here is reported and does not unwind the ticket: the
+   ticket is the record, the screenshot is supporting material, and losing the
+   ticket because an upload failed would be the wrong trade. */
+async function atUploadStaged(ticketId) {
+  if (!ctAttachments.length) return 0;
+  const files = [];
+  for (const f of ctAttachments) {
+    files.push({ name: f.name, type: f.type, width: f.width, height: f.height, data: await atBlobToBase64(f.blob) });
+  }
+  const res = await fetch(`/api/tickets/${encodeURIComponent(ticketId)}/attachments`, {
+    method: 'POST', credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ files })
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || data.ok === false) throw new Error(data?.message || data?.error || ('HTTP ' + res.status));
+  return (data.rows || []).length;
+}
+
+function atResetStaged() {
+  ctAttachments.forEach(f => { if (f.previewUrl) URL.revokeObjectURL(f.previewUrl); });
+  ctAttachments = [];
+  const grid = document.getElementById('ct-at-grid');
+  if (grid) grid.innerHTML = '';
+  atNote('');
+  const input = document.getElementById('ct-at-input');
+  if (input) input.value = '';
+}
+
+function atWireCreateZone() {
+  const zone = document.getElementById('ct-at-zone');
+  const input = document.getElementById('ct-at-input');
+  if (!zone || !input || zone.dataset.wired) return;
+  zone.dataset.wired = '1';
+
+  zone.addEventListener('click', () => input.click());
+  zone.addEventListener('keydown', e => {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); input.click(); }
+  });
+  input.addEventListener('change', () => { atStage(input.files); input.value = ''; });
+
+  // dragover has to be prevented on every event or the browser navigates to
+  // the file instead of handing it over.
+  ['dragenter', 'dragover'].forEach(ev => zone.addEventListener(ev, e => {
+    e.preventDefault(); e.stopPropagation(); zone.classList.add('dragging');
+  }));
+  ['dragleave', 'drop'].forEach(ev => zone.addEventListener(ev, e => {
+    e.preventDefault(); e.stopPropagation();
+    if (ev === 'dragleave' && zone.contains(e.relatedTarget)) return;
+    zone.classList.remove('dragging');
+  }));
+  zone.addEventListener('drop', e => atStage(e.dataTransfer?.files));
+
+  // Paste is bound to the modal, not the zone: nobody clicks a drop zone
+  // before pressing Ctrl+V, and a paste into the subject or description box
+  // should still pick up an image while leaving typed text alone.
+  const modal = document.getElementById('create-modal');
+  modal?.addEventListener('paste', e => {
+    const items = Array.from(e.clipboardData?.items || []);
+    const files = items.filter(i => i.kind === 'file').map(i => i.getAsFile()).filter(Boolean);
+    if (!files.length) return;
+    e.preventDefault();
+    atStage(files);
+  });
+}
+
+/* ---------------------------------------------------------------------------
+   Stored attachments, on the ticket
+   --------------------------------------------------------------------------- */
+
+/* Appends the attachment strip to an open ticket. Guarded on the ticket id so
+   a slow response for the previous ticket cannot paint itself into the one the
+   agent has since opened. */
+let atShowingFor = null;
+async function atShowForTicket(ticketId){
+  atShowingFor = ticketId;
+  const rows = await atFetchForTicket(ticketId);
+  if (atShowingFor !== ticketId) return;
+  const host = document.getElementById('em-body');
+  if (!host || !rows.length) return;
+  const holder = document.createElement('div');
+  holder.innerHTML = atStripHtml(rows);
+  host.appendChild(holder);
+  atBindStrip(holder, rows);
+}
+async function atFetchForTicket(ticketId) {
+  try {
+    const res = await fetch(`/api/tickets/${encodeURIComponent(ticketId)}/attachments`, { credentials: 'include' });
+    const data = await res.json();
+    if (!res.ok || data.ok === false) return [];
+    const rows = data.rows || [];
+    ticketAttachmentCount[ticketId] = rows.length;
+    return rows;
+  } catch (_) { return []; }
+}
+
+function atStripHtml(rows) {
+  if (!rows.length) return '';
+  const items = rows.map((r, i) => {
+    // Images open in the viewer; everything else opens in a tab, which is
+    // also what makes a PDF work - the byte route sends a sandboxed CSP, and
+    // a browser PDF viewer inside an iframe under that sandbox is not
+    // something to rely on.
+    const thumb = r.isImage
+      ? `<img class="at-thumb" src="${esc(r.url)}" alt="${esc(r.filename)}" data-at-open="${i}" loading="lazy">`
+      : `<a class="at-thumb-file" href="${esc(r.url)}" target="_blank" rel="noopener" title="Open ${esc(r.filename)}" style="cursor:pointer;text-decoration:none;">${esc(atExtLabel(r.filename, r.contentType))}</a>`;
+    return `<div class="at-item">
+      ${thumb}
+      <div class="at-meta">
+        <div class="at-name" title="${esc(r.filename)}">${esc(r.filename)}</div>
+        <div class="at-size">${atFmtSize(r.size)}${r.uploadedBy ? ' &middot; ' + esc(r.uploadedBy) : ''}</div>
+      </div>
+    </div>`;
+  }).join('');
+  const total = rows.reduce((sum, r) => sum + (r.size || 0), 0);
+  return `<div class="at-strip">
+    <div class="at-strip-head">&#128206; ${rows.length} attachment${rows.length === 1 ? '' : 's'}<span></span>${atFmtSize(total)}</div>
+    <div class="at-grid">${items}</div>
+  </div>`;
+}
+
+/* Renders the strip into a host element and wires the viewer. Kept separate
+   from atStripHtml so a caller can drop the markup wherever it wants and then
+   hand the same rows back for the click handlers. */
+function atBindStrip(host, rows) {
+  if (!host) return;
+  host.querySelectorAll('[data-at-open]').forEach(el => el.addEventListener('click', () => {
+    const imgs = rows.filter(r => r.isImage);
+    const clicked = rows[Number(el.dataset.atOpen)];
+    atOpenLightbox(imgs, Math.max(0, imgs.indexOf(clicked)));
+  }));
+}
+
+function atOpenLightbox(items, index) {
+  const list = (items || []).filter(Boolean);
+  if (!list.length) return;
+  atLightbox = { items: list, index: Math.max(0, Math.min(list.length - 1, index || 0)) };
+  atRenderLightbox();
+  document.getElementById('at-lightbox')?.classList.add('open');
+}
+
+function atCloseLightbox() {
+  document.getElementById('at-lightbox')?.classList.remove('open');
+  atLightbox = { items: [], index: 0 };
+}
+
+function atStepLightbox(delta) {
+  if (!atLightbox.items.length) return;
+  const n = atLightbox.items.length;
+  atLightbox.index = (atLightbox.index + delta + n) % n;
+  atRenderLightbox();
+}
+
+function atRenderLightbox() {
+  const host = document.getElementById('at-lightbox');
+  if (!host) return;
+  const item = atLightbox.items[atLightbox.index];
+  if (!item) return;
+  const many = atLightbox.items.length > 1;
+  const view = `<img class="at-lb-img" src="${esc(item.url)}" alt="${esc(item.filename)}">`;
+  host.innerHTML = `
+    <div class="at-lb-bar">
+      <strong>${esc(item.filename)}</strong>
+      ${many ? `<span>${atLightbox.index + 1} / ${atLightbox.items.length}</span>` : ''}
+      <span class="at-lb-spacer"></span>
+      <a class="at-lb-btn" href="${esc(item.url)}" target="_blank" rel="noopener">Open</a>
+      <button class="at-lb-btn" type="button" id="at-lb-close">Close</button>
+    </div>
+    ${view}
+    ${many ? '<button class="at-lb-nav at-lb-prev" type="button" id="at-lb-prev" aria-label="Previous">&#10094;</button>' : ''}
+    ${many ? '<button class="at-lb-nav at-lb-next" type="button" id="at-lb-next" aria-label="Next">&#10095;</button>' : ''}`;
+  host.querySelector('#at-lb-close')?.addEventListener('click', atCloseLightbox);
+  host.querySelector('#at-lb-prev')?.addEventListener('click', e => { e.stopPropagation(); atStepLightbox(-1); });
+  host.querySelector('#at-lb-next')?.addEventListener('click', e => { e.stopPropagation(); atStepLightbox(1); });
+}
+
+document.getElementById('at-lightbox')?.addEventListener('click', e => {
+  // Clicking the backdrop closes; clicking the picture does not.
+  if (e.target?.id === 'at-lightbox') atCloseLightbox();
+});
+document.addEventListener('keydown', e => {
+  if (!document.getElementById('at-lightbox')?.classList.contains('open')) return;
+  if (e.key === 'Escape') atCloseLightbox();
+  else if (e.key === 'ArrowLeft') atStepLightbox(-1);
+  else if (e.key === 'ArrowRight') atStepLightbox(1);
+});
+
 //  Create ticket modal 
 function openCreateModal(){
   document.getElementById('ct-subject').value='';
@@ -8393,6 +8888,8 @@ function openCreateModal(){
   populateCreateSubtypeOptions('Other','');
   document.getElementById('ct-jira').value='';
   document.getElementById('ct-email').value='';
+  atResetStaged();
+  atWireCreateZone();
   document.getElementById('create-modal').classList.add('open');
   setTimeout(()=>document.getElementById('ct-subject').focus(),100);
 }
@@ -8432,8 +8929,28 @@ document.getElementById('ct-submit').addEventListener('click',async()=>{
   if(jiraKey)ticketJira[id]=jiraKey;
   allTickets.unshift(ticket);
   saveState();renderBoard();updateJiraBadge();
+
+  // The ticket is the record; the screenshots are supporting material. So the
+  // ticket is saved first and an upload failure is reported against a ticket
+  // that already exists, rather than unwinding one the agent just filled in.
+  const staged=ctAttachments.length;
+  if(staged){
+    const submitBtn=document.getElementById('ct-submit');
+    if(submitBtn){submitBtn.disabled=true;submitBtn.textContent='Uploading…';}
+    atNote('<span class="spinner"></span> Uploading '+staged+' file'+(staged===1?'':'s')+'…','busy');
+    try{
+      const landed=await atUploadStaged(id);
+      ticketAttachmentCount[id]=landed;
+      showToast('Ticket created with '+landed+' attachment'+(landed===1?'':'s'),'ok');
+    }catch(error){
+      showToast('Ticket created, but the attachments did not upload: '+String(error?.message||error),'warn');
+    }
+    if(submitBtn){submitBtn.disabled=false;submitBtn.textContent='Create Ticket';}
+  }else{
+    showToast('Manual ticket created','ok');
+  }
+  atResetStaged();
   document.getElementById('create-modal').classList.remove('open');
-  showToast('Manual ticket created','ok');
   if(clientEmail)enrichWithHubSpot();
   if(jiraKey)await refreshLinkedJiraIssues(true);
   await syncTicketToHubspot(ticket);
@@ -9371,12 +9888,19 @@ function projectsZeroHtml(){
 function projectCardHtml(p){
   const open=projectOpen===p.slug;
   const fields=p.inputs||[];
-  // Run is disabled without instructions or without a key. The banner that used
-  // to explain the second case is gone, so the button carries the reason itself
-  // rather than sitting dead with nothing to say.
+  // Run is disabled without instructions or without a key, and a disabled
+  // button swallows the click - no handler, no request, nothing on screen. The
+  // reason used to live in a hover title, which answers a mouse resting on it
+  // and never answers a press, so it is written into the card body instead.
+  // Both cases say what to do next, because neither is fixable from here.
   const runBlocked=!p.ready
-    ? 'This project has no instructions saved, so there is nothing to run.'
-    : (!projectsState.configured ? 'Running from the board needs ANTHROPIC_API_KEY on this deployment. Until it is set, run this project inside Claude.' : '');
+    ? {
+        text:'<strong>Needs setup.</strong> This project arrived without its instructions, so there is nothing to send as a prompt. In Claude, open the project and ask it to re-register with its own instructions passed as <code>instructions</code>.'
+          +(projectsState.canEdit?' Or paste them here with <strong>Edit</strong>.':'')
+      }
+    : (!projectsState.configured
+      ? { text:'<strong>The board cannot run this itself.</strong> No <code>ANTHROPIC_API_KEY</code> is set on this deployment. Run the project in Claude and ask it to post the result here &mdash; it will appear under Results below.' }
+      : null);
   // Everything on the card is now a span: this is the inside of a button, and
   // a div in there was never valid markup.
   const foot=[
@@ -9398,10 +9922,10 @@ function projectCardHtml(p){
       <span class="pj-foot">${foot}${runs}</span>
     </button>
     ${open?`<div class="pj-body">
-      ${p.ready?'':`<div class="pj-warn">This project cannot run until its instructions are saved.${projectsState.canEdit?' Use <strong>Edit</strong> below.':''}</div>`}
+      ${runBlocked?`<div class="pj-warn">${runBlocked.text}</div>`:''}
       ${fields.length?fields.map(f=>projectFieldHtml(p.slug,f)).join(''):'<p class="pj-help">This project takes no inputs.</p>'}
       <div class="pj-actions">
-        <button class="btn-primary" data-pj-run="${esc(p.slug)}"${runBlocked?` title="${esc(runBlocked)}"`:''}${(!p.ready||!projectsState.configured||projectThread[p.slug]?.running)?' disabled':''}>${projectThread[p.slug]?.turns?.length?'Run again':'Run'}</button>
+        <button class="btn-primary" data-pj-run="${esc(p.slug)}"${(!p.ready||!projectsState.configured||projectThread[p.slug]?.running)?' disabled':''}>${projectThread[p.slug]?.turns?.length?'Run again':'Run'}</button>
         ${projectsState.canEdit?`<button class="btn-out" data-pj-edit="${esc(p.slug)}">Edit</button>`:''}
         <span class="pj-model">${esc(p.model||projectsState.model||'')}</span>
       </div>
@@ -14670,29 +15194,19 @@ async function emSendReply(){
    The button is in the header and the report goes to /api/feedback, which
    records it, emails it, and posts it to Teams if a webhook is configured.
 
-   The context block is the part that makes a report useful: which view, which
-   build, which browser, and the ticket that was open. Collected here because
-   this is the only place that knows it, shown in the modal rather than
-   described, so nobody has to take on trust what is being attached. */
+   A report carries five things and no more: who wrote it, their email, the
+   ticket they had open IF they had one, the time, and what they said. It used
+   to carry the build, the page, the theme, the viewport and the user agent as
+   well - useful on a bug report, noise on the other three kinds, and none of
+   it read by anyone in a Teams channel. The chip strip shows what is going
+   rather than describing it, and the ticket chip can be taken off. */
 const FB_MAX = 4000;
 let fbCategory = 'bug';
 let fbSending = false;
 
-function fbContext(){
-  return {
-    view: viewMode || 'board',
-    // The ticket whose modal is open, if any - by far the most likely subject
-    // of a bug report, and the thing a reporter is least likely to think to
-    // mention.
-    ticketId: (document.getElementById('email-modal')?.classList.contains('open') && emCurrentTicket?.id)
-      || (comTicketId || ''),
-    build: appBuildVersion || 'unknown',
-    url: location.pathname + location.search,
-    theme: document.documentElement.getAttribute('data-theme') || 'system',
-    viewport: `${window.innerWidth}x${window.innerHeight}`,
-    userAgent: navigator.userAgent
-  };
-}
+// fbContext now lives with the rest of the chat module below: it returns the
+// ticket and nothing else, because the ticket is the only one of the five
+// fields the browser is the authority on.
 
 
 /* ===========================================================================
@@ -14711,100 +15225,247 @@ function fbContext(){
    =========================================================================== */
 
 let fbOpen = false;
-let fbLog = [];          // the visible conversation
+let fbLog = [];            // the visible conversation
 let fbGreeted = false;
+let fbTyping = false;      // the bot's own indicator, separate from send state
+// The ticket rides along only if there is one AND the reporter leaves it on.
+// Their report, their call - which is why it is a chip they can take off
+// rather than a line of small print telling them what was attached.
+let fbIncludeTicket = true;
+let fbAwaitingDetail = false;
+const FB_DRAFT_KEY = 'kanban.feedback.draft';
 
 const FB_CATEGORY_LABEL = { bug: 'Bug', idea: 'Idea', question: 'Question', other: 'Other' };
 
-function fbPush(role, text, tone){
+/* Openers per category. Not templates to be sent as-is - they land in the box
+   as a first line so the reporter is editing a sentence instead of facing an
+   empty field, which is the difference between a report and a shrug. */
+const FB_OPENERS = {
+  bug: ['It breaks when I…', 'It shows the wrong…', 'It is too slow when…'],
+  idea: ['It would help if…', 'Can we add…', 'It would be quicker if…'],
+  question: ['How do I…', 'Why does it…', 'Is it meant to…'],
+  other: ['Something to flag…', 'A small annoyance…']
+};
+
+const FB_ASKS = {
+  bug: 'What did you do, and what happened instead of what you expected?',
+  idea: 'What would you like to be able to do, and what is it costing you now?',
+  question: 'What are you trying to work out?',
+  other: 'Go ahead - what is on your mind?'
+};
+
+function fbClock(ts) {
+  try { return new Date(ts).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }); }
+  catch (_) { return ''; }
+}
+
+function fbPush(role, text, tone) {
   fbLog.push({ role, text, tone: tone || '', at: Date.now() });
   fbRenderLog();
 }
 
-function fbToggleChat(force){
+/* The bot pauses before it answers. A reply that appears in the same frame as
+   the question reads as a form validating itself; a beat and a typing dot read
+   as somebody on the other end. It is 400ms of theatre and it is the whole
+   difference in how the thing feels. */
+function fbSay(text, tone, delay) {
+  return new Promise(resolve => {
+    fbTyping = true;
+    fbRenderLog();
+    setTimeout(() => {
+      fbTyping = false;
+      fbPush('bot', text, tone);
+      resolve();
+    }, delay === undefined ? 420 : delay);
+  });
+}
+
+/* The ticket the reporter is looking at, if any. This is the one piece of
+   context worth carrying: it is the most likely subject of the report and the
+   thing they are least likely to think to mention. */
+function fbTicketNow() {
+  const id = (document.getElementById('email-modal')?.classList.contains('open') && emCurrentTicket?.id)
+    || (comTicketId || '');
+  if (!id) return null;
+  return { id: String(id), label: String(ticketDisplayNumber(id) || id) };
+}
+
+function fbContext() {
+  const ticket = fbIncludeTicket ? fbTicketNow() : null;
+  // Five fields go out and four of them are known server-side, so this is the
+  // whole of what the browser has to contribute.
+  return ticket ? { ticketId: ticket.id, ticketLabel: ticket.label } : {};
+}
+
+function fbToggleChat(force) {
   fbOpen = force === undefined ? !fbOpen : !!force;
   const panel = document.getElementById('fb-chat');
   const launcher = document.getElementById('fb-launcher');
-  if(!panel) return;
+  if (!panel) return;
   panel.classList.toggle('open', fbOpen);
   launcher?.classList.toggle('active', fbOpen);
   launcher?.setAttribute('aria-expanded', String(fbOpen));
-  if(fbOpen){
-    if(!fbGreeted){
-      fbGreeted = true;
-      fbPush('bot','Something broken, missing, or worth changing? Tell me and it goes straight to the platform team.');
-    }
-    fbRenderContext();
-    setTimeout(()=>document.getElementById('fb-message')?.focus(), 60);
+  if (!fbOpen) return;
+
+  if (!fbGreeted) {
+    fbGreeted = true;
+    fbIncludeTicket = true;
+    const who = (currentUser() || '').trim();
+    const ticket = fbTicketNow();
+    fbPush('bot', `${who ? who + ' - ' : ''}something broken, missing, or worth changing? It goes straight to the platform team.`);
+    // Named up front rather than discovered afterwards in a footer.
+    if (ticket) fbSay(`You have ${ticket.label} open, so I will send that along with it.`, '', 600);
   }
+  fbRenderCats();
+  fbRenderChips();
+  fbRenderContext();
+  // A draft survives the bubble being closed by accident, which is otherwise
+  // the one way to lose a half-written report.
+  const box = document.getElementById('fb-message');
+  if (box && !box.value) {
+    try { box.value = localStorage.getItem(FB_DRAFT_KEY) || ''; } catch (_) {}
+    fbUpdateCount();
+  }
+  setTimeout(() => document.getElementById('fb-message')?.focus(), 60);
 }
 
-function fbRenderLog(){
+function fbRenderLog() {
   const box = document.getElementById('fb-log');
-  if(!box) return;
+  if (!box) return;
   box.innerHTML = fbLog.map(m =>
-    `<div class="fb-msg fb-${m.role}${m.tone?' fb-'+m.tone:''}">${esc(m.text)}</div>`
-  ).join('') + (fbSending?'<div class="fb-msg fb-bot fb-typing"><span></span><span></span><span></span></div>':'');
+    `<div class="fb-row fb-row-${m.role}">`
+    + `<div class="fb-msg fb-${m.role}${m.tone ? ' fb-' + m.tone : ''}">${esc(m.text)}</div>`
+    + `<div class="fb-stamp">${esc(fbClock(m.at))}</div>`
+    + '</div>'
+  ).join('') + (fbTyping ? '<div class="fb-row fb-row-bot"><div class="fb-msg fb-bot fb-typing"><span></span><span></span><span></span></div></div>' : '');
   box.scrollTop = box.scrollHeight;
 }
 
-function fbRenderCats(){
+function fbRenderCats() {
   const box = document.getElementById('fb-cats');
-  if(!box) return;
-  box.innerHTML = Object.entries(FB_CATEGORY_LABEL).map(([key,label]) =>
-    `<button class="fb-cat${fbCategory===key?' active':''}" type="button" data-fb-cat="${key}" aria-pressed="${fbCategory===key}">${esc(label)}</button>`
+  if (!box) return;
+  box.innerHTML = Object.entries(FB_CATEGORY_LABEL).map(([key, label]) =>
+    `<button class="fb-cat${fbCategory === key ? ' active' : ''}" type="button" data-fb-cat="${key}" aria-pressed="${fbCategory === key}">${esc(label)}</button>`
   ).join('');
-  box.querySelectorAll('[data-fb-cat]').forEach(b=>b.addEventListener('click',()=>{
-    fbCategory=b.dataset.fbCat;
+  box.querySelectorAll('[data-fb-cat]').forEach(b => b.addEventListener('click', async () => {
+    const next = b.dataset.fbCat;
+    const changed = next !== fbCategory;
+    fbCategory = next;
     fbRenderCats();
+    fbRenderChips();
+    // Switching kind mid-conversation is a new question, so the bot asks it.
+    if (changed && fbGreeted) await fbSay(FB_ASKS[fbCategory] || FB_ASKS.other, '', 260);
     document.getElementById('fb-message')?.focus();
   }));
 }
 
-function fbRenderContext(){
-  const box = document.getElementById('fb-context');
-  if(!box) return;
-  const c = fbContext();
-  const ticket = c.ticketId ? ` · ${esc(ticketDisplayNumber(c.ticketId)||c.ticketId)}` : '';
-  // One quiet line rather than a panel. It is reassurance, not content: the
-  // reporter should know their screen and build travel with the report without
-  // having to read a table about it.
-  box.textContent = `Sent with: ${currentUser()} · ${c.view}${ticket} · build ${c.build} · ${c.viewport}`;
+/* The chip row: what is travelling with the report, and a few openers. Both
+   live in the same strip because both are things the reporter can act on with
+   one tap before they start typing. */
+function fbRenderChips() {
+  const box = document.getElementById('fb-chips');
+  if (!box) return;
+  const ticket = fbTicketNow();
+  const bits = [];
+  if (ticket) {
+    bits.push(fbIncludeTicket
+      ? `<button class="fb-chip fb-chip-on" type="button" id="fb-chip-ticket" title="Click to leave this ticket out">&#128206; ${esc(ticket.label)} <span class="fb-chip-x">&times;</span></button>`
+      : `<button class="fb-chip" type="button" id="fb-chip-ticket" title="Click to include this ticket">&#43; include ${esc(ticket.label)}</button>`);
+  }
+  (FB_OPENERS[fbCategory] || []).forEach((text, i) => {
+    bits.push(`<button class="fb-chip fb-chip-open" type="button" data-fb-open="${i}">${esc(text)}</button>`);
+  });
+  box.innerHTML = bits.join('');
+
+  box.querySelector('#fb-chip-ticket')?.addEventListener('click', () => {
+    fbIncludeTicket = !fbIncludeTicket;
+    fbRenderChips();
+    fbRenderContext();
+  });
+  box.querySelectorAll('[data-fb-open]').forEach(b => b.addEventListener('click', () => {
+    const msg = document.getElementById('fb-message');
+    if (!msg) return;
+    const opener = (FB_OPENERS[fbCategory] || [])[Number(b.dataset.fbOpen)] || '';
+    // Prefills only an empty box: clobbering something already typed to save
+    // somebody four words would be a bad trade.
+    msg.value = msg.value.trim() ? msg.value : opener.replace(/…$/, ' ');
+    msg.focus();
+    msg.setSelectionRange(msg.value.length, msg.value.length);
+    fbUpdateCount();
+    fbSaveDraft();
+  }));
 }
 
-async function fbSubmit(){
-  if(fbSending) return;
+/* What actually goes, in the order it goes. This used to advertise the build
+   and the viewport, which are no longer collected - so it would have been a
+   line of reassurance about something untrue. */
+function fbRenderContext() {
+  const box = document.getElementById('fb-context');
+  if (!box) return;
+  const ticket = fbIncludeTicket ? fbTicketNow() : null;
+  box.textContent = `Sends: you, your email${ticket ? ', ' + ticket.label : ''}, the time`;
+}
+
+function fbSaveDraft() {
+  const box = document.getElementById('fb-message');
+  if (!box) return;
+  try {
+    if (box.value.trim()) localStorage.setItem(FB_DRAFT_KEY, box.value);
+    else localStorage.removeItem(FB_DRAFT_KEY);
+  } catch (_) {}
+}
+
+async function fbSubmit() {
+  if (fbSending) return;
   const box = document.getElementById('fb-message');
   const message = String(box?.value || '').trim();
-  if(!message){ box?.focus(); return; }
-  if(message.length > FB_MAX){
-    fbPush('bot',`That is ${message.length - FB_MAX} characters too long to send.`,'bad');
+  if (!message) { box?.focus(); return; }
+  if (message.length > FB_MAX) {
+    await fbSay(`That is ${message.length - FB_MAX} characters too long to send.`, 'bad', 200);
     return;
   }
+  /* Two words is not a report. Rather than send it and let somebody on the
+     other end guess, the bot asks once - and if they send it again anyway it
+     goes, because it is their report and they may have a reason. */
+  if (message.length < 15 && !fbAwaitingDetail) {
+    fbAwaitingDetail = true;
+    fbPush('me', message);
+    if (box) box.value = message + ' ';
+    fbUpdateCount();
+    await fbSay(FB_ASKS[fbCategory] || FB_ASKS.other, '', 340);
+    await fbSay('Add a line and send again - or send as-is and I will pass it on.', '', 500);
+    box?.focus();
+    return;
+  }
+  fbAwaitingDetail = false;
 
+  const ticket = fbIncludeTicket ? fbTicketNow() : null;
   fbPush('me', message);
-  if(box) box.value = '';
+  if (box) box.value = '';
   fbUpdateCount();
+  fbSaveDraft();
   fbSending = true;
+  fbTyping = true;
   fbRenderLog();
   const send = document.getElementById('fb-send');
-  if(send) send.disabled = true;
+  if (send) send.disabled = true;
 
-  try{
-    const res = await fetch('/api/feedback',{
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      credentials:'include',
+  try {
+    const res = await fetch('/api/feedback', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
       body: JSON.stringify({ category: fbCategory, message, context: fbContext() })
     });
-    const out = await res.json().catch(()=>({}));
+    const out = await res.json().catch(() => ({}));
     fbSending = false;
+    fbTyping = false;
 
-    if(!res.ok || !out?.ok){
+    if (!res.ok || !out?.ok) {
       const code = String(out?.error || '');
-      if(res.status === 429) fbPush('bot','A few reports have just gone out - give it a minute and send that again.','warn');
-      else if(code === 'feedback_too_long') fbPush('bot','That report is too long to send.','warn');
-      else fbPush('bot',`That could not be sent: ${out?.detail || code || res.status}`,'bad');
+      if (res.status === 429) await fbSay('A few reports have just gone out - give it a minute and send that again.', 'warn', 200);
+      else if (code === 'feedback_too_long') await fbSay('That report is too long to send.', 'warn', 200);
+      else await fbSay(`That could not be sent: ${out?.detail || code || res.status}`, 'bad', 200);
       return;
     }
 
@@ -14812,26 +15473,32 @@ async function fbSubmit(){
        Outlook down and a Teams webhook set, "sent" alone would leave someone
        wondering where it went - and when neither works, the reporter has to
        know their words did not reach anyone. */
-    if(out.notified && out.emailed) fbPush('bot','Sent - posted to Teams and emailed to the platform team.','ok');
-    else if(out.notified) fbPush('bot','Sent - posted to the platform team on Teams.','ok');
-    else if(out.emailed) fbPush('bot','Sent - emailed to the platform team.','ok');
-    else if(out.stored) fbPush('bot','Written down, but it could not be delivered yet. It is saved and someone will see it.','warn');
-    else fbPush('bot','That could not be sent or saved. Please tell someone directly.','bad');
-  }catch(err){
+    if (out.notified && out.emailed) await fbSay('Sent - posted to Teams and emailed to the platform team.', 'ok', 260);
+    else if (out.notified) await fbSay('Sent - posted to the platform team on Teams.', 'ok', 260);
+    else if (out.emailed) await fbSay('Sent - emailed to the platform team.', 'ok', 260);
+    else if (out.stored) await fbSay('Written down, but it could not be delivered yet. It is saved and someone will see it.', 'warn', 260);
+    else { await fbSay('That could not be sent or saved. Please tell someone directly.', 'bad', 260); return; }
+
+    // Exactly what left the building. Four short facts, so nobody has to
+    // wonder afterwards what was attached to their name.
+    await fbSay(`They got: you, your email${ticket ? ', ' + ticket.label : ''}, the time, and what you wrote.`, '', 420);
+  } catch (err) {
     fbSending = false;
-    fbPush('bot',`That could not be sent: ${String(err?.message||err)}`,'bad');
-  }finally{
+    fbTyping = false;
+    await fbSay(`That could not be sent: ${String(err?.message || err)}`, 'bad', 200);
+  } finally {
     fbSending = false;
-    if(send) send.disabled = false;
+    fbTyping = false;
+    if (send) send.disabled = false;
     fbRenderLog();
     document.getElementById('fb-message')?.focus();
   }
 }
 
-function fbUpdateCount(){
+function fbUpdateCount() {
   const box = document.getElementById('fb-message');
   const out = document.getElementById('fb-count');
-  if(!box||!out) return;
+  if (!box || !out) return;
   const left = FB_MAX - box.value.length;
   out.textContent = left < 200 ? `${left} left` : '';
   out.classList.toggle('over', left < 0);
@@ -14847,17 +15514,21 @@ async function sendFeedbackTest(){
     const res = await fetch('/api/feedback/test',{ method:'POST', credentials:'include' });
     const out = await res.json().catch(()=>({}));
     if(res.status === 403){ showToast('Only admins can send a delivery test','warn'); return; }
-    const bits = [];
-    const emailTo = Array.isArray(out.emailTo) ? out.emailTo.join(', ') : (out.emailTo || 'nobody');
-    bits.push(out.emailed ? `email to ${emailTo} sent` : `email failed (${out.emailError||'unknown'})`);
-    if(out.webhookConfigured) bits.push(out.notified ? 'Teams webhook posted' : `Teams failed (${out.webhookError||'unknown'})`);
-    else bits.push('no Teams webhook configured');
-    showToast(bits.join(' - '), out.emailed || out.notified ? 'ok' : 'warn');
-    // The full reason goes to the console as well: a Graph error is longer than
-    // a toast and is the thing worth pasting into a ticket.
-    if(out.emailError || out.webhookError) console.warn('[feedback test]', out);
+    /* Two outcomes, two words each. This used to read out both legs and quote
+       whatever Graph said, so a working deployment with no Mail.Send consent
+       announced a 403 across the screen every time somebody pressed Test -
+       true, and useless: the report had gone to Teams, which is the leg this
+       deployment actually delivers on. Delivered by either leg is sent.
+
+       The reason still exists, in the console, where a Graph error can be read
+       and pasted somewhere rather than skimmed as it slides away. */
+    const delivered = out.emailed || out.notified;
+    showToast(delivered ? 'Feedback sent' : 'Feedback failed to send', delivered ? 'ok' : 'warn');
+    if(!delivered || out.emailError || out.webhookError) console.warn('[feedback test]', out);
   }catch(err){
-    showToast(`Delivery test failed: ${String(err?.message||err)}`,'warn');
+    // Same two words for a network failure; the detail goes to the console.
+    showToast('Feedback failed to send','warn');
+    console.warn('[feedback test]', err);
   }finally{
     btn.disabled = false;
     btn.textContent = label;
@@ -14869,7 +15540,7 @@ document.getElementById('fb-launcher')?.addEventListener('click', ()=>fbToggleCh
 document.getElementById('fb-close')?.addEventListener('click', ()=>fbToggleChat(false));
 document.getElementById('fb-test')?.addEventListener('click', sendFeedbackTest);
 document.getElementById('fb-send')?.addEventListener('click', fbSubmit);
-document.getElementById('fb-message')?.addEventListener('input', fbUpdateCount);
+document.getElementById('fb-message')?.addEventListener('input', ()=>{ fbUpdateCount(); fbSaveDraft(); });
 fbRenderCats();
 /* Enter sends, Shift+Enter is a new line - the way a chat box behaves. The
    reply composer keeps Ctrl+Enter because a client reply is long and being
@@ -15082,6 +15753,7 @@ async function openEmailModal(ticket){
     document.getElementById('email-modal').classList.add('open');
     trAutoTranslateBody(id);
     emCopyEmail({auto:true});
+    atShowForTicket(id);
     return;
   }
   document.getElementById('email-modal').classList.add('open');
