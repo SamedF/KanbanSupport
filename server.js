@@ -9142,14 +9142,6 @@ async function deliverFeedback({ req, category, message, context, actor }) {
   const subject = `[Kanban ${meta.label}] ${feedbackFirstLine(message)}`;
   const result = { emailed: false, notified: false, emailError: '', webhookError: '', emailVia: '' };
 
-  try {
-    result.emailVia = await sendFeedbackEmail({ req, subject, html: buildFeedbackEmailHtml({ category, message, context, actor }), actor });
-    result.emailed = true;
-  } catch (error) {
-    result.emailError = String(error?.message || error).slice(0, 300);
-    console.warn('Feedback email failed:', result.emailError);
-  }
-
   if (FEEDBACK_WEBHOOK_URL) {
     try {
       await postJson(FEEDBACK_WEBHOOK_URL, buildFeedbackWebhookPayload({ category, message, context, actor }));
@@ -9157,6 +9149,21 @@ async function deliverFeedback({ req, category, message, context, actor }) {
     } catch (error) {
       result.webhookError = String(error?.message || error).slice(0, 300);
       console.warn('Feedback webhook failed:', result.webhookError);
+    }
+  }
+
+  // Skip the Graph-delegated fallback when Teams is the only channel this
+  // deployment has configured: without MAIL_WEBHOOK_URL that fallback needs
+  // Mail.Send consent nobody granted, so it always 403s and reports a scary
+  // "email failed" for a leg nobody meant to use. Still attempted when there
+  // is a mail flow (safe to try) or no Teams webhook either (the only leg left).
+  if (MAIL_WEBHOOK_URL || !FEEDBACK_WEBHOOK_URL) {
+    try {
+      result.emailVia = await sendFeedbackEmail({ req, subject, html: buildFeedbackEmailHtml({ category, message, context, actor }), actor });
+      result.emailed = true;
+    } catch (error) {
+      result.emailError = String(error?.message || error).slice(0, 300);
+      console.warn('Feedback email failed:', result.emailError);
     }
   }
   return result;
@@ -9262,30 +9269,7 @@ app.post('/api/feedback', requireAuth, feedbackLimiter, async (req, res) => {
     console.error('Feedback could not be recorded:', String(error?.message || error).slice(0, 200));
   }
 
-  const meta = FEEDBACK_CATEGORIES[category];
-  const subject = `[Kanban ${meta.label}] ${message.split(/\r?\n/)[0].slice(0, 90)}`;
-  let emailed = false;
-  let emailError = '';
-  let emailVia = '';
-  try {
-    emailVia = await sendFeedbackEmail({ req, subject, html: buildFeedbackEmailHtml({ category, message, context, actor }), actor });
-    emailed = true;
-  } catch (error) {
-    emailError = String(error?.message || error).slice(0, 200);
-    console.warn('Feedback email failed:', emailError);
-  }
-
-  let notified = false;
-  let webhookError = '';
-  if (FEEDBACK_WEBHOOK_URL) {
-    try {
-      await postJson(FEEDBACK_WEBHOOK_URL, buildFeedbackWebhookPayload({ category, message, context, actor }));
-      notified = true;
-    } catch (error) {
-      webhookError = String(error?.message || error).slice(0, 200);
-      console.warn('Feedback webhook failed:', webhookError);
-    }
-  }
+  const { emailed, notified, emailError, webhookError, emailVia } = await deliverFeedback({ req, category, message, context, actor });
 
   if (logId) {
     // What actually happened to it, on the record itself - so a report nobody
