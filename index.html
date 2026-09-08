@@ -8127,6 +8127,20 @@ function getSLAStatus(id){
   const wallElapsed=Date.now()-createdMs;
   const resetAt=Number(ticketSlaResetAt[id]||0)>new Date(createdAt).getTime()?Number(ticketSlaResetAt[id]):0;
   const wallText=fmtDuration(wallElapsed)+(resetAt?' since the last reply':' since received');
+  /* Linked to Jira, so the clock is off. The commitment is a response time
+     from us, and once the ticket is with engineering the turnaround is not
+     ours to make - telling the agent holding it that they are late asks them
+     to chase something nobody on the team can move, and counts engineering's
+     time against support's compliance.
+
+     A status is still returned rather than null: null hides the badge, and a
+     card with no SLA line at all reads as a bug rather than as a deliberate
+     hold. So the badge says which issue it is waiting on instead. overdue
+     stays false, so it drops out of the Overdue filter, the workload counts
+     and the KPI figures on its own. Mirrors the jira_hold state in
+     ticketSlaSnapshot, which is what the dashboard is computed from. */
+  const jiraHoldKey=canonicalJiraKey(ticketJira[id]);
+  if(jiraHoldKey)return{text:`SLA on hold - ${jiraHoldKey}`,cls:'sla-warn',overdue:false,wallText,shiftMs:0,noClock:true,jiraHold:jiraHoldKey};
   if(st?.tier==='Paused')return{text:'Paused (awaiting hotel)',cls:'sla-warn',overdue:false,wallText,shiftMs:0};
   const pr=ticketPriority[id]||st?.priority||'Medium';
   const hrs=(SLA_HOURS[pr]||st?.responseHours||24);
@@ -8154,6 +8168,14 @@ function getSLAStatus(id){
 }
 function slaTooltip(status){
   if(!status)return'';
+  // A ticket on Jira hold has no countdown to explain, so the tooltip says
+  // what stopped the clock and what would start it again, rather than listing
+  // shift hours that are not being counted against anything.
+  if(status.jiraHold){
+    return['SLA is not counting: this ticket is linked to '+status.jiraHold+'.',
+      'Wall clock: '+(status.wallText||''),
+      'Unlinking the Jira issue starts the clock again.'].join('\n');
+  }
   return[status.shiftText?'Shift time: '+status.shiftText:'Shift clock not running',
     'Wall clock: '+(status.wallText||''),
     ...(status.resetAt?['Clock restarted by the reply on '+fmtDate(new Date(status.resetAt).toISOString())]:[]),
@@ -15782,6 +15804,24 @@ async function emSendReply(){
       showToast(emReplyErrorMessage(res.status,out),'warn');
       return;
     }
+    /* The reply is out, so the response clock starts again from here.
+
+       The commitment is a response time, not a lifetime: once the client has
+       been answered, the minutes until they write back are theirs, and leaving
+       the clock running would breach a ticket that was replied to inside its
+       target and then simply waited.
+
+       Stamped here rather than left to the mail poll. A reply sent from the
+       board leaves through the helpdesk mailbox, so the only copy of it is in
+       Sent - polling reads the inbox, so it never comes back and never reset
+       anything. mergeEmailIntoExistingTicket does stamp this for messages that
+       do arrive, which is the client's next reply, and the two agree: whoever
+       spoke last restarts the clock.
+
+       Set before postTicketComment because that saves the state and re-renders
+       the board, so the new stamp travels on the same write and the badge is
+       right immediately rather than after the next poll. */
+    ticketSlaResetAt[id]=Date.now();
     // The board's own record of the reply. CLIENT_TAG marks it as something the
     // client was actually told, as opposed to an internal note.
     postTicketComment(id,`Replied to ${out.to.join(', ')||'client'} from ${out.from}:\n\n${bodyText}`,[CLIENT_TAG]);

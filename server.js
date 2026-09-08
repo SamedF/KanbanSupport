@@ -1576,6 +1576,16 @@ function shiftElapsedMs(fromMs, toMs, agentCode) {
 //                     "4h left" for a ticket nobody owns would be a fiction, so
 //                     these are counted and reported separately rather than
 //                     folded into compliance.
+//   jira_hold       - linked to a Jira issue, so the clock is off entirely.
+//
+// The last one is a commitment we are no longer the ones able to keep. Once a
+// ticket is handed to engineering, the time it takes is theirs, and the
+// support agent holding it cannot answer any faster by being told they are
+// late. Left running it did two wrong things at once: it drove agents to chase
+// tickets nobody on the team could move, and it counted every engineering
+// turnaround against support's compliance figure. So a Jira-linked ticket is
+// reported under its own heading and kept out of the percentage - the same
+// treatment no_clock already gets, and for the same reason.
 
 function ticketSlaSnapshot(ticket, now = Date.now()) {
   const arrivedMs = ticket?.createdAt ? new Date(ticket.createdAt).getTime() : NaN;
@@ -1594,6 +1604,10 @@ function ticketSlaSnapshot(ticket, now = Date.now()) {
     ? (ticket?.resolvedAt ? new Date(ticket.resolvedAt).getTime() : now)
     : now;
   const wallMs = Math.max(0, (Number.isFinite(endMs) ? endMs : now) - createdMs);
+  // Checked before the assignee, and before resolved/open is decided: a
+  // Jira-linked ticket has no SLA position at all, so there is nothing for
+  // either branch below to say about it.
+  if (String(ticket?.jiraTicketKey || '').trim()) return { ...base, state: 'jira_hold', wallMs };
   if (!agent) return { ...base, wallMs };
 
   const shiftMs = shiftElapsedMs(createdMs, Number.isFinite(endMs) ? endMs : now, agent);
@@ -4422,13 +4436,25 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
     // ---------------------------------------------------------------------
     const now = Date.now();
     const openWorkTickets = workTickets.filter(t => normalizeDbStatusForBoard(t.status) !== 'res');
-    const backlog = { overdue: 0, atRisk: 0, onTrack: 0, noClock: 0 };
+    /* snake_case state -> camelCase tally, spelled out because they are not
+       the same word. This used to be `if (snapshot.state in backlog)`, and
+       'at_risk' is not a key of { atRisk }: only `overdue` ever matched, so
+       the At risk, On track and No clock figures reported a flat zero however
+       many tickets were in them. The per-agent columns were counted by
+       separate code just below and were right all along, which is what made
+       the headline card disagree with the table under it. */
+    const BACKLOG_KEY_BY_STATE = {
+      overdue: 'overdue', at_risk: 'atRisk', on_track: 'onTrack',
+      no_clock: 'noClock', jira_hold: 'jiraHold'
+    };
+    const backlog = { overdue: 0, atRisk: 0, onTrack: 0, noClock: 0, jiraHold: 0 };
     const overdueRows = [];
     let oldestOpenMs = 0;
 
     for (const ticket of openWorkTickets) {
       const snapshot = ticketSlaSnapshot(ticket, now);
-      if (snapshot.state in backlog) backlog[snapshot.state]++;
+      const backlogKey = BACKLOG_KEY_BY_STATE[snapshot.state];
+      if (backlogKey) backlog[backlogKey]++;
       oldestOpenMs = Math.max(oldestOpenMs, snapshot.wallMs);
       if (snapshot.state === 'overdue' || snapshot.state === 'at_risk') {
         for (const key of rowKeysForTicket(ticket)) {
@@ -4552,12 +4578,17 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
         backlog,
         overdue: backlog.overdue,
         atRisk: backlog.atRisk,
+        // Open tickets whose clock is off because they are waiting on Jira.
+        // Reported so they are visibly parked rather than just missing from
+        // the other three figures.
+        jiraHold: backlog.jiraHold,
         oldestOpenHours: hoursFromMs(oldestOpenMs),
         resolvedInRange: resolvedInRange.length,
         met: slaMet,
         breached: slaBreached,
-        // Resolved with no assignee, so no shift clock ever ran for them.
-        // Excluded from the percentage rather than silently counted as met.
+        // Resolved but with no SLA position to report: no assignee, so no shift
+        // clock ever ran, or linked to Jira, so the clock was off. Excluded
+        // from the percentage rather than silently counted as met.
         unmeasured: slaUnmeasured,
         compliancePct: slaMeasured ? Math.round((slaMet / slaMeasured) * 1000) / 10 : null,
         avgResolveShiftHours: avgOf(resolveShiftHours),
