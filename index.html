@@ -7195,10 +7195,12 @@ function currentUserCanEditManualTicket(ticket){
   if(currentUserIsAdmin())return true;
   return normalizeAgentCode(ticketCreatedBy[ticket.id])===currentUser();
 }
-// The agent code the KPI dashboard and the filters are pinned to when the
-// signed-in person is not allowed to look wider. currentUserTeam rather than
-// currentUserRole: a CS agent whose account still says 'agent' would otherwise
-// be pinned to a support code they do not have, and match nothing.
+// The agent code the KPI dashboard is pinned to when the signed-in person is
+// not allowed to look wider. The board is NOT a caller - it asks
+// boardAgentFilter, because how wide your board is and whose numbers you may
+// read are different questions. currentUserTeam rather than currentUserRole: a
+// CS agent whose account still says 'agent' would otherwise be pinned to a
+// support code they do not have, and match nothing.
 function enforcedAgentFilter(){
   const me=currentUser();
   if(currentUserIsAdmin())return activeA;
@@ -7206,6 +7208,27 @@ function enforcedAgentFilter(){
   if(team==='cs')return normalizeCSAgent(me)||me;
   if(team==='support')return normalizeSupportAgent(me)||me;
   return me;
+}
+/* The agent code the BOARD filters by, which is a different question from the
+   one enforcedAgentFilter answers - and not a helper to fold back into it,
+   because five of that one's six callers are the KPI dashboard, where pinning
+   to the person asking is the whole point.
+
+   Here the pinning was the bug. A support agent on All tickets passes
+   ticketVisibleToCurrentUser for every ticket and was then filtered straight
+   back down to their own trigram, so the toggle could never widen anything and
+   an agent holding nothing saw an empty board. CS lost every ticket they had
+   raised and since handed on, for the same reason: the filter matches CS
+   ownership alone, while the rule also counts what they created.
+
+   So the board asks the rule, not the person. ticketVisibleToCurrentUser
+   decides what is on the board; this is only the dropdown, and where the
+   dropdown is hidden - CS, and support who asked for Only mine - there is no
+   control here to apply. Not read off activeA in that case even though
+   syncRoleRestrictedControls has just forced it to 'all': that ordering is not
+   this function's to rely on. */
+function boardAgentFilter(){
+  return currentUserCanViewAllTickets()?activeA:'all';
 }
 /* Whether this ticket may be counted in the signed-in person's KPI figures.
 
@@ -14442,7 +14465,7 @@ function renderBoard(){
   rebuildTagged();
   syncRoleRestrictedControls();
   document.getElementById('ticket-number-filter').value=activeTicketNumber;
-  const agentFilter=enforcedAgentFilter();
+  const agentFilter=boardAgentFilter();
   const visible=allTickets.filter(t=>ticketPassesBoardFilters(t,agentFilter));
   visibleBoardTicketIds=new Set(visible.map(t=>t.id));
   pruneSelectionToVisible();
