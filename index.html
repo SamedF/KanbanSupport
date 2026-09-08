@@ -4731,6 +4731,32 @@ th {
   color: var(--amber-800, #92400e);
   font-size: 11px;
 }
+/* Six columns saying "No tickets" look like a board with nothing on it, not
+   like a filter hiding everything - which is how an agent ends up reporting
+   that they cannot see any tickets at all. Same shape as the WIP warning, in
+   the blue that means "this is information" rather than the amber that means
+   "something is wrong": a filter doing its job is not a fault. */
+.board-filter-notice {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  margin: 0 var(--content-pad, 16px) 8px;
+  padding: 7px 12px;
+  border: 1px solid var(--blue-300, #93c5fd);
+  border-radius: 10px;
+  background: var(--blue-50, #eff6ff);
+  color: var(--blue-800, #1e40af);
+  font-size: 11px;
+}
+.board-filter-notice button {
+  border: 1px solid var(--blue-300, #93c5fd);
+  background: var(--white, #fff);
+  color: var(--blue-800, #1e40af);
+  border-radius: 8px;
+  padding: 3px 10px;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.board-filter-notice button:hover { background: var(--blue-100, #dbeafe); }
 .wip-warn-agent { font-weight: 600; }
 .wip-warn-note { color: var(--amber-700, #b45309); font-style: italic; }
 .wip-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 14px; }
@@ -5793,7 +5819,11 @@ th {
   </select>
   <div class="sep"></div>
   <span class="filter-label">Search:</span>
-  <input class="filter-sel ticket-number-filter" id="ticket-number-filter" type="text" autocomplete="off" placeholder="e.g. #0012, QS-8634, client@email.com or a keyword"/>
+  <!-- name/data-* as well as autocomplete: Chrome and the password managers
+       ignore autocomplete="off" on a lone text field and offer the saved
+       login for the site, which lands the agent's own username in here and
+       empties the board. -->
+  <input class="filter-sel ticket-number-filter" id="ticket-number-filter" name="board-ticket-search" type="text" autocomplete="off" data-lpignore="true" data-1p-ignore data-form-type="other" placeholder="e.g. #0012, QS-8634, client@email.com or a keyword"/>
   <div class="sep"></div>
   <button class="chip" id="tagged-filter" data-af="tagged" style="display:none"> Tagged me</button>
   <div class="sep"></div>
@@ -5830,6 +5860,7 @@ th {
   </div>
 </div>
 <div class="wip-warning" id="wip-warning" style="display:none"></div>
+<div class="board-filter-notice" id="board-filter-notice" style="display:none"></div>
 <div class="lane-board" id="lane-board" style="display:none"></div>
 <div class="board" id="main-board">
   <div class="column col-new"><div class="col-header"> New <span class="col-badge" id="badge-new">0</span></div><div class="col-body" id="col-new" data-col="new"><div class="loading"><div class="spinner"></div><span>Fetching</span></div></div></div>
@@ -7066,6 +7097,24 @@ function normalizeAgentCode(value){
   const code=String(value||'').trim().toUpperCase();
   return ALL_AGENTS.includes(code)||code==='YOU'||code==='ADMIN'?code:'';
 }
+/* The same value, but without dropping an account that is not on the roster.
+
+   normalizeAgentCode answers "is this one of the trigrams the board knows",
+   which is the right question for a dropdown and the wrong one for "whose
+   ticket is this". SUPPORT_AGENTS and CS_AGENTS are hard-coded, so every
+   account outside them - a new hire, a test login, anyone whose username is
+   not one of the twenty-one - normalized to the empty string and then failed
+   every "is this mine" comparison it was put through: a CS account off the
+   roster saw an empty board, because both halves of its visibility rule
+   compare against a code that had just been thrown away.
+
+   So identity keeps whatever the account actually is. Nothing here widens
+   what a dropdown offers; ticketMatchesAgentFilter still only ever receives
+   roster codes, and an off-roster code simply matches none of them. */
+function agentIdentityCode(value){
+  const raw=String(value||'').trim().toUpperCase();
+  return normalizeAgentCode(raw)||raw;
+}
 function resolveUserAgentCode(user){
   const candidates=[
     user?.username,
@@ -7080,7 +7129,21 @@ function resolveUserAgentCode(user){
   }
   return '';
 }
-const currentUser=()=>normalizeAgentCode(document.getElementById('current-user')?.value) || resolveUserAgentCode(currentSessionUser) || 'ADMIN';
+/* Who is signed in, as a code the rest of the board can compare against.
+
+   The last resort used to be the literal 'ADMIN', which is not a neutral
+   default - it is a real code that normalizeAgentCode accepts. Any account
+   whose username is not on the roster therefore answered "ADMIN" to "who am
+   I": their tickets were measured against somebody else's name, and the code
+   went on to be written into ticketCreatedBy, comment authors, snoozes and
+   resolutions, so their work was attributed to an admin who never touched it.
+
+   The account's own username is the honest answer, and 'ADMIN' is now only
+   what an actual admin session resolves to. */
+const currentUser=()=>normalizeAgentCode(document.getElementById('current-user')?.value)
+  || resolveUserAgentCode(currentSessionUser)
+  || String(currentSessionUser?.username||'').trim().toUpperCase()
+  || 'ADMIN';
 function currentUserIsAdmin(){
   return currentSessionUser?.role==='admin'||currentSessionUser?.role==='owner';
 }
@@ -7141,14 +7204,26 @@ function currentUserCanAssignTicket(ticket){
   // A support agent may open the menu, but only their own name is in it - see
   // assignableSupportAgents(). Taking a ticket is picking up work; handing one
   // to a colleague is the decision this restriction protects.
-  if(currentUserTeam()==='support')return !!normalizeSupportAgent(currentUser());
+  if(currentUserTeam()==='support')return !!supportIdentityCode();
   if(currentUserTeam()!=='cs')return false;
   // Deliberately not ticketVisibleToCurrentUser: for a CS agent whose account
   // still says 'agent' that helper asks "am I the assignee", which a CS agent
   // never is, and would refuse them every ticket they own.
-  const me=normalizeCSAgent(currentUser());
+  const me=currentUser();
   const {csOwner}=ticketFilterAgentValues(ticket);
-  return !!me&&me===normalizeCSAgent(csOwner);
+  return !!me&&me===csOwner;
+}
+/* The code a support agent takes a ticket under.
+
+   Their roster trigram where they have one, their own username where they do
+   not - a support account that is not one of the seven hard-coded trigrams
+   could not take a single ticket before this, because the only name it was
+   ever offered was the empty string. 'YOU' and 'ADMIN' are placeholders
+   rather than people (the field's pre-login value, and what an admin session
+   resolves to), so neither is a code anything may be assigned to. */
+function supportIdentityCode(){
+  const me=currentUser();
+  return (me==='YOU'||me==='ADMIN')?'':me;
 }
 // What the assign button offers, which for a support agent is one thing.
 function assignTriggerTitle(){
@@ -7168,12 +7243,12 @@ function assignRefusedMessage(){
 // this is about not offering a choice that would be refused.
 function assignableSupportAgents(){
   if(currentUserIsAdmin()||currentUserTeam()==='cs')return SUPPORT_AGENTS;
-  const me=normalizeSupportAgent(currentUser());
+  const me=supportIdentityCode();
   return me?[me]:[];
 }
 function currentUserCanAssignTicketTo(ticket,agentCode){
   if(!currentUserCanAssignTicket(ticket))return false;
-  return assignableSupportAgents().includes(normalizeAgentCode(agentCode));
+  return assignableSupportAgents().includes(agentIdentityCode(agentCode));
 }
 // Signing a resolved ticket off for good. Same rule, stated separately because
 // it is a different decision and reads better at both call sites than one
@@ -7181,8 +7256,8 @@ function currentUserCanAssignTicketTo(ticket,agentCode){
 function currentUserCanConfirmResolution(csOwner){
   if(currentUserIsAdmin())return true;
   if(currentUserTeam()!=='cs')return false;
-  const me=normalizeCSAgent(currentUser());
-  return !!me&&me===normalizeCSAgent(csOwner);
+  const me=currentUser();
+  return !!me&&me===agentIdentityCode(csOwner);
 }
 // Replying to the client is the work itself, so whoever holds the ticket can
 // do it: the support agent it is assigned to, the CS who owns it, or an admin.
@@ -7193,7 +7268,7 @@ function currentUserCanReplyToTicket(ticket){
 function currentUserCanEditManualTicket(ticket){
   if(!ticket?.isManual)return false;
   if(currentUserIsAdmin())return true;
-  return normalizeAgentCode(ticketCreatedBy[ticket.id])===currentUser();
+  return agentIdentityCode(ticketCreatedBy[ticket.id])===currentUser();
 }
 // The agent code the KPI dashboard is pinned to when the signed-in person is
 // not allowed to look wider. The board is NOT a caller - it asks
@@ -7247,11 +7322,13 @@ function ticketInCurrentUserKpiScope(ticket){
   const me=currentUser();
   if(!me)return false;
   const {assignee,csOwner}=ticketFilterAgentValues(ticket);
+  // Same reasoning as ticketVisibleToCurrentUser: an account off the roster
+  // owns its tickets under its own code, so that is what it is measured on.
   if(currentUserTeam()==='cs'){
-    if(normalizeAgentCode(ticketCreatedBy[ticket.id])===me)return true;
-    return !!csOwner&&csOwner===normalizeCSAgent(me);
+    if(agentIdentityCode(ticketCreatedBy[ticket.id])===me)return true;
+    return !!csOwner&&csOwner===me;
   }
-  return !!assignee&&assignee===normalizeSupportAgent(me);
+  return !!assignee&&assignee===me;
 }
 /* Whether this ticket belongs on the signed-in person's board.
 
@@ -7270,11 +7347,18 @@ function ticketVisibleToCurrentUser(ticket){
   if(!me) return false;
   const { assignee, csOwner } = ticketFilterAgentValues(ticket);
   const team=currentUserTeam();
+  /* Compared against me as it is, not against normalizeCSAgent(me) /
+     normalizeSupportAgent(me). Those two ask "is my own code on the roster"
+     and answer '' when it is not, so an account off the roster was compared
+     against the empty string and matched nothing it owned - an empty board
+     with no way to widen it. currentUserTeam has already settled which side
+     of the board this person is on; this only has to ask which tickets are
+     theirs. */
   if(team==='cs'){
-    if(normalizeAgentCode(ticketCreatedBy[ticket.id])===me) return true;
-    return !!csOwner && csOwner === normalizeCSAgent(me);
+    if(agentIdentityCode(ticketCreatedBy[ticket.id])===me) return true;
+    return !!csOwner && csOwner === me;
   }
-  if(team==='support')return !!assignee && assignee === normalizeSupportAgent(me);
+  if(team==='support')return !!assignee && assignee === me;
   return false;
 }
 
@@ -9475,7 +9559,12 @@ document.getElementById('emt-submit').addEventListener('click',async()=>{
 });
 
 //  View switching
-function hidePrimaryViews(){stopKpiAutoRefresh();document.getElementById('main-board').style.display='none';document.getElementById('spam-view').classList.remove('active');document.getElementById('archive-view').classList.remove('active');document.getElementById('companies-view').style.display='none';document.getElementById('kpi-view').style.display='none';document.getElementById('insights-view').style.display='none';document.getElementById('projects-view').style.display='none';document.getElementById('qt-seize-view').style.display='none';document.getElementById('assignlog-view').style.display='none';document.getElementById('qt-detect-view').style.display='none';document.getElementById('mail-view').style.display='none';if(viewMode!=='board'){clearSelection();renderSelectionBar();}}
+function hidePrimaryViews(){stopKpiAutoRefresh();
+  // Belongs to the board and sits above it, so it goes with the board rather
+  // than hanging over whichever list is opened next. renderBoard() puts it
+  // back when there is still something to say.
+  const filterNotice=document.getElementById('board-filter-notice');if(filterNotice){filterNotice.style.display='none';filterNotice.innerHTML='';}
+  document.getElementById('main-board').style.display='none';document.getElementById('spam-view').classList.remove('active');document.getElementById('archive-view').classList.remove('active');document.getElementById('companies-view').style.display='none';document.getElementById('kpi-view').style.display='none';document.getElementById('insights-view').style.display='none';document.getElementById('projects-view').style.display='none';document.getElementById('qt-seize-view').style.display='none';document.getElementById('assignlog-view').style.display='none';document.getElementById('qt-detect-view').style.display='none';document.getElementById('mail-view').style.display='none';if(viewMode!=='board'){clearSelection();renderSelectionBar();}}
 function showBoardView(){viewMode='board';setBoardChromeVisible(true);hidePrimaryViews();setSideNavActive('board');saveLastWorkspaceSession('board');renderBoard();/* renderBoard() shows the flat board or the swimlanes, per boardGrouping */}
 function showSpamView(){viewMode='spam';setBoardChromeVisible(true);hidePrimaryViews();document.getElementById('spam-view').classList.add('active');setSideNavActive('spam');saveLastWorkspaceSession('spam');renderSpamView();}
 function showArchiveView(){viewMode='archive';setBoardChromeVisible(true);hidePrimaryViews();document.getElementById('archive-view').classList.add('active');setSideNavActive('archive');saveLastWorkspaceSession('archive');renderArchiveView();}
@@ -10964,8 +11053,11 @@ function fmtKpiRangeLabel(key,b){
 function ticketFilterAgentValues(ticket){
   const id=ticket?.id;
   if(!id)return{assignee:'',csOwner:''};
-  const assignee=normalizeAgentCode(ticketAssignee[id]||'');
-  const csOwner=normalizeAgentCode(ensureTicketCSOwnerResolved(id,ticket.email)||ticketCSOwner[id]||'');
+  // agentIdentityCode, not normalizeAgentCode: a ticket held by an account
+  // that is not on the roster still has a holder, and reporting it as
+  // unassigned hid it from the one person it belonged to.
+  const assignee=agentIdentityCode(ticketAssignee[id]||'');
+  const csOwner=agentIdentityCode(ensureTicketCSOwnerResolved(id,ticket.email)||ticketCSOwner[id]||'');
   return{assignee,csOwner};
 }
 function normalizeSupportAgent(value){const code=normalizeAgentCode(value);return SUPPORT_AGENTS.includes(code)?code:'';}
@@ -12119,7 +12211,7 @@ function updateWorkload(){
 }
 function showToast(msg,cls=''){const t=document.getElementById('toast');t.textContent=msg;t.className='show'+(cls?' '+cls:'');clearTimeout(t._timer);t._timer=setTimeout(()=>{t.className='';},4500);}
 function startCountdown(){pollSecsLeft=POLL_SECS;const cd=document.getElementById('poll-cd');const tick=setInterval(()=>{pollSecsLeft--;cd.textContent=pollSecsLeft>0?' '+pollSecsLeft+'s':' checking';if(pollSecsLeft<=0)clearInterval(tick);},1000);}
-function rebuildTagged(){taggedTickets.clear();const me=currentUser();Object.entries(ticketComments).forEach(([id,cs])=>{if(cs.some(c=>Array.isArray(c.tags)&&c.tags.map(normalizeAgentCode).includes(me)))taggedTickets.add(id);});document.getElementById('tagged-filter').style.display=taggedTickets.size?'':'none';updateMentionsBadge();}
+function rebuildTagged(){taggedTickets.clear();const me=currentUser();Object.entries(ticketComments).forEach(([id,cs])=>{if(cs.some(c=>Array.isArray(c.tags)&&c.tags.map(agentIdentityCode).includes(me)))taggedTickets.add(id);});document.getElementById('tagged-filter').style.display=taggedTickets.size?'':'none';updateMentionsBadge();}
 async function buildAgentUI(){
   let loggedUser = {
     username: 'admin',
@@ -12300,8 +12392,14 @@ function positionAgentAssignMenu(wrap){
 
 function applyTicketAgentSelection(id,previousAgent,selected){
   if(!id||!selected)return;
-  const supportAgent=normalizeSupportAgent(selected);
-  if(!supportAgent)return;
+  /* Was normalizeSupportAgent, which only recognises the seven hard-coded
+     trigrams: a support account off that roster picked its own name out of
+     the menu and nothing happened at all, with nothing said. Who may be
+     assigned is already settled by assignableSupportAgents() - the whole
+     roster for admin and CS, themselves and nobody else for support - so
+     that is what this checks against. */
+  const supportAgent=agentIdentityCode(selected);
+  if(!supportAgent||!assignableSupportAgents().includes(supportAgent))return;
   if(!ticketCSOwner[id]){
     const cs=currentUserCSAgent();
     if(cs)ticketCSOwner[id]=cs;
@@ -13409,7 +13507,7 @@ function makeCard(ticket,isNew=false){
       restoreAgentAssignMenuToWrap(agentWrap);
     }
     agentWrap.classList.remove('open');
-    applyTicketAgentSelection(id,agent,normalizeAgentCode(btn.dataset.agentPick));
+    applyTicketAgentSelection(id,agent,agentIdentityCode(btn.dataset.agentPick));
   }));
     div.querySelector('[data-cat]').addEventListener('change',e=>{const newCat=e.target.value;ticketCategory[id]=newCat;
     /* The sub-category belonged to the category that was just replaced, so it
@@ -14237,7 +14335,7 @@ function paletteCommands(){
     {kind:'cmd',label:'Ungroup board',run:()=>{boardGrouping='none';syncFilterControlsToState();renderBoard();},hint:'board'},
     {kind:'cmd',label:'Show only overdue',run:()=>{activeSLA=true;syncFilterControlsToState();renderBoard();},hint:'filter'},
     {kind:'cmd',label:'Show snoozed tickets',run:()=>{showSnoozed=true;syncFilterControlsToState();renderBoard();},hint:'filter'},
-    {kind:'cmd',label:'Clear all filters',run:()=>{activeP='all';activeA='all';activeCompany='all';activeStage='all';activeLanguage='all';activeSLA=false;activeJira=false;activeTicketNumber='';showSnoozed=false;syncFilterControlsToState();renderBoard();},hint:'filter'},
+    {kind:'cmd',label:'Clear all filters',run:clearAllBoardFilters,hint:'filter'},
     {kind:'cmd',label:'Set WIP limits',run:openWipModal,hint:'board'},
     {kind:'cmd',label:'Save this view',run:saveCurrentView,hint:'view'},
     {kind:'cmd',label:'Copy a link to this view',run:copyViewLink,hint:'view'},
@@ -14507,7 +14605,7 @@ function renderBoard(){
     });
   }
 
-  updateWorkload();updateSpamBadge();updateArchiveBadge();updateJiraBadge();updateSnoozeBadge();updateWipWarning();renderSelectionBar();
+  updateWorkload();updateSpamBadge();updateArchiveBadge();updateJiraBadge();updateSnoozeBadge();updateWipWarning();renderBoardFilterNotice(visible.length);renderSelectionBar();
 }
 
 /* Swimlanes.
@@ -14581,6 +14679,75 @@ function updateSnoozeBadge(){
 
 // One line, above the columns, naming whoever is over their own ceiling. The
 // column headers already say which column is heavy; this says which person is.
+/* Which filters are on, named the way the filter bar names them.
+
+   Written for the moment an agent says "I cannot see any tickets": the answer
+   is nearly always one control they do not remember touching - or, in the
+   case the search box, one the browser filled in for them. */
+function activeBoardFilterLabels(){
+  const on=[];
+  if(activeP!=='all')on.push(`priority ${activeP}`);
+  if(activeA==='tagged')on.push('tagged me');
+  else if(activeA!=='all')on.push(`team ${activeA}`);
+  if(activeCompany!=='all')on.push(`company ${activeCompany}`);
+  if(activeStage!=='all')on.push(`stage ${COL_NAMES[activeStage]||activeStage}`);
+  if(activeLanguage!=='all')on.push(`language ${activeLanguage}`);
+  if(activeJira)on.push('Jira only');
+  if(activeSLA)on.push('overdue only');
+  if(showSnoozed)on.push('snoozed only');
+  if(String(activeTicketNumber||'').trim())on.push(`search "${String(activeTicketNumber).trim()}"`);
+  if(supportOnlyMine)on.push('only mine');
+  return on;
+}
+/* How many tickets the board would hold with every filter off.
+
+   supportOnlyMine is stood down for the count because it is a filter like the
+   others and the most likely one to be hiding everything - and because a
+   support agent is allowed the whole queue anyway, so counting it for them
+   discloses nothing they could not switch the toggle and see. For CS the rule
+   is not a control and is left alone: they are told about their own tickets,
+   never about the size of a queue that is not theirs. */
+function boardTicketCountWithoutFilters(){
+  const wasOnlyMine=supportOnlyMine;
+  if(currentUserHasBoardScopeToggle())supportOnlyMine=false;
+  try{
+    return allTickets.filter(t=>
+      ticketCategory[t.id]!=='Spam'
+      &&!isArchivedTicket(t.id)
+      &&!isSnoozed(t.id)
+      &&!isResolvedTicketHidden(t.id)
+      &&ticketVisibleToCurrentUser(t)
+    ).length;
+  }finally{supportOnlyMine=wasOnlyMine;}
+}
+function clearAllBoardFilters(){
+  activeP='all';activeA='all';activeCompany='all';activeStage='all';activeLanguage='all';
+  activeSLA=false;activeJira=false;activeTicketNumber='';showSnoozed=false;
+  // Only for whoever is actually offered the toggle - clearing it for CS would
+  // be clearing a rule, not a filter.
+  if(currentUserHasBoardScopeToggle())supportOnlyMine=false;
+  syncFilterControlsToState();
+  syncRoleRestrictedControls();
+  saveLastWorkspaceSession();
+  renderBoard();
+}
+function renderBoardFilterNotice(visibleCount){
+  const el=document.getElementById('board-filter-notice');
+  if(!el)return;
+  // renderBoard() is called from the spam and archive views so the board is
+  // correct when somebody comes back to it; the notice belongs to the board
+  // and must not appear over one of those lists.
+  const labels=(visibleCount>0||viewMode!=='board')?[]:activeBoardFilterLabels();
+  const total=labels.length?boardTicketCountWithoutFilters():0;
+  if(!labels.length||!total){el.style.display='none';el.innerHTML='';return;}
+  el.style.display='';
+  el.innerHTML=`<span><strong>${total}</strong> ticket${total===1?'':'s'} on your board, none of them matching the filters you have on (${esc(labels.join(', '))}).</span>`;
+  const btn=document.createElement('button');
+  btn.type='button';
+  btn.textContent='Clear filters';
+  btn.addEventListener('click',clearAllBoardFilters);
+  el.appendChild(btn);
+}
 function updateWipWarning(){
   const el=document.getElementById('wip-warning');
   if(!el)return;
@@ -14674,7 +14841,19 @@ setInterval(()=>{
 // A view link is only useful if opening it actually applies the view.
 window.addEventListener('hashchange',()=>{if(applyViewHash(location.hash))renderBoard();});
 
-document.getElementById('ticket-number-filter').addEventListener('input',e=>{activeTicketNumber=e.target.value||'';renderBoard();});
+/* Only a value this person actually typed filters the board.
+
+   A lone text input on a page you have just signed in to is exactly what a
+   password manager fills with the username it saved, and it does that by
+   setting the value and firing `input` - so the board silently narrowed to a
+   search for the agent's own login name and came up empty, with the reason
+   sitting in plain sight in a box nobody reads. Autofill happens without the
+   box ever being focused; typing and pasting cannot. */
+document.getElementById('ticket-number-filter').addEventListener('input',e=>{
+  if(document.activeElement!==e.target){e.target.value=activeTicketNumber;return;}
+  activeTicketNumber=e.target.value||'';
+  renderBoard();
+});
 // Some browsers restore a text input's previously typed value on reload or
 // back/forward-cache navigation even with autocomplete off, and can apply
 // that restoration asynchronously after the page has already finished
@@ -17158,7 +17337,7 @@ if(comTrState.undo||comTrState.lang){comTrState.undo=null;comTrState.lang=null;t
 const trNotes=trTicketIsOn(id)?(trNotesCache.get(id)||{}):null;
 const cs=ticketComments[id]||[];const el=document.getElementById('com-thread');if(!cs.length){el.innerHTML='<div class="no-comments"> No comments yet.</div>';return;}el.innerHTML=cs.map((c,ci)=>{const tagHtml=(c.tags||[]).map(t=>{const bg=t===CLIENT_TAG?'var(--slate-600)':agentColor(t);return`<span class="ctag" style="background:${bg}">@${t}</span>`;}).join('');const bg=ALL_AGENTS.includes(c.author)?agentColor(c.author):'var(--slate-600)';const shown=trNotes&&typeof trNotes[ci]==='string'?trNotes[ci]:c.text;const trMark=trNotes&&typeof trNotes[ci]==='string'&&trNotes[ci]!==c.text?' tr-seg':'';return`<div class="comment-item"><div class="comment-avatar" style="background:${bg}">${esc(c.author)}</div><div class="comment-bubble"><div class="comment-header"><span class="comment-author">${esc(c.author)}</span><span class="comment-time">${fmtTime(c.ts)}</span>${tagHtml?`<div class="comment-tags">${tagHtml}</div>`:''}</div><div class="comment-text${trMark}">${esc(shown)}</div></div></div>`;}).join('');el.scrollTop=el.scrollHeight;}
 function openComModal(ticket){const{email,id}=ticket;comTicketId=id;trResetNotesState(id);trRenderNotesBar();trLoadCachedFor(id);const clientEmail=ticketClientEmail[id];const hs=clientEmail?hsCache[clientEmail]:null;const coStr=hs?.companyName?(hs.inferredVia?'   '+hs.companyName+' ~':'   '+hs.companyName):'';const who=isQuintaSender(email.sender)&&clientEmail?`Client: ${clientEmail}`:email.sender||'';const csOwner=ticketCSOwner[id]||null;const assignee=ticketAssignee[id]||'';const agInfo=csOwner?`${assignee}  CS:${csOwner}`:assignee;document.getElementById('com-title').textContent=email.subject||'(no subject)';document.getElementById('com-subtitle').textContent=`${who}${coStr}  ${agInfo}  ${fmtDate(email.receivedDateTime)}`;document.getElementById('com-input').value='';selectedTags.clear();document.querySelectorAll('.tag-chip').forEach(c=>c.classList.remove('selected'));renderThread(id);document.getElementById('com-modal').classList.add('open');}
-function postTicketComment(ticketId,text,tags){if(!text||!ticketId)return false;if(!ticketComments[ticketId])ticketComments[ticketId]=[];const author=currentUser();const normalizedTags=[...new Set((Array.isArray(tags)?tags:[]).map(t=>t===CLIENT_TAG?CLIENT_TAG:normalizeAgentCode(t)).filter(Boolean))];ticketComments[ticketId].push({author,text,tags:normalizedTags,ts:Date.now()});saveState('ticket_comment_added');renderBoard();if(comTicketId===ticketId)renderThread(ticketId);const at=normalizedTags.filter(t=>t!==CLIENT_TAG);if(at.length)showToast(`Bell alert sent to: ${at.join(', ')}`,'ok');else showToast('Comment posted','ok');return true;}
+function postTicketComment(ticketId,text,tags){if(!text||!ticketId)return false;if(!ticketComments[ticketId])ticketComments[ticketId]=[];const author=currentUser();const normalizedTags=[...new Set((Array.isArray(tags)?tags:[]).map(t=>t===CLIENT_TAG?CLIENT_TAG:agentIdentityCode(t)).filter(Boolean))];ticketComments[ticketId].push({author,text,tags:normalizedTags,ts:Date.now()});saveState('ticket_comment_added');renderBoard();if(comTicketId===ticketId)renderThread(ticketId);const at=normalizedTags.filter(t=>t!==CLIENT_TAG);if(at.length)showToast(`Bell alert sent to: ${at.join(', ')}`,'ok');else showToast('Comment posted','ok');return true;}
 function addInternalComment(ticketId,text,tags){if(!postTicketComment(ticketId,text,tags))return;if(comTicketId===ticketId)renderThread(ticketId);}
 document.getElementById('com-post').addEventListener('click',()=>{const text=document.getElementById('com-input').value.trim();if(!text||!comTicketId)return;const tags=[...selectedTags];if(!postTicketComment(comTicketId,text,tags))return;document.getElementById('com-input').value='';selectedTags.clear();document.querySelectorAll('.tag-chip').forEach(c=>c.classList.remove('selected'));if(comTicketId)renderThread(comTicketId);});
 document.getElementById('com-debug-expert').addEventListener('click',async()=>{if(!comTicketId)return;const btn=document.getElementById('com-debug-expert');const ticket=allTickets.find(t=>t.id===comTicketId);if(!ticket)return;const assignee=ticketAssignee[comTicketId]||null;btn.disabled=true;btn.textContent='Analyzing';try{const ce=ticketClientEmail[comTicketId]||getClientEmail(ticket.email)||null;const hs=ce?hsCache[ce]:null;const resp=await fetch('/api/debug-expert',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({ticketId:comTicketId,email:ticket.email,assignee,companyName:hs?.companyName||null})});const out=await resp.json().catch(()=>({}));if(!resp.ok){showToast(`Debug Expert failed: ${out?.error||resp.status}`);return;}const parts=[];parts.push('Debug Expert proposed solution');if(out?.summary)parts.push(out.summary);if(Array.isArray(out?.steps)&&out.steps.length){parts.push('Recommended steps:');out.steps.slice(0,6).forEach((s,i)=>parts.push(`${i+1}. ${s}`));}if(Array.isArray(out?.articles)&&out.articles.length){parts.push('Relevant HubSpot KB articles:');out.articles.slice(0,5).forEach(a=>parts.push(`- ${a.title}${a.url?` (${a.url})`:''}`));}if(Array.isArray(out?.attachmentFindings)&&out.attachmentFindings.length){parts.push('Attachment findings:');out.attachmentFindings.slice(0,5).forEach(a=>parts.push(`- ${a}`));}const tags=assignee?[assignee]:[];addInternalComment(comTicketId,parts.join('\n'),tags);showToast(assignee?`Debug proposal posted and tagged ${assignee}`:'Debug proposal posted','ok');}catch(e){showToast(`Debug Expert error: ${String(e?.message||e)}`);}finally{btn.disabled=false;btn.textContent='Debug Expert';}});
@@ -17179,19 +17358,19 @@ async function checkForBrowserNotifications(){
     const ticketsById=new Map((Array.isArray(s.allTickets)?s.allTickets:[]).map(t=>[t.id,t]));
     const ticketLabel=id=>ticketsById.get(id)?.email?.subject||`Ticket ${id}`;
     Object.entries(next.ticketAssignee).forEach(([id,agent])=>{
-      if(prev.ticketAssignee[id]!==agent&&(normalizeAgentCode(agent)===me||currentUserIsAdmin()))showBrowserNotification(currentUserIsAdmin()&&normalizeAgentCode(agent)!==me?`Ticket assigned to ${agent||'unassigned'}`:'Ticket assigned to you',ticketLabel(id));
+      if(prev.ticketAssignee[id]!==agent&&(agentIdentityCode(agent)===me||currentUserIsAdmin()))showBrowserNotification(currentUserIsAdmin()&&agentIdentityCode(agent)!==me?`Ticket assigned to ${agent||'unassigned'}`:'Ticket assigned to you',ticketLabel(id));
     });
     Object.entries(next.ticketState).forEach(([id,stage])=>{
       if(!prev.ticketState[id]||prev.ticketState[id]===stage)return;
-      const assignee=normalizeAgentCode(next.ticketAssignee[id]);
-      const csOwner=normalizeAgentCode((s.ticketCSOwner||{})[id]);
+      const assignee=agentIdentityCode(next.ticketAssignee[id]);
+      const csOwner=agentIdentityCode((s.ticketCSOwner||{})[id]);
       if(assignee===me||csOwner===me||currentUserIsAdmin())showBrowserNotification('Ticket moved to '+(COL_NAMES[normalizeTicketStage(stage)]||stage),ticketLabel(id));
     });
     Object.entries(next.commentCounts).forEach(([id,count])=>{
       const prevCount=prev.commentCounts[id]||0;
       if(count<=prevCount)return;
       (s.ticketComments[id]||[]).slice(prevCount).forEach(c=>{
-        const tags=(c.tags||[]).map(normalizeAgentCode).filter(Boolean);
+        const tags=(c.tags||[]).map(agentIdentityCode).filter(Boolean);
         const forMe=currentUserIsAdmin()?tags.length>0:tags.includes(me);
         if(forMe)showBrowserNotification('New comment on '+ticketLabel(id),c.text||'');
       });
@@ -17203,7 +17382,7 @@ async function checkForBrowserNotifications(){
   notifySnapshot=next;
 }
 
-function getMentions(user){const me=normalizeAgentCode(user);const isAdminUser=currentUserIsAdmin();const r=[];Object.entries(ticketComments).forEach(([tid,cs])=>{const t=allTickets.find(x=>x.id===tid);cs.forEach((c,ci)=>{const normalizedTags=Array.isArray(c.tags)?c.tags.map(normalizeAgentCode).filter(Boolean):[];const matches=isAdminUser?normalizedTags.length>0:normalizedTags.includes(me);if(matches)r.push({ticketId:tid,ci,comment:c,ticket:t,key:`${tid}:${ci}`});});});return r.sort((a,b)=>(b.comment.ts||0)-(a.comment.ts||0));}
+function getMentions(user){const me=agentIdentityCode(user);const isAdminUser=currentUserIsAdmin();const r=[];Object.entries(ticketComments).forEach(([tid,cs])=>{const t=allTickets.find(x=>x.id===tid);cs.forEach((c,ci)=>{const normalizedTags=Array.isArray(c.tags)?c.tags.map(agentIdentityCode).filter(Boolean):[];const matches=isAdminUser?normalizedTags.length>0:normalizedTags.includes(me);if(matches)r.push({ticketId:tid,ci,comment:c,ticket:t,key:`${tid}:${ci}`});});});return r.sort((a,b)=>(b.comment.ts||0)-(a.comment.ts||0));}
 function unreadMentionCountForTicket(ticketId,user=currentUser()){return getMentions(user).filter(m=>m.ticketId===String(ticketId)&&!readMentions.has(m.key)).length;}
 function unreadAlertCountForTicket(ticketId,user=currentUser()){return unreadMentionCountForTicket(ticketId,user)+unreadJiraAlertCountForTicket(ticketId,user);}
 function getAlertFeed(user=currentUser()){
