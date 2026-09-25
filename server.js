@@ -1592,6 +1592,12 @@ function shiftElapsedMs(fromMs, toMs, agentCode) {
 //                     these are counted and reported separately rather than
 //                     folded into compliance.
 //   jira_hold       - linked to a Jira issue, so the clock is off entirely.
+//   contact_hold    - open and in Waiting on Contact, so the clock is frozen
+//                     until the client answers. The board moves slaResetAt
+//                     forward by the length of the wait when the ticket
+//                     leaves the column (setTicketStage in index.html), so
+//                     once it is back with us the count resumes from where it
+//                     stopped and the wait never reaches met/breached either.
 //
 // The last one is a commitment we are no longer the ones able to keep. Once a
 // ticket is handed to engineering, the time it takes is theirs, and the
@@ -1623,6 +1629,7 @@ function ticketSlaSnapshot(ticket, now = Date.now()) {
   // Jira-linked ticket has no SLA position at all, so there is nothing for
   // either branch below to say about it.
   if (String(ticket?.jiraTicketKey || '').trim()) return { ...base, state: 'jira_hold', wallMs };
+  if (!resolved && normalizeDbStatusForBoard(ticket?.status) === 'wct') return { ...base, state: 'contact_hold', wallMs };
   if (!agent) return { ...base, wallMs };
 
   const shiftMs = shiftElapsedMs(createdMs, Number.isFinite(endMs) ? endMs : now, agent);
@@ -1698,6 +1705,18 @@ function applyRolePermissionsToStateWrite(currentState, nextState, actor) {
       if (currentArchived[ticketId]) incomingArchived[ticketId] = currentArchived[ticketId];
       else delete incomingArchived[ticketId];
       refused.push({ field: 'ticketArchived', id: ticketId, claims: ['resolved_confirmed'] });
+    });
+
+    // The My Alerts entry Send back writes alongside the meta. Refused for the
+    // same reason: it tells a support agent that CS rejected their resolution.
+    const currentSendBacks = isMap(currentState.ticketSendBackAlerts) ? currentState.ticketSendBackAlerts : {};
+    const incomingSendBacks = isMap(nextState.ticketSendBackAlerts) ? nextState.ticketSendBackAlerts : {};
+    Object.keys(incomingSendBacks).forEach((ticketId) => {
+      const before = currentSendBacks[ticketId];
+      if (Number(incomingSendBacks[ticketId]?.at || 0) === Number(before?.at || 0)) return;
+      if (before) incomingSendBacks[ticketId] = before;
+      else delete incomingSendBacks[ticketId];
+      refused.push({ field: 'ticketSendBackAlerts', id: ticketId, claims: ['sentBack'] });
     });
   }
 
@@ -1871,6 +1890,10 @@ async function safeWriteState(state, actor = null) {
   nextState.ticketCreatedBy = mergeTicketMap('ticketCreatedBy');
   nextState.ticketResolutionMeta = mergeTicketMap('ticketResolutionMeta');
   nextState.ticketArchived = mergeTicketMap('ticketArchived');
+  // Merged rather than taken from the payload: entries are only ever added,
+  // and a tab that has not heard about a send-back yet must not erase the
+  // alert before the agent it is for has seen it.
+  nextState.ticketSendBackAlerts = mergeTicketMap('ticketSendBackAlerts');
 
   const pruneResolvedHiddenTickets = (stateToPrune) => {
     const nowForPrune = Date.now();
@@ -1900,7 +1923,7 @@ async function safeWriteState(state, actor = null) {
   // A stale snapshot (e.g. from a lagging tab) must not blindly overwrite
   // fields it didn't correctly merge - keep the current state as the base and
   // only layer in the fields we've safely reconciled above by id/timestamp.
-  const reconciledFields = ['ticketState', 'ticketStageTouchedAt', 'ticketAssigneeTouchedAt', 'ticketNumbers', 'ticketNumberCounter', 'allTickets', 'seenIds', 'ticketAssignee', 'ticketCSOwner', 'ticketAssignmentMode', 'manualSupportOverride', 'manualCSOverride', 'ticketResolutionMeta', 'ticketArchived', 'ticketCreatedBy', 'ticketJira', 'ticketHubspotId', 'ticketDuplicateOf'];
+  const reconciledFields = ['ticketState', 'ticketStageTouchedAt', 'ticketAssigneeTouchedAt', 'ticketNumbers', 'ticketNumberCounter', 'allTickets', 'seenIds', 'ticketAssignee', 'ticketCSOwner', 'ticketAssignmentMode', 'manualSupportOverride', 'manualCSOverride', 'ticketResolutionMeta', 'ticketArchived', 'ticketSendBackAlerts', 'ticketCreatedBy', 'ticketJira', 'ticketHubspotId', 'ticketDuplicateOf'];
   const finalState = isStale
     ? { ...currentState, ...Object.fromEntries(reconciledFields.map(key => [key, nextState[key]])), _meta: enrichedMeta }
     : { ...nextState, _meta: enrichedMeta };
@@ -4460,9 +4483,9 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
        the headline card disagree with the table under it. */
     const BACKLOG_KEY_BY_STATE = {
       overdue: 'overdue', at_risk: 'atRisk', on_track: 'onTrack',
-      no_clock: 'noClock', jira_hold: 'jiraHold'
+      no_clock: 'noClock', jira_hold: 'jiraHold', contact_hold: 'contactHold'
     };
-    const backlog = { overdue: 0, atRisk: 0, onTrack: 0, noClock: 0, jiraHold: 0 };
+    const backlog = { overdue: 0, atRisk: 0, onTrack: 0, noClock: 0, jiraHold: 0, contactHold: 0 };
     const overdueRows = [];
     let oldestOpenMs = 0;
 
@@ -4597,6 +4620,8 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
         // Reported so they are visibly parked rather than just missing from
         // the other three figures.
         jiraHold: backlog.jiraHold,
+        // Open tickets whose clock is frozen while they wait on the client.
+        contactHold: backlog.contactHold,
         oldestOpenHours: hoursFromMs(oldestOpenMs),
         resolvedInRange: resolvedInRange.length,
         met: slaMet,
@@ -7805,7 +7830,10 @@ const LIVE_SYNC_FIELDS = [
   // still looking at it.
   // A reply restarts the SLA clock, and every open board has to agree about
   // when - otherwise one tab shows a badge as breached and another does not.
-  'ticketDuplicateOf', 'ticketSnooze', 'ticketSlaResetAt'
+  'ticketDuplicateOf', 'ticketSnooze', 'ticketSlaResetAt',
+  // A CS send-back lands in the support agent's My Alerts, so it has to reach
+  // their open board now rather than on their next reload.
+  'ticketSendBackAlerts'
 ];
 
 function sseFrame(rev, type, data) {

@@ -6757,32 +6757,35 @@ function supportAgentsTaggedInEmail(emailObj){
 }
 /* Where a ticket goes when the mail names nobody who can take it.
 
-   An admin, deliberately, rather than the least loaded agent. The mail's To/Cc
-   line is the only signal about whose ticket it is; when it carries none - no
-   colleague tagged, or only people who are not on the support roster (a client,
-   a CS agent, an admin account that cannot hold tickets) - nobody has actually
-   been asked to take it, and quietly spreading those across the team by
-   workload made them look assigned when they had never been triaged. They land
-   with an admin to hand out instead.
+   Spread evenly across the support team - every agent on the roster except
+   SGU - to whoever holds the fewest open tickets. SGU is the overflow, not the
+   default: a ticket only lands there once every other agent is holding
+   SUPPORT_AUTO_ASSIGN_CAP open tickets. Sending every untagged ticket to SGU
+   left one admin triaging the whole inbox while the rest of the team waited
+   to be handed work.
 
    Only SUPPORT_AGENTS trigrams are valid here: the server independently
    rejects anything else for this field (see the assignedAgent check in
    upsertBoardTicketsToDatabase), so an admin who is not on that roster - AHK,
-   OWNER, or VGU, who is CS - cannot be given a ticket even by name. SGU is the
-   admin who is on it, which is why it is the fallback.
+   OWNER, or VGU, who is CS - cannot be given a ticket even by name.
 
-   Fixed rather than computed on purpose: leastLoadedSupportAgent() is a
-   session-local sum, so two tabs could reach different answers for the same
-   untriaged ticket and flap it between them. */
+   Ties go to the earlier agent in SUPPORT_AGENTS rather than at random, so two
+   tabs looking at the same board reach the same answer for the same ticket.
+   This only ever runs for a ticket that has nobody on it: once assigned, the
+   choice is stored and never recomputed. */
 const FALLBACK_SUPPORT_OWNER='SGU';
+const SUPPORT_AUTO_ASSIGN_CAP=10;
 function fallbackSupportOwner(){
-  // Only if SGU is ever retired from the roster does workload decide again -
-  // an invalid assignee would be rejected on save and re-stamped on every
-  // render.
+  const load=openWorkloadByAgent();
+  const pool=SUPPORT_AGENTS.filter(a=>a!==FALLBACK_SUPPORT_OWNER&&load[a]<SUPPORT_AUTO_ASSIGN_CAP);
+  if(pool.length)return pool.reduce((m,a)=>load[a]<load[m]?a:m,pool[0]);
+  // Everyone is full. If SGU is ever retired from the roster, the least loaded
+  // agent takes it instead - an invalid assignee would be rejected on save
+  // and re-stamped on every render.
   return normalizeSupportAgent(FALLBACK_SUPPORT_OWNER)||leastLoadedSupportAgent();
 }
 // Who a ticket lands on when nobody has chosen yet: the agent the mail names,
-// and failing that the admin above.
+// and failing that the next agent in the rotation above.
 function defaultSupportAgentForTicket(emailObj){
   return supportAgentsTaggedInEmail(emailObj)[0]||fallbackSupportOwner();
 }
@@ -6846,15 +6849,13 @@ function mergeEmailIntoExistingTicket(ticket,emailObj,subtypeId){if(!ticket||!ti
   // already filters out automated/OOO messages (isAutomatic()) before this
   // ever runs, so this only fires for real inbound replies.
   if(!isInternalEmailAddress(emailObj.sender)&&normalizeTicketStage(ticketState[ticket.id]||'new')==='wct'){
-    ticketState[ticket.id]='wus';
-    ticketStageTouchedAt[ticket.id]=Date.now();
+    setTicketStage(ticket.id,'wus');
   }else if(isInternalEmailAddress(emailObj.sender)&&normalizeTicketStage(ticketState[ticket.id]||'new')==='wus'){
     // Mirror of the above: a CS/support agent replying (via email, not an
     // internal-only board comment) while waiting on us means the ball is
     // back in the client's court - move it to Waiting on Contact
     // automatically.
-    ticketState[ticket.id]='wct';
-    ticketStageTouchedAt[ticket.id]=Date.now();
+    setTicketStage(ticket.id,'wct');
   }
   return true;}
 
@@ -6874,6 +6875,36 @@ let ticketCreatedAt={};
    permanently breached because of when it first arrived. getSLAStatus counts
    from here when it is set, and from the ticket's creation when it is not. */
 let ticketSlaResetAt={};
+/* Every stage move goes through here, because leaving Waiting on Contact has
+   to settle the SLA clock on the way out.
+
+   The clock is frozen while a ticket waits on the client (getSLAStatus stops
+   counting in that column): the wait is theirs, not ours. Frozen means it
+   resumes where it stopped rather than starting over, so on the way out the
+   restart point is moved forward by however long the ticket sat there - the
+   time already spent before the wait still counts, the wait itself does not.
+
+   ticketStageTouchedAt is when the ticket went into the column, since nothing
+   else moves it while it stays there. If the clock was already restarted
+   during the wait - the client's reply stamps it, which is usually what pulls
+   a ticket out of this column - that reply is the new starting point and
+   there is nothing to add. The shift is in wall-clock time, which is exact
+   for waits of whole days and close otherwise. */
+function resumeSlaAfterContactWait(id,now){
+  const since=Number(ticketStageTouchedAt[id]||0);
+  if(!since||since>=now)return;
+  const created=new Date(ticketCreatedAt[id]||0).getTime()||0;
+  const base=Math.max(created,Number(ticketSlaResetAt[id]||0));
+  if(!base||base>=since)return;
+  ticketSlaResetAt[id]=base+(now-since);
+}
+function setTicketStage(id,col,at){
+  const now=Number(at)||Date.now();
+  const from=normalizeTicketStage(ticketState[id]||'new');
+  if(from==='wct'&&col!=='wct')resumeSlaAfterContactWait(id,now);
+  ticketState[id]=col;
+  ticketStageTouchedAt[id]=now;
+}
 let ticketCreatedBy={}; // ticketId -> creator's agent code, set once at manual-ticket creation - gates who can use the Edit Manual Ticket action
 let ticketNumbers={};
 let ticketNumberCounter=0;
@@ -6970,6 +7001,13 @@ function setTicketAssignee(id,agent,ts,source){
 }
 let ticketHasNewReply={}; // ticketId -> true while an unread reply is glowing on the card
 let ticketResolutionMeta={}; // ticketId -> CS confirmation / send-back metadata
+/* ticketId -> the last time CS sent it back from Resolved: {at,by,note,to}.
+
+   Its own map rather than a field of ticketResolutionMeta because that one is
+   deleted the moment the ticket moves again, and the alert has to outlive the
+   support agent picking the ticket up - it is how they find out it came back.
+   `to` is who held the ticket when it was sent back, which is who is told. */
+let ticketSendBackAlerts={};
 let ticketArchived={}; // ticketId -> {archivedAt,archivedBy,reason:'manual'|'resolved_confirmed'}
 function isArchivedTicket(id){return !!ticketArchived[id];}
 // A ticket only counts toward an agent's workload while it is still open.
@@ -7457,7 +7495,7 @@ function buildStatePayload(reason){
     allTickets,
     seenIds:Object.keys(seen),
     ticketState,ticketStageTouchedAt,ticketAssigneeTouchedAt,ticketAssigneeBy,ticketHasNewReply,ticketResolutionMeta,ticketArchived,ticketPriority,ticketCategory,ticketSubtype,ticketAssignee,ticketAssignmentMode,manualSupportOverride,manualCSOverride,ticketCSOwner,ticketComments,ticketClientEmail,ticketCreatedAt,ticketCreatedBy,ticketNumbers,ticketNumberCounter,ticketJira,ticketDuplicateOf,ticketHubspotId,
-    ticketSnooze,ticketSlaResetAt,wipLimits,savedViews,
+    ticketSnooze,ticketSlaResetAt,ticketSendBackAlerts,wipLimits,savedViews,
     spamSenders:[...spamSenders],hsCache,domainCompanyCache,readMentions:[...readMentions],jiraAlerts,readJiraAlerts:[...readJiraAlerts],jiraStatusSnapshot,companyCustomProps,companyProfiles,companiesViewType,companyNetworkCache,companyFilters,coOwnerMappings,actionHistory,
     _meta:{clientSavedAt:now,clientVersion:stateVersion,clientId:LIVE_CLIENT_ID}
   };
@@ -7574,8 +7612,7 @@ async function applyJiraDrivenBoardUpdates(issues){
       if(String(linkedKey||'').trim().toUpperCase()!==jiraKey)return;
       const currentStage=normalizeTicketStage(ticketState[ticketId]||'new');
       if(currentStage==='dft'||currentStage==='res')return;
-      ticketState[ticketId]='dft';
-      ticketStageTouchedAt[ticketId]=Date.now();
+      setTicketStage(ticketId,'dft');
       movedIds.push(ticketId);
     });
   });
@@ -7722,7 +7759,7 @@ function liveSyncTargets(){
   return {ticketState,ticketStageTouchedAt,ticketAssigneeTouchedAt,ticketAssignee,ticketCSOwner,ticketAssignmentMode,
     manualSupportOverride,manualCSOverride,ticketPriority,ticketCategory,ticketSubtype,
     ticketJira,ticketDuplicateOf,ticketHubspotId,ticketArchived,ticketResolutionMeta,ticketHasNewReply,
-    ticketNumbers,ticketComments,ticketCreatedBy,ticketSnooze,ticketSlaResetAt};
+    ticketNumbers,ticketComments,ticketCreatedBy,ticketSnooze,ticketSlaResetAt,ticketSendBackAlerts};
 }
 function setLiveIndicator(state,detail){
   const el=document.getElementById('live-indicator');
@@ -7903,6 +7940,7 @@ async function loadState(){
   if(s.ticketHasNewReply&&typeof s.ticketHasNewReply==='object')Object.assign(ticketHasNewReply,s.ticketHasNewReply);
   if(s.ticketResolutionMeta&&typeof s.ticketResolutionMeta==='object')Object.assign(ticketResolutionMeta,s.ticketResolutionMeta);
   if(s.ticketArchived&&typeof s.ticketArchived==='object')Object.assign(ticketArchived,s.ticketArchived);
+  if(s.ticketSendBackAlerts&&typeof s.ticketSendBackAlerts==='object')Object.assign(ticketSendBackAlerts,s.ticketSendBackAlerts);
   if(s.ticketPriority)Object.assign(ticketPriority,s.ticketPriority);
   if(s.ticketCategory)Object.assign(ticketCategory,s.ticketCategory);if(s.ticketSubtype)Object.assign(ticketSubtype,s.ticketSubtype);
   mergeAssignmentFromServerState(s);
@@ -7966,7 +8004,8 @@ async function loadState(){
 // slot. Runs at the end of every loadState, which makes it dangerous: it used
 // to pick a replacement with leastLoadedSupportAgent() - a session-local
 // calculation, so two tabs chose different agents and the ticket flapped (it
-// takes the fixed fallbackSupportOwner() now) - and it cleared
+// takes fallbackSupportOwner() now, which breaks ties by roster order and
+// runs once per ticket, since the migrated assignee is a support agent) - and it cleared
 // manualSupportOverride, destroying the protection a deliberate
 // assignment had just been given. Both are now fixed, and the migration is
 // recorded in the assignment log so a mass move can never again be invisible.
@@ -8249,6 +8288,12 @@ function getSLAStatus(id){
      ticketSlaSnapshot, which is what the dashboard is computed from. */
   const jiraHoldKey=canonicalJiraKey(ticketJira[id]);
   if(jiraHoldKey)return{text:`SLA on hold - ${jiraHoldKey}`,cls:'sla-warn',overdue:false,wallText,shiftMs:0,noClock:true,jiraHold:jiraHoldKey};
+  /* Waiting on the client, so the clock is frozen: the ball is in their court
+     and the time they take to answer is not ours to be late with. It resumes
+     from where it stopped when the ticket leaves the column - see
+     setTicketStage. Same shape as the Jira hold, and mirrors the contact_hold
+     state in ticketSlaSnapshot. */
+  if(col==='wct')return{text:'SLA frozen - waiting on contact',cls:'sla-warn',overdue:false,wallText,shiftMs:0,noClock:true,contactHold:true};
   if(st?.tier==='Paused')return{text:'Paused (awaiting hotel)',cls:'sla-warn',overdue:false,wallText,shiftMs:0};
   const pr=ticketPriority[id]||st?.priority||'Medium';
   const hrs=(SLA_HOURS[pr]||st?.responseHours||24);
@@ -8283,6 +8328,11 @@ function slaTooltip(status){
     return['SLA is not counting: this ticket is linked to '+status.jiraHold+'.',
       'Wall clock: '+(status.wallText||''),
       'Unlinking the Jira issue starts the clock again.'].join('\n');
+  }
+  if(status.contactHold){
+    return['SLA is frozen: this ticket is waiting on the contact.',
+      'Wall clock: '+(status.wallText||''),
+      'The clock resumes where it stopped when the ticket leaves Waiting on Contact.'].join('\n');
   }
   return[status.shiftText?'Shift time: '+status.shiftText:'Shift clock not running',
     'Wall clock: '+(status.wallText||''),
@@ -12466,10 +12516,15 @@ async function sendResolvedTicketBack(id){
   if(note===null)return;
   const text=String(note||'').trim();
   if(!text){showToast('A send-back note is required','warn');return;}
-  ticketState[id]='inp';
-  ticketStageTouchedAt[id]=Date.now();
-  ticketResolutionMeta[id]={...(ticketResolutionMeta[id]||{}),sentBackAt:Date.now(),sentBackBy:currentUser(),sendBackNote:text};
-  postTicketComment(id,`CS sent back from Resolved: ${text}`,[ticketAssignee[id]].filter(Boolean));
+  const sentBackAt=Date.now();
+  setTicketStage(id,'inp',sentBackAt);
+  ticketResolutionMeta[id]={...(ticketResolutionMeta[id]||{}),sentBackAt,sentBackBy:currentUser(),sendBackNote:text};
+  // Goes to My Alerts for whoever is holding the ticket. The thread comment
+  // below is the record of it and is deliberately not tagged as well - that
+  // would put the same send-back in the feed twice, once as a mention.
+  const sentBackTo=normalizeSupportAgent(ticketAssignee[id])||'';
+  if(sentBackTo)ticketSendBackAlerts[id]={at:sentBackAt,by:currentUser(),note:text,to:sentBackTo};
+  postTicketComment(id,`CS sent back from Resolved: ${text}`,[]);
   const saved=await saveState('resolved_sent_back_by_cs');
   renderActiveView();
   const rs=await syncTicketStatusToHubspot(id,'inp');
@@ -14186,7 +14241,7 @@ function confirmAction(message,{title='Are you sure?',confirmLabel='Confirm',can
 function captureTicketState(ids,fields){
   return ids.map(id=>{
     const snapshot={id};
-    if(fields.includes('stage')){snapshot.stage=ticketState[id];snapshot.stageTouched=ticketStageTouchedAt[id];snapshot.resolution=ticketResolutionMeta[id]?{...ticketResolutionMeta[id]}:undefined;}
+    if(fields.includes('stage')){snapshot.stage=ticketState[id];snapshot.stageTouched=ticketStageTouchedAt[id];snapshot.slaResetAt=ticketSlaResetAt[id];snapshot.resolution=ticketResolutionMeta[id]?{...ticketResolutionMeta[id]}:undefined;}
     if(fields.includes('assignee')){snapshot.assignee=ticketAssignee[id];snapshot.assignTouched=ticketAssigneeTouchedAt[id];}
     if(fields.includes('priority'))snapshot.priority=ticketPriority[id];
     if(fields.includes('archived'))snapshot.archived=ticketArchived[id]?{...ticketArchived[id]}:undefined;
@@ -14197,7 +14252,7 @@ function captureTicketState(ids,fields){
 function restoreTicketState(snapshots,fields){
   const put=(map,id,value)=>{if(value===undefined)delete map[id];else map[id]=value;};
   snapshots.forEach(s=>{
-    if(fields.includes('stage')){put(ticketState,s.id,s.stage);put(ticketStageTouchedAt,s.id,s.stageTouched);put(ticketResolutionMeta,s.id,s.resolution);}
+    if(fields.includes('stage')){put(ticketState,s.id,s.stage);put(ticketStageTouchedAt,s.id,s.stageTouched);put(ticketSlaResetAt,s.id,s.slaResetAt);put(ticketResolutionMeta,s.id,s.resolution);}
     if(fields.includes('assignee')){put(ticketAssignee,s.id,s.assignee);put(ticketAssigneeTouchedAt,s.id,s.assignTouched);}
     if(fields.includes('priority'))put(ticketPriority,s.id,s.priority);
     if(fields.includes('archived'))put(ticketArchived,s.id,s.archived);
@@ -14211,7 +14266,7 @@ async function bulkSetStage(col){
   const before=captureTicketState(ids,['stage','snooze']);
   const now=Date.now();
   ids.forEach(id=>{
-    ticketState[id]=col;ticketStageTouchedAt[id]=now;
+    setTicketStage(id,col,now);
     if(col==='res')ticketResolutionMeta[id]={resolvedAt:now,resolvedBy:currentUser()};else delete ticketResolutionMeta[id];
     delete ticketSnooze[id];
   });
@@ -14882,7 +14937,7 @@ function bindColumnDropTarget(col){
     const prevCol=normalizeTicketStage(ticketState[id]||'new');
     const newCol=normalizeTicketStage(col.dataset.col);
     if(prevCol===newCol)return;
-    ticketState[id]=newCol;ticketStageTouchedAt[id]=Date.now();
+    setTicketStage(id,newCol);
     if(newCol==='res')ticketResolutionMeta[id]={resolvedAt:ticketStageTouchedAt[id],resolvedBy:currentUser()};else delete ticketResolutionMeta[id];
     // Moving a ticket is working it. Whatever it was waiting for, it is not
     // waiting any more - leaving it snoozed would hide the card the agent just
@@ -16032,8 +16087,7 @@ async function emSendReply(){
     if(els.cc)els.cc.value='';
     emCloseReply();
     if(els.wct?.checked&&normalizeTicketStage(ticketState[id]||'new')!=='wct'){
-      ticketState[id]='wct';
-      ticketStageTouchedAt[id]=Date.now();
+      setTicketStage(id,'wct');
       await saveState('ticket_reply_waiting_on_contact');
       renderActiveView();
       const rs=await syncTicketStatusToHubspot(id,'wct');
@@ -17347,7 +17401,7 @@ document.getElementById('com-debug-expert').addEventListener('click',async()=>{i
 let notifySnapshot=null;
 function requestNotificationPermission(){if(typeof Notification==='undefined')return;if(Notification.permission==='default'){Notification.requestPermission().catch(()=>{});}}
 function showBrowserNotification(title,body){if(typeof Notification==='undefined'||Notification.permission!=='granted')return;try{new Notification(title,{body:String(body||'').slice(0,200)});}catch(_){}}
-function snapshotForNotify(s){return{ticketAssignee:{...(s.ticketAssignee||{})},ticketState:{...(s.ticketState||{})},commentCounts:Object.fromEntries(Object.entries(s.ticketComments||{}).map(([id,cs])=>[id,Array.isArray(cs)?cs.length:0])),jiraAlertKeys:new Set((Array.isArray(s.jiraAlerts)?s.jiraAlerts:[]).map(a=>a.key))};}
+function snapshotForNotify(s){return{ticketAssignee:{...(s.ticketAssignee||{})},ticketState:{...(s.ticketState||{})},commentCounts:Object.fromEntries(Object.entries(s.ticketComments||{}).map(([id,cs])=>[id,Array.isArray(cs)?cs.length:0])),jiraAlertKeys:new Set((Array.isArray(s.jiraAlerts)?s.jiraAlerts:[]).map(a=>a.key)),sendBackKeys:new Set(Object.entries(s.ticketSendBackAlerts||{}).map(([id,e])=>sendBackAlertKey(id,e)))};}
 async function checkForBrowserNotifications(){
   if(typeof Notification==='undefined'||Notification.permission!=='granted')return;
   const s=await apiGetState();
@@ -17379,21 +17433,40 @@ async function checkForBrowserNotifications(){
     (Array.isArray(s.jiraAlerts)?s.jiraAlerts:[]).forEach(a=>{
       if(!prev.jiraAlertKeys.has(a.key)&&(a.recipient===me||currentUserIsAdmin()))showBrowserNotification('Jira update: '+(a.jiraKey||''),a.message||a.title||'');
     });
+    Object.entries(s.ticketSendBackAlerts||{}).forEach(([id,e])=>{
+      if(!e||prev.sendBackKeys.has(sendBackAlertKey(id,e))||agentIdentityCode(e.to)!==me)return;
+      showBrowserNotification('Sent back by '+(e.by||'CS')+': '+ticketLabel(id),e.note||'');
+    });
   }
   notifySnapshot=next;
 }
 
 function getMentions(user){const me=agentIdentityCode(user);const isAdminUser=currentUserIsAdmin();const r=[];Object.entries(ticketComments).forEach(([tid,cs])=>{const t=allTickets.find(x=>x.id===tid);cs.forEach((c,ci)=>{const normalizedTags=Array.isArray(c.tags)?c.tags.map(agentIdentityCode).filter(Boolean):[];const matches=isAdminUser?normalizedTags.length>0:normalizedTags.includes(me);if(matches)r.push({ticketId:tid,ci,comment:c,ticket:t,key:`${tid}:${ci}`});});});return r.sort((a,b)=>(b.comment.ts||0)-(a.comment.ts||0));}
 function unreadMentionCountForTicket(ticketId,user=currentUser()){return getMentions(user).filter(m=>m.ticketId===String(ticketId)&&!readMentions.has(m.key)).length;}
-function unreadAlertCountForTicket(ticketId,user=currentUser()){return unreadMentionCountForTicket(ticketId,user)+unreadJiraAlertCountForTicket(ticketId,user);}
+/* Tickets CS sent back from Resolved to this support agent. Read receipts
+   share the Jira alerts' set: it is a set of opaque keys, and the send-back
+   key carries its own timestamp, so a second send-back of the same ticket is
+   a new unread alert rather than one already marked read. */
+function sendBackAlertKey(ticketId,entry){return`sendback:${ticketId}:${Number(entry?.at||0)}`;}
+function getSendBackAlerts(user=currentUser()){
+  const me=agentIdentityCode(user);
+  if(!me)return[];
+  return Object.entries(ticketSendBackAlerts)
+    .filter(([,entry])=>entry&&Number(entry.at)>0&&agentIdentityCode(entry.to)===me)
+    .map(([ticketId,entry])=>({ticketId:String(ticketId),entry,key:sendBackAlertKey(ticketId,entry)}))
+    .sort((a,b)=>Number(b.entry.at)-Number(a.entry.at));
+}
+function unreadSendBackAlertCountForTicket(ticketId,user=currentUser()){return getSendBackAlerts(user).filter(a=>a.ticketId===String(ticketId)&&!isJiraAlertRead(a.key)).length;}
+function unreadAlertCountForTicket(ticketId,user=currentUser()){return unreadMentionCountForTicket(ticketId,user)+unreadJiraAlertCountForTicket(ticketId,user)+unreadSendBackAlertCountForTicket(ticketId,user);}
 function getAlertFeed(user=currentUser()){
   const mentionFeed=getMentions(user).map(({ticketId,ci,comment,ticket,key})=>({type:'mention',ticketId,ci,comment,ticket,key,ts:Number(comment?.ts||0),isUnread:!readMentions.has(key)}));
   const jiraFeed=getJiraAlerts(user).map(alert=>({type:'jira',ticketId:alert.ticketId,ticket:allTickets.find(t=>t.id===alert.ticketId)||null,key:alert.key,alert,ts:Number(alert.ts||0),isUnread:!isJiraAlertRead(alert.key)}));
-  return [...mentionFeed,...jiraFeed].sort((a,b)=>(b.ts||0)-(a.ts||0));
+  const sendBackFeed=getSendBackAlerts(user).map(({ticketId,entry,key})=>({type:'sendback',ticketId,ticket:allTickets.find(t=>t.id===ticketId)||null,key,entry,ts:Number(entry.at||0),isUnread:!isJiraAlertRead(key)}));
+  return [...mentionFeed,...jiraFeed,...sendBackFeed].sort((a,b)=>(b.ts||0)-(a.ts||0));
 }
 function updateMentionsBadge(){const u=getAlertFeed(currentUser()).filter(x=>x.isUnread).length;const badge=document.getElementById('mentions-badge');const btn=document.getElementById('mentions-btn');if(u>0){badge.textContent=u>99?'99+':u;badge.style.display='flex';btn.classList.add('has-mentions');}else{badge.style.display='none';btn.classList.remove('has-mentions');}}
-function markAlertFeedReadForTicket(ticketId,user=currentUser()){getMentions(user).filter(m=>m.ticketId===String(ticketId)).forEach(m=>readMentions.add(m.key));getJiraAlerts(user).filter(a=>a.ticketId===String(ticketId)).forEach(a=>readJiraAlerts.add(a.key));saveReads();}
-function renderMentions(){const me=currentUser();const feed=getAlertFeed(me);const unread=feed.filter(x=>x.isUnread).length;document.getElementById('mentions-title').textContent=' My Alerts  '+me;document.getElementById('mentions-info').textContent=feed.length+' alert'+(feed.length!==1?'s':'')+'  '+(unread>0?unread+' unread':'all read');const list=document.getElementById('mentions-list');if(!feed.length){list.innerHTML='<div class="mentions-empty" style="text-align:center;padding:40px 20px;color:var(--slate-400);"><div style="font-size:36px;margin-bottom:10px;"></div><div>No alerts yet</div></div>';return;}list.innerHTML='';feed.forEach(item=>{const ticket=item.ticket||allTickets.find(t=>t.id===item.ticketId)||null;const isUnread=item.isUnread;const card=document.createElement('div');card.className='mention-card'+(isUnread?' unread':'');const ttl=ticket?.email?.subject||'(deleted)';const ce=ticket?ticketClientEmail[ticket.id]:null;const hs=ce?hsCache[ce]:null;const coInfo=hs?.companyName?'   '+hs.companyName+(hs.inferredVia?' ~':''):'';const col=normalizeTicketStage(ticketState[item.ticketId]||'new');const colLabel={new:' New',inp:' In Progress',wus:' Waiting On Us',dft:' Due for test',wct:' Waiting On Contact',res:' Resolved'}[col]||' New';if(item.type==='mention'){const {comment,key}=item;const tagHtml=(comment.tags||[]).filter(t=>t!==CLIENT_TAG).map(t=>`<span class="mention-tag" style="background:${agentColor(t)}">@${t}</span>`).join('');const bg=ALL_AGENTS.includes(comment.author)?agentColor(comment.author):'var(--slate-500)';card.innerHTML=`<div class="mention-card-top"><div><div class="mention-ticket">${esc(ttl)}</div><div style="font-size:10px;color:var(--slate-400);">${colLabel}${coInfo}</div></div><span class="mention-time">${fmtTime(comment.ts)}</span></div><div class="mention-from"><span class="mention-from-avatar" style="background:${bg}">${esc(comment.author)}</span><strong>${esc(comment.author)}</strong> tagged you</div>${tagHtml?`<div class="mention-tags">${tagHtml}</div>`:''}<div class="mention-comment">${esc(comment.text)}</div><div class="mention-footer">${isUnread?`<button class="btn-mention-mark" data-key="${esc(key)}">Mark read</button>`:''} ${ticket?`<button class="btn-mention-view">View thread </button>`:''}</div>`;card.querySelector('.btn-mention-mark')?.addEventListener('click',()=>{readMentions.add(key);saveReads();renderMentions();updateMentionsBadge();});card.querySelector('.btn-mention-view')?.addEventListener('click',()=>{readMentions.add(key);saveReads();document.getElementById('mentions-modal').classList.remove('open');if(ticket)openComModal(ticket);updateMentionsBadge();});card.addEventListener('click',()=>{if(isUnread){readMentions.add(key);saveReads();card.classList.remove('unread');updateMentionsBadge();}});}else{const alert=item.alert;card.innerHTML=`<div class="mention-card-top"><div><div class="mention-ticket">${esc(ttl)}</div><div style="font-size:10px;color:var(--slate-400);">${colLabel}${coInfo}</div></div><span class="mention-time">${fmtTime(alert.ts)}</span></div><div class="mention-from"><span class="mention-from-avatar" style="background:var(--sky-500);">J</span><strong>${esc(alert.title||'Jira update')}</strong></div><div class="mention-comment">${esc(alert.message||'')}</div><div class="mention-footer">${isUnread?`<button class="btn-mention-mark" data-jira-key="${esc(alert.key)}">Mark read</button>`:''} ${ticket?`<button class="btn-mention-view">Open ticket</button>`:''}</div>`;card.querySelector('[data-jira-key]')?.addEventListener('click',()=>{readJiraAlerts.add(alert.key);saveReads();renderMentions();updateMentionsBadge();});card.querySelector('.btn-mention-view')?.addEventListener('click',()=>{readJiraAlerts.add(alert.key);saveReads();document.getElementById('mentions-modal').classList.remove('open');if(ticket)openEmailModal(ticket);updateMentionsBadge();});card.addEventListener('click',()=>{if(isUnread){readJiraAlerts.add(alert.key);saveReads();card.classList.remove('unread');updateMentionsBadge();}});}list.appendChild(card);});}
+function markAlertFeedReadForTicket(ticketId,user=currentUser()){getMentions(user).filter(m=>m.ticketId===String(ticketId)).forEach(m=>readMentions.add(m.key));getJiraAlerts(user).filter(a=>a.ticketId===String(ticketId)).forEach(a=>readJiraAlerts.add(a.key));getSendBackAlerts(user).filter(a=>a.ticketId===String(ticketId)).forEach(a=>readJiraAlerts.add(a.key));saveReads();}
+function renderMentions(){const me=currentUser();const feed=getAlertFeed(me);const unread=feed.filter(x=>x.isUnread).length;document.getElementById('mentions-title').textContent=' My Alerts  '+me;document.getElementById('mentions-info').textContent=feed.length+' alert'+(feed.length!==1?'s':'')+'  '+(unread>0?unread+' unread':'all read');const list=document.getElementById('mentions-list');if(!feed.length){list.innerHTML='<div class="mentions-empty" style="text-align:center;padding:40px 20px;color:var(--slate-400);"><div style="font-size:36px;margin-bottom:10px;"></div><div>No alerts yet</div></div>';return;}list.innerHTML='';feed.forEach(item=>{const ticket=item.ticket||allTickets.find(t=>t.id===item.ticketId)||null;const isUnread=item.isUnread;const card=document.createElement('div');card.className='mention-card'+(isUnread?' unread':'');const ttl=ticket?.email?.subject||'(deleted)';const ce=ticket?ticketClientEmail[ticket.id]:null;const hs=ce?hsCache[ce]:null;const coInfo=hs?.companyName?'   '+hs.companyName+(hs.inferredVia?' ~':''):'';const col=normalizeTicketStage(ticketState[item.ticketId]||'new');const colLabel={new:' New',inp:' In Progress',wus:' Waiting On Us',dft:' Due for test',wct:' Waiting On Contact',res:' Resolved'}[col]||' New';if(item.type==='mention'){const {comment,key}=item;const tagHtml=(comment.tags||[]).filter(t=>t!==CLIENT_TAG).map(t=>`<span class="mention-tag" style="background:${agentColor(t)}">@${t}</span>`).join('');const bg=ALL_AGENTS.includes(comment.author)?agentColor(comment.author):'var(--slate-500)';card.innerHTML=`<div class="mention-card-top"><div><div class="mention-ticket">${esc(ttl)}</div><div style="font-size:10px;color:var(--slate-400);">${colLabel}${coInfo}</div></div><span class="mention-time">${fmtTime(comment.ts)}</span></div><div class="mention-from"><span class="mention-from-avatar" style="background:${bg}">${esc(comment.author)}</span><strong>${esc(comment.author)}</strong> tagged you</div>${tagHtml?`<div class="mention-tags">${tagHtml}</div>`:''}<div class="mention-comment">${esc(comment.text)}</div><div class="mention-footer">${isUnread?`<button class="btn-mention-mark" data-key="${esc(key)}">Mark read</button>`:''} ${ticket?`<button class="btn-mention-view">View thread </button>`:''}</div>`;card.querySelector('.btn-mention-mark')?.addEventListener('click',()=>{readMentions.add(key);saveReads();renderMentions();updateMentionsBadge();});card.querySelector('.btn-mention-view')?.addEventListener('click',()=>{readMentions.add(key);saveReads();document.getElementById('mentions-modal').classList.remove('open');if(ticket)openComModal(ticket);updateMentionsBadge();});card.addEventListener('click',()=>{if(isUnread){readMentions.add(key);saveReads();card.classList.remove('unread');updateMentionsBadge();}});}else if(item.type==='sendback'){const {entry,key}=item;const by=String(entry.by||'CS');card.innerHTML=`<div class="mention-card-top"><div><div class="mention-ticket">${esc(ttl)}</div><div style="font-size:10px;color:var(--slate-400);">${colLabel}${coInfo}</div></div><span class="mention-time">${fmtTime(entry.at)}</span></div><div class="mention-from"><span class="mention-from-avatar" style="background:${ALL_AGENTS.includes(by)?agentColor(by):'var(--rose-600)'}">${esc(by)}</span><strong>${esc(by)}</strong> sent this ticket back from Resolved</div>${entry.note?`<div class="mention-comment">${esc(entry.note)}</div>`:''}<div class="mention-footer">${isUnread?`<button class="btn-mention-mark" data-sendback-key="${esc(key)}">Mark read</button>`:''} ${ticket?`<button class="btn-mention-view">Open ticket</button>`:''}</div>`;card.querySelector('[data-sendback-key]')?.addEventListener('click',ev=>{ev.stopPropagation();readJiraAlerts.add(key);saveReads();renderMentions();updateMentionsBadge();});card.querySelector('.btn-mention-view')?.addEventListener('click',()=>{readJiraAlerts.add(key);saveReads();document.getElementById('mentions-modal').classList.remove('open');if(ticket)openEmailModal(ticket);updateMentionsBadge();});card.addEventListener('click',()=>{if(isUnread){readJiraAlerts.add(key);saveReads();card.classList.remove('unread');updateMentionsBadge();}});}else{const alert=item.alert;card.innerHTML=`<div class="mention-card-top"><div><div class="mention-ticket">${esc(ttl)}</div><div style="font-size:10px;color:var(--slate-400);">${colLabel}${coInfo}</div></div><span class="mention-time">${fmtTime(alert.ts)}</span></div><div class="mention-from"><span class="mention-from-avatar" style="background:var(--sky-500);">J</span><strong>${esc(alert.title||'Jira update')}</strong></div><div class="mention-comment">${esc(alert.message||'')}</div><div class="mention-footer">${isUnread?`<button class="btn-mention-mark" data-jira-key="${esc(alert.key)}">Mark read</button>`:''} ${ticket?`<button class="btn-mention-view">Open ticket</button>`:''}</div>`;card.querySelector('[data-jira-key]')?.addEventListener('click',()=>{readJiraAlerts.add(alert.key);saveReads();renderMentions();updateMentionsBadge();});card.querySelector('.btn-mention-view')?.addEventListener('click',()=>{readJiraAlerts.add(alert.key);saveReads();document.getElementById('mentions-modal').classList.remove('open');if(ticket)openEmailModal(ticket);updateMentionsBadge();});card.addEventListener('click',()=>{if(isUnread){readJiraAlerts.add(alert.key);saveReads();card.classList.remove('unread');updateMentionsBadge();}});}list.appendChild(card);});}
 document.getElementById('mentions-btn').addEventListener('click',()=>{requestNotificationPermission();renderMentions();document.getElementById('mentions-modal').classList.add('open');setTimeout(()=>{getMentions(currentUser()).forEach(m=>{readMentions.add(m.key);});readAllJiraAlertsForUser(currentUser());saveReads();updateMentionsBadge();},2000);});
 document.getElementById('mark-all-read').addEventListener('click',()=>{getMentions(currentUser()).forEach(m=>{readMentions.add(m.key);});readAllJiraAlertsForUser(currentUser());saveReads();renderMentions();updateMentionsBadge();});
 document.getElementById('account-btn').addEventListener('click',e=>{e.stopPropagation();document.getElementById('account-panel').classList.toggle('open');});
