@@ -1754,6 +1754,59 @@ function applyRolePermissionsToStateWrite(currentState, nextState, actor) {
   return refused;
 }
 
+/* Makes state.ticketNumbers one number per ticket and one ticket per number.
+
+   dbRows, when given, are Postgres's displayNumbers and always win - that
+   sequence is what the MCP tools, the KPI exports and every past reference
+   use. Anything the database does not know yet (the ticket's row is written
+   right after this save, or the database is down) keeps its number only while
+   no other ticket holds it. A ticket left without one gets the next number
+   above everything in use, so it can never repeat one. */
+function assignUniqueTicketNumbers(state, dbRows = null) {
+  const before = (state.ticketNumbers && typeof state.ticketNumbers === 'object') ? state.ticketNumbers : {};
+  const numbers = {};
+  const holder = new Map();
+  const take = (id, n) => { numbers[id] = n; holder.set(n, id); };
+  (Array.isArray(dbRows) ? dbRows : []).forEach((row) => {
+    const id = String(row?.externalId || '').trim();
+    const n = Number(row?.displayNumber || 0);
+    if (id && n > 0 && !holder.has(n)) take(id, n);
+  });
+  Object.entries(before).forEach(([id, num]) => {
+    const n = Number(num || 0);
+    if (!id || numbers[id] || !(n > 0) || holder.has(n)) return;
+    take(id, n);
+  });
+  let next = Math.max(0, ...holder.keys());
+  (Array.isArray(state.allTickets) ? state.allTickets : []).forEach((t) => {
+    const id = String(t?.id || '').trim();
+    if (!id || numbers[id]) return;
+    next += 1;
+    take(id, next);
+  });
+  const changed = Object.keys(numbers).length !== Object.keys(before).length
+    || Object.entries(numbers).some(([id, n]) => Number(before[id] || 0) !== n);
+  state.ticketNumbers = numbers;
+  state.ticketNumberCounter = Math.max(Number(state.ticketNumberCounter || 0), next);
+  return changed;
+}
+
+// After the ticket rows are written, bring the saved board's numbers into line
+// with Postgres's. Re-reads the file after the query rather than trusting a
+// copy from before it, so a save that landed during the await is not undone.
+async function reconcileTicketNumbersWithDatabase() {
+  const rows = await prisma.ticket.findMany({
+    where: { displayNumber: { not: null } },
+    select: { externalId: true, displayNumber: true }
+  });
+  const state = safeReadState();
+  if (assignUniqueTicketNumbers(state, rows)) {
+    fs.mkdirSync(path.dirname(DATA_PATH), { recursive: true });
+    fs.writeFileSync(DATA_PATH, JSON.stringify(state, null, 2), 'utf8');
+  }
+  return state;
+}
+
 async function safeWriteState(state, actor = null) {
   const nextState = (state && typeof state === 'object') ? state : {};
   const currentState = safeReadState();
@@ -1791,24 +1844,23 @@ async function safeWriteState(state, actor = null) {
   nextState.ticketState = mergedStages;
   nextState.ticketStageTouchedAt = mergedTouched;
 
-  // Ticket numbers must never regress: a browser tab/session that hasn't caught
-  // up with numbers assigned elsewhere would otherwise reassign a lower number
-  // (or a duplicate) to a ticket that already has a higher one recorded.
-  const currentNumbers = (currentState.ticketNumbers && typeof currentState.ticketNumbers === 'object') ? currentState.ticketNumbers : {};
+  // Ticket numbers: a number once given to a ticket is kept, and no number is
+  // ever held by two tickets. Each tab used to make its own numbers up as mail
+  // arrived and the merge kept whichever was higher, so two agents' tabs
+  // numbering two different new tickets at the same moment both landed "#0412"
+  // - two open tickets, two people, one number. The board no longer invents
+  // numbers at all; the server hands them out here (and Postgres, which owns
+  // them, overrides after the ticket rows are written - see
+  // reconcileTicketNumbersWithDatabase).
+  const mergedNumbers = { ...((currentState.ticketNumbers && typeof currentState.ticketNumbers === 'object') ? currentState.ticketNumbers : {}) };
   const incomingNumbers = (nextState.ticketNumbers && typeof nextState.ticketNumbers === 'object') ? nextState.ticketNumbers : {};
-  const mergedNumbers = { ...currentNumbers };
   Object.entries(incomingNumbers).forEach(([ticketId, num]) => {
+    if (Number(mergedNumbers[ticketId] || 0) > 0) return;
     const n = Number(num || 0);
-    if (n > Number(mergedNumbers[ticketId] || 0)) mergedNumbers[ticketId] = n;
+    if (n > 0) mergedNumbers[ticketId] = n;
   });
-  const mergedCounter = Math.max(
-    Number(currentState.ticketNumberCounter || 0),
-    Number(nextState.ticketNumberCounter || 0),
-    ...Object.values(mergedNumbers).map(n => Number(n) || 0),
-    0
-  );
   nextState.ticketNumbers = mergedNumbers;
-  nextState.ticketNumberCounter = mergedCounter;
+  nextState.ticketNumberCounter = Math.max(Number(currentState.ticketNumberCounter || 0), Number(nextState.ticketNumberCounter || 0), 0);
 
   // Union tickets by id so a session that hasn't polled/merged every ticket yet
   // can never make tickets known to other sessions vanish from the saved board.
@@ -1825,6 +1877,7 @@ async function safeWriteState(state, actor = null) {
   const seenIdSet = new Set(Array.isArray(currentState.seenIds) ? currentState.seenIds : []);
   (Array.isArray(nextState.seenIds) ? nextState.seenIds : []).forEach(id => seenIdSet.add(id));
   nextState.seenIds = [...seenIdSet];
+  assignUniqueTicketNumbers(nextState);
 
   const mergeTicketMap = (field) => ({
     ...((currentState[field] && typeof currentState[field] === 'object') ? currentState[field] : {}),
@@ -1894,6 +1947,8 @@ async function safeWriteState(state, actor = null) {
   // and a tab that has not heard about a send-back yet must not erase the
   // alert before the agent it is for has seen it.
   nextState.ticketSendBackAlerts = mergeTicketMap('ticketSendBackAlerts');
+  // Same: only ever stamped, so a tab that missed the reopen must not erase it.
+  nextState.ticketReopenedAt = mergeTicketMap('ticketReopenedAt');
 
   const pruneResolvedHiddenTickets = (stateToPrune) => {
     const nowForPrune = Date.now();
@@ -1923,7 +1978,7 @@ async function safeWriteState(state, actor = null) {
   // A stale snapshot (e.g. from a lagging tab) must not blindly overwrite
   // fields it didn't correctly merge - keep the current state as the base and
   // only layer in the fields we've safely reconciled above by id/timestamp.
-  const reconciledFields = ['ticketState', 'ticketStageTouchedAt', 'ticketAssigneeTouchedAt', 'ticketNumbers', 'ticketNumberCounter', 'allTickets', 'seenIds', 'ticketAssignee', 'ticketCSOwner', 'ticketAssignmentMode', 'manualSupportOverride', 'manualCSOverride', 'ticketResolutionMeta', 'ticketArchived', 'ticketSendBackAlerts', 'ticketCreatedBy', 'ticketJira', 'ticketHubspotId', 'ticketDuplicateOf'];
+  const reconciledFields = ['ticketState', 'ticketStageTouchedAt', 'ticketAssigneeTouchedAt', 'ticketNumbers', 'ticketNumberCounter', 'allTickets', 'seenIds', 'ticketAssignee', 'ticketCSOwner', 'ticketAssignmentMode', 'manualSupportOverride', 'manualCSOverride', 'ticketResolutionMeta', 'ticketArchived', 'ticketSendBackAlerts', 'ticketReopenedAt', 'ticketCreatedBy', 'ticketJira', 'ticketHubspotId', 'ticketDuplicateOf'];
   const finalState = isStale
     ? { ...currentState, ...Object.fromEntries(reconciledFields.map(key => [key, nextState[key]])), _meta: enrichedMeta }
     : { ...nextState, _meta: enrichedMeta };
@@ -2107,6 +2162,10 @@ async function hydrateStateFromDatabase(baseState = {}) {
 
   state.allTickets = [...ticketsById.values()].sort((a, b) => new Date(b?.email?.receivedDateTime || 0) - new Date(a?.email?.receivedDateTime || 0));
   state.seenIds = [...seenIds];
+  // The database's numbers were laid over the file's above; this drops any
+  // number the file still had on a different ticket, so a board loading now
+  // cannot show two tickets under one number.
+  assignUniqueTicketNumbers(state, tickets.map(t => ({ externalId: String(t.externalId || t.emailMessageId || t.id), displayNumber: t.displayNumber })));
   return state;
 }
 
@@ -3994,13 +4053,28 @@ app.delete('/api/jira/link/:kanbanTicketId', requireAuth, async (req, res) => {
   try {
     const kanbanTicketId = String(req.params.kanbanTicketId || '').trim();
     if (!kanbanTicketId) return res.status(400).json({ error: 'missing_kanban_ticket_id' });
+    // When the link was made, so the board can resume the SLA clock where the
+    // Jira hold stopped it rather than counting the whole engineering wait
+    // against support the moment the link comes off.
+    let linkedAt = null;
+    try {
+      const record = await findTicketRecordByKanbanId(kanbanTicketId);
+      if (record?.jiraTicketKey) {
+        const linkEvent = await prisma.ticketEvent.findFirst({
+          where: { ticketId: record.id, eventType: 'ticket_jira_linked' },
+          orderBy: { createdAt: 'desc' },
+          select: { createdAt: true }
+        });
+        linkedAt = linkEvent?.createdAt ? linkEvent.createdAt.getTime() : null;
+      }
+    } catch (_) {}
     await setTicketJiraLink({
       kanbanTicketId,
       jiraTicketKey: null,
       userId: req.session.userId || null,
       metadata: { source: 'manual' }
     });
-    return res.json({ ok: true });
+    return res.json({ ok: true, linkedAt });
   } catch (error) {
     return res.status(500).json({ error: String(error.message || error) });
   }
@@ -7833,7 +7907,10 @@ const LIVE_SYNC_FIELDS = [
   'ticketDuplicateOf', 'ticketSnooze', 'ticketSlaResetAt',
   // A CS send-back lands in the support agent's My Alerts, so it has to reach
   // their open board now rather than on their next reload.
-  'ticketSendBackAlerts'
+  'ticketSendBackAlerts',
+  // A client reply that brings a closed ticket back has to show as Re-opened
+  // on every board, not just the tab whose mail poll picked it up.
+  'ticketReopenedAt'
 ];
 
 function sseFrame(rev, type, data) {
@@ -7940,7 +8017,21 @@ app.post('/api/state', requireAuth, async (req, res) => {
       data: { provider: 'kanban', syncType: 'board_state_to_ticket_db', status: 'error', message: error.message || String(error) }
     }).catch(() => null);
   }
+  // New rows have just been given their Postgres number - put those on the
+  // board, and send them back to this tab too: its own live patch is ignored
+  // as an echo, so the response is the only way it hears its new tickets'
+  // numbers.
+  try {
+    const reconciled = await reconcileTicketNumbersWithDatabase();
+    if (result.state) {
+      result.state.ticketNumbers = reconciled.ticketNumbers;
+      result.state.ticketNumberCounter = reconciled.ticketNumberCounter;
+    }
+  } catch (error) {
+    console.error('Ticket number reconcile failed:', error?.message || error);
+  }
   const { state: _fullState, ...resultSummary } = result;
+  resultSummary.ticketNumbers = (_fullState && _fullState.ticketNumbers) || undefined;
 
   // Push the delta to every other open board. Note this reflects the MERGED
   // post-write state, not the raw payload - so a stale tab's rejected fields
