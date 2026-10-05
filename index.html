@@ -7762,6 +7762,46 @@ th {
   .availability-controls { width: 100%; }
 }
 
+/* ---- KPI: all-time strip (admins) --------------------------------------------------- */
+.kpi-alltime {
+  display: flex;
+  align-items: center;
+  gap: 14px 26px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+  padding: 14px 18px;
+  border-radius: 16px;
+  color: #fff;
+  background:
+    radial-gradient(420px 140px at 0% 0%, rgba(124, 92, 255, .55), transparent 70%),
+    radial-gradient(360px 140px at 100% 100%, rgba(236, 72, 153, .30), transparent 70%),
+    linear-gradient(135deg, var(--ink-soft), var(--ink));
+  box-shadow: var(--shadow-sm);
+}
+.kpi-alltime[hidden] { display: none; }
+.kpi-alltime-main { display: flex; flex-direction: column; gap: 2px; }
+.kpi-alltime-label { font-size: 12px; font-weight: 600; letter-spacing: .02em; color: rgba(255, 255, 255, .65); }
+.kpi-alltime-value { font-family: Caladea, Inter, serif; font-size: 34px; font-weight: 700; line-height: 1.05; font-variant-numeric: tabular-nums; }
+.kpi-alltime-value small { font-family: Inter, sans-serif; font-size: 13px; font-weight: 600; margin-left: 7px; color: rgba(255, 255, 255, .7); }
+.kpi-alltime-stats { display: flex; gap: 8px; flex-wrap: wrap; flex: 1 1 320px; }
+.kpi-alltime-stats span {
+  padding: 5px 10px;
+  border-radius: 9px;
+  font-size: 12.5px;
+  color: rgba(255, 255, 255, .78);
+  background: rgba(255, 255, 255, .07);
+  border: 1px solid rgba(255, 255, 255, .10);
+}
+.kpi-alltime-stats strong { color: #fff; font-weight: 700; font-variant-numeric: tabular-nums; }
+.kpi-alltime .kpi-alltime-btn {
+  margin-left: auto;
+  color: #fff;
+  background: rgba(255, 255, 255, .08);
+  border-color: rgba(255, 255, 255, .2);
+  box-shadow: none;
+}
+.kpi-alltime .kpi-alltime-btn:hover { background: rgba(255, 255, 255, .16); color: #fff; }
+
 /* ---- Small screens ---------------------------------------------------------------- */
 
 @media (max-width: 900px) {
@@ -8174,6 +8214,9 @@ th {
       <button class="btn-out" id="kpi-refresh-now" type="button" style="font-size:13px;padding:3px 9px;">Refresh</button>
     </div>
   </div>
+  <!-- Admins only: every ticket since the board went live. Filled by the KPI
+       load; hidden for everyone else and when the server does not send it. -->
+  <div id="kpi-alltime" class="kpi-alltime" hidden></div>
   <div id="kpi-status-cards" class="kpi-scroll-x" style="display:grid;grid-template-columns:repeat(8,minmax(160px,1fr));gap:12px;margin-bottom:12px;"></div>
   <div id="kpi-sla-cards" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;margin-bottom:12px;"></div>
   <div style="background:var(--white);border:1px solid var(--legacy-d7d7d7);border-radius:14px;padding:12px;box-shadow:0 6px 16px rgba(var(--shadow-rgb), .06);margin-bottom:12px;">
@@ -13770,13 +13813,15 @@ const KPI_RANGES=[
   {key:'this_month',label:'This month'},
   {key:'last_month',label:'Last month'},
   {key:'this_quarter',label:'This quarter'},
-  {key:'last_quarter',label:'Last quarter'}
+  {key:'last_quarter',label:'Last quarter'},
+  // The whole life of the board, from the day it went live.
+  {key:'since_launch',label:'Since launch'}
 ];
 const KPI_RANGE_LABELS=Object.fromEntries(KPI_RANGES.map(r=>[r.key,r.label]));
 // Ranges this build no longer offers, mapped to the nearest one it does, so a
 // stored session or an old link resolves to a real period instead of silently
 // reading as Today.
-const KPI_RANGE_ALIASES={day:'today',week:'this_week',month:'this_month',quarter:'this_quarter',last_30_days:'this_month',this_year:'this_quarter'};
+const KPI_RANGE_ALIASES={day:'today',week:'this_week',month:'this_month',quarter:'this_quarter',last_30_days:'this_month',this_year:'this_quarter',all_time:'since_launch'};
 function normalizeKpiRange(key){
   const value=String(key||'today').trim().toLowerCase();
   if(KPI_RANGE_LABELS[value])return value;
@@ -13790,6 +13835,39 @@ function populateKpiRangeOptions(){
   if(!sel||sel.options.length===KPI_RANGES.length)return;
   sel.innerHTML=KPI_RANGES.map(r=>`<option value="${esc(r.key)}">${esc(r.label)}</option>`).join('');
 }
+let kpiLaunchAtMs=0;
+/* The all-time line for admins: every ticket since the board went live,
+   whatever range and filters are picked below it. The server only sends it to
+   admins, so for everyone else the strip stays hidden. */
+function renderKpiAllTime(all){
+  const el=document.getElementById('kpi-alltime');
+  if(!el)return;
+  if(!all){el.hidden=true;el.innerHTML='';return;}
+  if(all.since)kpiLaunchAtMs=new Date(all.since).getTime()||kpiLaunchAtMs;
+  const since=all.since?new Date(all.since).toLocaleDateString('en-GB',{day:'numeric',month:'long',year:'numeric'}):'launch';
+  const n=v=>Number(v||0).toLocaleString('en-GB');
+  el.innerHTML=`
+    <div class="kpi-alltime-main">
+      <span class="kpi-alltime-label">Since the board went live on ${esc(since)}</span>
+      <span class="kpi-alltime-value">${n(all.created)}<small>tickets</small></span>
+    </div>
+    <div class="kpi-alltime-stats">
+      <span><strong>${n(all.resolved)}</strong> resolved</span>
+      <span><strong>${n(all.open)}</strong> still open</span>
+      <span><strong>${n(all.duplicates)}</strong> duplicate${all.duplicates===1?'':'s'} (not counted)</span>
+      <span><strong>${n(all.spam)}</strong> spam (not counted)</span>
+    </div>
+    <button class="btn-out kpi-alltime-btn" type="button" data-kpi-range="since_launch">Show all of it below</button>`;
+  el.hidden=false;
+}
+document.getElementById('kpi-alltime')?.addEventListener('click',e=>{
+  const btn=e.target.closest('[data-kpi-range]');
+  if(!btn)return;
+  const sel=document.getElementById('kpi-time-filter');
+  if(!sel)return;
+  sel.value=btn.dataset.kpiRange;
+  sel.dispatchEvent(new Event('change',{bubbles:true}));
+});
 function getKpiBounds(key){
   const now=new Date();
   const nowMs=now.getTime();
@@ -13811,6 +13889,9 @@ function getKpiBounds(key){
       const q=new Date(quarterStart);
       return{start:new Date(q.getFullYear(),q.getMonth()-3,1).getTime(),end:quarterStart-1};
     }
+    // The launch date comes from the server (the first ticket it holds); until
+    // the first KPI load has said, the epoch gives the same answer.
+    case 'since_launch':return{start:kpiLaunchAtMs?startOfDayMs(new Date(kpiLaunchAtMs)):0,end:nowMs};
     default:return{start:dayStart,end:nowMs};
   }
 }
@@ -14049,6 +14130,7 @@ async function renderKpiView(){
     }
     const s=data.statusCounts||{};
     const totals=data.totals||{};
+    renderKpiAllTime(data.allTime);
     const start=new Date(data.range?.start).toLocaleDateString('en-GB',{day:'2-digit',month:'short',year:'numeric'});
     const end=new Date(data.range?.end).toLocaleDateString('en-GB',{day:'2-digit',month:'short',year:'numeric'});
     const teamLabel=kpiTeamFilter==='cs'?'CS only':(kpiTeamFilter==='support'?'Support only':'All CS & Support');

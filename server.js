@@ -755,7 +755,8 @@ function normalizeDbStatusForBoard(status) {
 function startOfLocalDay(date = new Date()) {
   return new Date(date.getFullYear(), date.getMonth(), date.getDate());
 }
-/* The seven ranges the dashboard offers, and the only seven it accepts.
+/* The ranges the dashboard offers, and the only ones it accepts: seven
+   calendar periods, and Since launch for the whole life of the board.
 
    Each is a calendar period, not a rolling count of days: "this week" is the
    week you are in, "last month" is the month before this one. A period that
@@ -770,14 +771,38 @@ function startOfLocalDay(date = new Date()) {
 
    Weeks start Monday: `(day + 6) % 7` turns JS's Sunday-is-0 into a
    Monday-is-0 offset. */
-const KPI_RANGE_KEYS = ['today', 'this_week', 'last_week', 'this_month', 'last_month', 'this_quarter', 'last_quarter'];
+const KPI_RANGE_KEYS = ['today', 'this_week', 'last_week', 'this_month', 'last_month', 'this_quarter', 'last_quarter', 'since_launch'];
 // Aliases kept so an older client, or a session that stored one of the ranges
 // this list replaced, still resolves to a real period instead of silently
 // reading as Today.
 const KPI_RANGE_ALIASES = {
   day: 'today', week: 'this_week', month: 'this_month', quarter: 'this_quarter',
-  last_30_days: 'this_month', this_year: 'this_quarter'
+  last_30_days: 'this_month', this_year: 'this_quarter', all_time: 'since_launch'
 };
+
+/* When the board went live, for the "Since launch" range and the all-time
+   total admins see on the KPI dashboard. KANBAN_LIVE_SINCE (an ISO date) pins
+   it; otherwise it is the first ticket the database holds, which on a board
+   that started empty is the same moment. Looked up once and refreshed hourly -
+   kpiDateBounds is synchronous and called on every KPI request. */
+const KANBAN_LIVE_SINCE = (() => {
+  const raw = String(process.env.KANBAN_LIVE_SINCE || '').trim();
+  const at = raw ? new Date(raw) : null;
+  return at && !Number.isNaN(at.getTime()) ? at : null;
+})();
+let kpiLaunchAt = KANBAN_LIVE_SINCE;
+async function refreshKpiLaunchAt() {
+  if (KANBAN_LIVE_SINCE) return KANBAN_LIVE_SINCE;
+  try {
+    const first = await prisma.ticket.findFirst({ orderBy: { createdAt: 'asc' }, select: { createdAt: true } });
+    if (first?.createdAt) kpiLaunchAt = new Date(first.createdAt);
+  } catch (error) {
+    console.warn('Launch date lookup failed:', error?.message || error);
+  }
+  return kpiLaunchAt;
+}
+setTimeout(() => { void refreshKpiLaunchAt(); }, 0);
+setInterval(() => { void refreshKpiLaunchAt(); }, 60 * 60 * 1000).unref?.();
 function normalizeKpiRange(range) {
   const key = String(range || 'today').trim().toLowerCase();
   if (KPI_RANGE_KEYS.includes(key)) return key;
@@ -814,6 +839,12 @@ function kpiDateBounds(range) {
       end: endOfPeriod(thisQuarterStart),
       label: 'Last quarter'
     };
+  }
+  // From the start of the day the board went live. Before the launch date is
+  // known (the first seconds after a restart) it starts at the epoch, which
+  // for a board with nothing older is the same answer.
+  if (key === 'since_launch') {
+    return { key, start: kpiLaunchAt ? startOfLocalDay(kpiLaunchAt) : new Date(0), end: now, label: 'Since launch' };
   }
   return { key: 'today', start: dayStart, end: now, label: 'Today' };
 }
@@ -5529,9 +5560,30 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
       ...tickets.flatMap(t => [t.assignedAgent, t.csAgent]).filter(Boolean).map(v => String(v).trim().toUpperCase())
     ])).sort((a, b) => a.localeCompare(b));
 
+    // The whole life of the board, for admins: how many tickets it has taken
+    // in since it went live. Independent of the range and the team/agent
+    // filters on purpose - it answers "how many tickets in total", which no
+    // single range does. Spam is left out, as everywhere on this dashboard;
+    // duplicates are counted separately so both figures are there to read.
+    let allTime = null;
+    if (myTeam === 'admin') {
+      const since = kpiLaunchAt || await refreshKpiLaunchAt();
+      const sinceWhere = since ? { createdAt: { gte: startOfLocalDay(since) } } : {};
+      const notSpam = { NOT: [{ category: { equals: 'Spam', mode: 'insensitive' } }] };
+      const [created, resolved, duplicates, spam] = await Promise.all([
+        prisma.ticket.count({ where: { AND: [notSpam, sinceWhere, { duplicateOfExternalId: null }] } }),
+        // Same test as normalizeDbStatusForBoard: Resolved or Closed, any case.
+        prisma.ticket.count({ where: { AND: [notSpam, sinceWhere, { duplicateOfExternalId: null }, { OR: [{ status: { equals: 'Resolved', mode: 'insensitive' } }, { status: { equals: 'Closed', mode: 'insensitive' } }] }] } }),
+        prisma.ticket.count({ where: { AND: [notSpam, sinceWhere, { NOT: [{ duplicateOfExternalId: null }] }] } }),
+        prisma.ticket.count({ where: { AND: [sinceWhere, { category: { equals: 'Spam', mode: 'insensitive' } }] } })
+      ]);
+      allTime = { since: since ? since.toISOString() : null, created, resolved, open: created - resolved, duplicates, spam };
+    }
+
     return res.json({
       ok: true,
       generatedAt: new Date().toISOString(),
+      allTime,
       // bounds.key, not the raw query value: if the client sent a range this
       // build no longer offers, the heading has to name the period the figures
       // were actually computed over.
