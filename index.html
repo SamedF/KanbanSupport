@@ -7645,6 +7645,123 @@ th {
 
 .google-access-hint { font-size: 12.5px; color: var(--muted); }
 
+/* ---- Leave / availability --------------------------------------------------------- */
+
+/* Off: in the assign menu, still listed with when they are back, but plainly
+   not something to click. */
+.agent-assign-option.is-off,
+.agent-assign-option.is-off:hover {
+  cursor: not-allowed;
+  background: transparent;
+  color: var(--muted-light);
+  opacity: .7;
+}
+.agent-assign-option.is-off .agent-assign-dot { background: var(--border-strong) !important; }
+.agent-off-note {
+  display: block;
+  margin-top: 1px;
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--muted-light);
+  white-space: nowrap;
+}
+
+/* Off in the header's team load: desaturated, struck through. */
+.agent-pill { cursor: pointer; }
+.agent-pill.is-off {
+  color: rgba(255, 255, 255, .45);
+  background: rgba(255, 255, 255, .04);
+  border-color: rgba(255, 255, 255, .10);
+  text-decoration: line-through;
+  text-decoration-color: rgba(255, 255, 255, .35);
+}
+.agent-pill.is-off .cnt { background: rgba(255, 255, 255, .14); color: rgba(255, 255, 255, .6); text-decoration: none; }
+
+.availability-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 18px 16px;
+  max-height: 62vh;
+  overflow-y: auto;
+}
+
+.availability-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 13px;
+  background: var(--surface);
+  flex-wrap: wrap;
+}
+.availability-row.is-off { background: var(--surface-muted); }
+
+.availability-avatar {
+  flex: 0 0 auto;
+  width: 40px;
+  height: 40px;
+  border-radius: 11px;
+  display: grid;
+  place-items: center;
+  font-size: 11.5px;
+  font-weight: 800;
+  letter-spacing: .03em;
+  color: #fff;
+  background: var(--agent-accent);
+}
+.availability-row.is-off .availability-avatar { filter: grayscale(1); opacity: .55; }
+
+.availability-who {
+  flex: 1 1 160px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.availability-who strong { font-size: 14px; font-weight: 650; color: var(--text); }
+.availability-row.is-off .availability-who strong { color: var(--muted); }
+.availability-you {
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  padding: 1px 6px;
+  margin-left: 4px;
+  border-radius: 5px;
+  color: var(--primary-dark);
+  background: var(--primary-soft);
+  vertical-align: 1px;
+}
+.availability-load { font-size: 12px; color: var(--muted-light); }
+.availability-status {
+  align-self: flex-start;
+  margin-top: 3px;
+  font-size: 11.5px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 6px;
+}
+.availability-status.in { color: var(--green-700); background: color-mix(in srgb, #10b981 12%, var(--surface)); }
+.availability-status.off { color: var(--amber-800); background: color-mix(in srgb, #f59e0b 16%, var(--surface)); }
+.availability-meta { font-size: 11.5px; color: var(--muted-light); }
+
+.availability-controls {
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.availability-date { display: flex; flex-direction: column; gap: 3px; font-size: 11px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
+.availability-date .form-input { width: 150px; padding: 6px 9px; font-size: 13px; }
+.availability-controls .btn-primary,
+.availability-controls .btn-out { padding: 7px 12px; font-size: 13px; }
+
+@media (max-width: 560px) {
+  .availability-controls { width: 100%; }
+}
+
 /* ---- Small screens ---------------------------------------------------------------- */
 
 @media (max-width: 900px) {
@@ -7723,6 +7840,14 @@ th {
     <span>
       <strong>Templates</strong>
       <small>Reusable message templates</small>
+    </span>
+  </button>
+
+  <button class="account-item" id="availability-btn" type="button">
+    <span class="account-icon" aria-hidden="true">&#127796;</span>
+    <span>
+      <strong>Availability</strong>
+      <small id="availability-sub">Set yourself or the team as off</small>
     </span>
   </button>
 
@@ -8577,6 +8702,16 @@ th {
     </div>
   </div>
 </div>
+<div class="modal-bg" id="availability-modal">
+  <div class="modal" style="max-width:600px;">
+    <div class="modal-head"><h2>Team availability</h2><button class="modal-close-x" data-close="availability-modal"></button></div>
+    <div style="padding:14px 18px 6px;font-size:13.5px;line-height:1.55;color:var(--text-soft);" id="availability-intro">Someone who is off is greyed out wherever a ticket can be assigned, and the automatic distribution skips them. Tickets they already hold stay with them. Pick the day they are back, or leave it empty to keep them off until someone turns them back on.</div>
+    <div class="availability-list" id="availability-list"></div>
+    <div class="modal-actions">
+      <button class="btn-out" data-close="availability-modal">Close</button>
+    </div>
+  </div>
+</div>
 <div class="modal-bg" id="google-account-modal">
   <div class="modal" style="max-width:460px;">
     <div class="modal-head"><h2>Google account</h2><button class="modal-close-x" data-close="google-account-modal"></button></div>
@@ -8877,10 +9012,19 @@ function seededUnit(seed){
   return ((h>>>0)%1000003)/1000003;
 }
 function fallbackSupportOwner(id){
-  const pool=SUPPORT_AGENTS.filter(a=>a!==FALLBACK_SUPPORT_OWNER);
-  // If SGU is ever the only agent left on the roster, SGU it is - an invalid
-  // assignee would be rejected on save and re-stamped on every render.
-  if(!pool.length)return normalizeSupportAgent(FALLBACK_SUPPORT_OWNER)||leastLoadedSupportAgent();
+  const pool=SUPPORT_AGENTS.filter(a=>a!==FALLBACK_SUPPORT_OWNER&&!isAgentOff(a));
+  if(!pool.length){
+    // Everyone but SGU is off (or SGU is the only one left on the roster): SGU
+    // takes it if available, then whoever else is in, by fewest open tickets.
+    // Only with the whole team off does it fall back to the plain least loaded
+    // - a ticket has to belong to someone, and the server rejects a non-roster
+    // assignee.
+    if(!isAgentOff(FALLBACK_SUPPORT_OWNER)&&normalizeSupportAgent(FALLBACK_SUPPORT_OWNER))return FALLBACK_SUPPORT_OWNER;
+    const inToday=SUPPORT_AGENTS.filter(a=>!isAgentOff(a));
+    const total=openWorkloadByAgent();
+    if(inToday.length)return inToday.reduce((best,a)=>total[a]<total[best]?a:best,inToday[0]);
+    return leastLoadedSupportAgent();
+  }
   const priority=ticketPriorityBucket(id);
   const target=SUPPORT_PRIORITY_TARGETS[priority];
   const byPriority=openWorkloadByAgentAndPriority();
@@ -8899,8 +9043,12 @@ function fallbackSupportOwner(id){
 // names in its text, then the agent it is addressed to (To/Cc), and failing
 // both the weighted roll above. The text comes first because it is what the
 // client actually wrote - a CC is often just habit.
+// An agent who is off is skipped at each step: a client writing "Hi Zied" to
+// someone on holiday still needs an answer from whoever is in.
 function defaultSupportAgentForTicket(emailObj,id){
-  return supportAgentNamedInEmail(emailObj)||supportAgentsTaggedInEmail(emailObj)[0]||fallbackSupportOwner(id);
+  const named=supportAgentNamedInEmail(emailObj);
+  if(named&&!isAgentOff(named))return named;
+  return supportAgentsTaggedInEmail(emailObj).find(a=>!isAgentOff(a))||fallbackSupportOwner(id);
 }
 function normalizeEmailList(values){return (Array.isArray(values)?values:[]).map(v=>String(v||'').trim().toLowerCase()).filter(Boolean);}
 function isAutomatic(e){if(!e||!e.sender)return true;const sl=e.sender.toLowerCase();if(sl===SUPPORT_BOX)return true;if(BLOCKED_EMAILS.has(sl))return true;const domain=(sl.split('@')[1]||'');if(BLOCKED_DOMAINS.has(domain))return true;if(NO_REPLY_PATTERNS.some(p=>sl.includes(p)))return true;if(!e.subject&&!e.summary)return true;const tl=((e.subject||'')+' '+(e.summary||'')).toLowerCase();if(NO_REPLY_SUBJECTS.some(p=>tl.includes(p)))return true;if(/\b(newsletter|webinar|digest|event reminder)\b/.test(tl))return true;if(/(microsoft teams meeting|join microsoft teams meeting|meeting invitation|accepted:|declined:|tentative:)/.test(tl))return true;return false;}
@@ -10093,6 +10241,11 @@ function startLiveSync(){
   // A colleague translated a ticket. Metadata only - just enough to mark that
   // language as free in this tab's picker, so nobody pays for the same
   // translation twice. The text itself is fetched on demand.
+  // Someone was put on leave or came back: grey them out (or in) now.
+  es.addEventListener('agent_leave',e=>{
+    liveRev=Number(e.lastEventId)||liveRev;
+    try{applyAgentLeave(JSON.parse(e.data)?.leave);}catch(err){console.warn('agent_leave parse failed',err);}
+  });
   es.addEventListener('translation_ready',e=>{
     liveRev=Number(e.lastEventId)||liveRev;
     try{
@@ -10276,6 +10429,48 @@ document.addEventListener('visibilitychange',()=>{if(document.visibilityState===
 // for tickets assigned to anyone, not just the current user.
 // ---------------------------------------------------------------------------
 let shiftAgents={},shiftMe=null,shiftTracked=false,shiftOnBreak=false,shiftLoaded=false;
+/* Who is off. Server-owned (GET /api/shift/state carries it, and an
+   agent_leave live event pushes every change): code -> {since, until, note,
+   setBy, setAt}, where until is the moment they are back - null for no return
+   date. An agent who is off is greyed out wherever a ticket can be handed to
+   them, and the automatic distribution passes them by. */
+let agentLeave={};
+// Whose availability this login may change; filled by fetchAvailabilityPerms.
+let availabilityPerms={canManageAll:false,me:null};
+function isAgentOff(code,now=boardNow()){
+  const leave=agentLeave[String(code||'').toUpperCase()];
+  return !!leave&&(!leave.until||Number(leave.until)>now);
+}
+function fmtLeaveDay(ms){return new Date(ms).toLocaleDateString('en-GB',{weekday:'short',day:'numeric',month:'short'});}
+// "Off - back Mon 13 Oct", or "Off" when no return date was given.
+function agentLeaveText(code){
+  const leave=agentLeave[String(code||'').toUpperCase()];
+  if(!isAgentOff(code))return'';
+  return leave.until?`Off - back ${fmtLeaveDay(leave.until)}`:'Off';
+}
+function applyAgentLeave(map){
+  const next=(map&&typeof map==='object')?map:{};
+  if(JSON.stringify(next)===JSON.stringify(agentLeave))return;
+  agentLeave=next;
+  fillCreateTicketAgentSelect();
+  if(typeof renderActiveView==='function')renderActiveView();
+  if(document.getElementById('availability-modal')?.classList.contains('open'))renderAvailabilityModal();
+  updateAvailabilityMenuItem();
+}
+// The new-ticket form's assignee list: who this person may hand a ticket to,
+// with anyone who is off listed but disabled. The selection moves off a
+// disabled name, so the form never starts on someone who cannot take it.
+function fillCreateTicketAgentSelect(){
+  const ctAgent=document.getElementById('ct-agent');
+  if(!ctAgent||typeof assignableSupportAgents!=='function')return;
+  const keep=ctAgent.value;
+  const agents=assignableSupportAgents();
+  ctAgent.innerHTML='<optgroup label="Support">'+agents.map(a=>{
+    const off=isAgentOff(a);
+    return `<option value="${esc(a)}"${off?' disabled':''}>${esc(a)}${off?` - ${esc(agentLeaveText(a))}`:''}</option>`;
+  }).join('')+'</optgroup>';
+  ctAgent.value=(keep&&agents.includes(keep)&&!isAgentOff(keep))?keep:(agents.find(a=>!isAgentOff(a))||'');
+}
 const SHIFT_HEARTBEAT_MS=60000;
 
 function isWeekendDay(d){const day=d.getDay();return day===0||day===6;}
@@ -10380,6 +10575,7 @@ async function refreshShiftState(){
     if(serverNow>0)serverClockOffset=serverNow-Date.now();
     shiftAgents=out?.agents||{};
     shiftMe=out?.me||null;
+    if(out&&'leave' in out)applyAgentLeave(out.leave);
     shiftTracked=!!shiftMe;
     const mine=shiftMe?shiftAgents[shiftMe]:null;
     absorbBreakRules(mine);
@@ -11344,6 +11540,113 @@ document.getElementById('google-sync-now').addEventListener('click',async e=>{
   setTimeout(()=>showToast(text,kind),400);
   void fetchGoogleAccessStatus();
 })();
+
+/* Team availability: who is off, and setting it.
+
+   Admins can set anyone off; everyone else only themselves (the server checks
+   the same thing - this only decides which rows get controls). The date is the
+   day the agent is back: the leave ends at the start of that day, local time,
+   so it runs out by itself. */
+async function fetchAvailabilityPerms(){
+  try{
+    const res=await fetch('/api/agents/leave',{credentials:'include'});
+    if(!res.ok)return availabilityPerms;
+    const out=await res.json();
+    availabilityPerms={canManageAll:!!out.canManageAll,me:out.me||null};
+    applyAgentLeave(out.leave);
+  }catch(_){}
+  return availabilityPerms;
+}
+function updateAvailabilityMenuItem(){
+  const sub=document.getElementById('availability-sub');
+  if(!sub)return;
+  const me=availabilityPerms.me;
+  const offCount=SUPPORT_AGENTS.filter(a=>isAgentOff(a)).length;
+  sub.textContent=me&&isAgentOff(me)?`You are ${agentLeaveText(me).toLowerCase()}`
+    :offCount?`${offCount} off today`:'Set yourself or the team as off';
+}
+const dateInputValue=ms=>{const d=new Date(ms);return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;};
+function renderAvailabilityModal(){
+  const list=document.getElementById('availability-list');
+  if(!list)return;
+  const {canManageAll,me}=availabilityPerms;
+  const tomorrow=new Date();tomorrow.setDate(tomorrow.getDate()+1);
+  const load=openWorkloadByAgent();
+  const rows=SUPPORT_AGENTS.map(code=>{
+    const off=isAgentOff(code);
+    const leave=agentLeave[code]||null;
+    const editable=canManageAll||code===me;
+    const name=supportAgentDisplayNames[code]||'';
+    const status=off
+      ?`<span class="availability-status off">${esc(agentLeaveText(code))}</span>`
+      :'<span class="availability-status in">Available</span>';
+    const meta=off&&leave?.setBy?`<span class="availability-meta">Set by ${esc(leave.setBy)}${leave.setAt?` on ${esc(fmtLeaveDay(leave.setAt))}`:''}</span>`:'';
+    const controls=editable?`
+      <div class="availability-controls">
+        <label class="availability-date"><span>Back on</span><input type="date" class="form-input" data-leave-date="${esc(code)}" min="${dateInputValue(tomorrow)}" value="${off&&leave?.until?dateInputValue(leave.until):''}"></label>
+        <button class="btn-primary" type="button" data-leave-set="${esc(code)}">${off?'Update':'Set off'}</button>
+        ${off?`<button class="btn-out" type="button" data-leave-clear="${esc(code)}">Back now</button>`:''}
+      </div>`:'';
+    return `<div class="availability-row${off?' is-off':''}">
+      <span class="availability-avatar" style="--agent-accent:${agentColor(code)}">${esc(code)}</span>
+      <div class="availability-who">
+        <strong>${esc(name||code)}${code===me?' <span class="availability-you">you</span>':''}</strong>
+        <span class="availability-load">${load[code]||0} open ticket${(load[code]||0)===1?'':'s'}</span>
+        ${status}${meta}
+      </div>
+      ${controls}
+    </div>`;
+  }).join('');
+  list.innerHTML=rows;
+  document.getElementById('availability-intro').dataset.mode=canManageAll?'admin':'self';
+}
+async function openAvailabilityModal(focusCode){
+  document.getElementById('availability-modal').classList.add('open');
+  await fetchAvailabilityPerms();
+  renderAvailabilityModal();
+  if(focusCode)document.querySelector(`[data-leave-date="${CSS.escape(focusCode)}"]`)?.focus();
+}
+async function saveAgentLeave(code,until){
+  const res=await fetch(`/api/agents/${encodeURIComponent(code)}/leave`,{
+    method:until===undefined?'DELETE':'PUT',
+    headers:{'Content-Type':'application/json'},credentials:'include',
+    body:until===undefined?undefined:JSON.stringify({until})
+  }).catch(()=>null);
+  const out=res?await res.json().catch(()=>({})):{};
+  if(!res||!res.ok){
+    const why={only_admins_can_set_others:'Only admins can change someone else\'s availability',return_date_must_be_in_the_future:'The return date has to be after today',return_date_too_far:'Pick a return date within a year'}[out?.error]||out?.error||'could not reach the server';
+    showToast(`Not saved: ${why}`,'warn');
+    return false;
+  }
+  applyAgentLeave(out.all);
+  renderAvailabilityModal();
+  return true;
+}
+document.getElementById('availability-btn').addEventListener('click',e=>{e.stopPropagation();document.getElementById('account-panel').classList.remove('open');void openAvailabilityModal();});
+document.addEventListener('click',async e=>{
+  const pill=e.target.closest('[data-availability-open]');
+  if(pill){void openAvailabilityModal(pill.dataset.availabilityOpen);return;}
+  const set=e.target.closest('[data-leave-set]');
+  if(set){
+    const code=set.dataset.leaveSet;
+    const raw=document.querySelector(`[data-leave-date="${CSS.escape(code)}"]`)?.value||'';
+    let until=null;
+    if(raw){const [y,m,d]=raw.split('-').map(Number);until=new Date(y,m-1,d,0,0,0,0).getTime();}
+    set.disabled=true;
+    const ok=await saveAgentLeave(code,until);
+    set.disabled=false;
+    if(ok)showToast(until?`${code} is off - back ${fmtLeaveDay(until)}`:`${code} is off until turned back on`,'ok');
+    return;
+  }
+  const clear=e.target.closest('[data-leave-clear]');
+  if(clear){
+    const code=clear.dataset.leaveClear;
+    clear.disabled=true;
+    const ok=await saveAgentLeave(code,undefined);
+    if(ok)showToast(`${code} is back - can be given tickets again`,'ok');
+  }
+});
+void fetchAvailabilityPerms().then(updateAvailabilityMenuItem);
 document.getElementById('jira-settings-btn').addEventListener('click',e=>{e.stopPropagation();document.getElementById('account-panel').classList.remove('open');openJiraSettingsModal();});
 
 // --- Templates: shared, team-wide reusable message templates -----------
@@ -14671,7 +14974,8 @@ function updateWorkload(){
     ...SUPPORT_AGENTS.filter(a=>!['ZIO','SGU','SHE','JBA','RMD','SFA'].includes(a))
   ];
   document.getElementById('workload-bar').innerHTML = displayOrder.map(a=>{
-    return `<div class="agent-pill" style="--agent-accent:${agentColor(a)}" title="${esc(a)} workload">${a}<span class="cnt">${load[a]||0}</span></div>`;
+    const off=isAgentOff(a);
+    return `<div class="agent-pill${off?' is-off':''}" style="--agent-accent:${agentColor(a)}" title="${esc(a)}${off?` - ${esc(agentLeaveText(a))}`:''} - ${load[a]||0} open. Click to manage availability." data-availability-open="${esc(a)}">${a}<span class="cnt">${load[a]||0}</span></div>`;
   }).join('');
 }
 function showToast(msg,cls=''){const t=document.getElementById('toast');t.textContent=msg;t.className='show'+(cls?' '+cls:'');clearTimeout(t._timer);t._timer=setTimeout(()=>{t.className='';},4500);}
@@ -14744,11 +15048,7 @@ async function buildAgentUI(){
 
   // Only the agents this person may hand a ticket to - for a support agent
   // raising one, that is themselves.
-  const ctAgent=document.getElementById('ct-agent');
-  if(ctAgent){
-    ctAgent.innerHTML =
-      '<optgroup label="Support">'+assignableSupportAgents().map(a=>`<option value="${esc(a)}">${esc(a)}</option>`).join('')+'</optgroup>';
-  }
+  fillCreateTicketAgentSelect();
 
   const grid=document.getElementById('tag-grid');
   grid.innerHTML=[
@@ -14786,11 +15086,17 @@ const nextPriority=cur=>PRIORITIES[(PRIORITIES.indexOf(cur)+1)%PRIORITIES.length
    open the mail to remember who was named in it - and the full roster is still
    right below, since being tagged is a strong hint rather than a rule. */
 function agentAssignMenuHtml(selected,tagged=[]){
-  const renderOption=(a,extra='')=>`
-    <button class="agent-assign-option${a===selected?' active':''}" type="button" data-agent-pick="${esc(a)}">
-      <span>${esc(a)}${extra}</span>
+  // Someone who is off stays in the list, greyed and disabled with their return
+  // date, rather than vanishing - "where did ZIO go?" is the wrong question to
+  // leave behind.
+  const renderOption=(a,extra='')=>{
+    const off=isAgentOff(a);
+    return `
+    <button class="agent-assign-option${a===selected?' active':''}${off?' is-off':''}" type="button" data-agent-pick="${esc(a)}"${off?` disabled aria-disabled="true" title="${esc(agentLeaveText(a))} - cannot be given tickets"`:''}>
+      <span>${esc(a)}${off?'':extra}${off?`<small class="agent-off-note">${esc(agentLeaveText(a))}</small>`:''}</span>
       <span class="agent-assign-dot" style="background:${agentColor(a)}"></span>
     </button>`;
+  };
   const renderGroup=(label,agents,extra='')=>agents.length?`<div class="agent-assign-group">${label}</div>`+agents.map(a=>renderOption(a,extra)).join(''):'';
   // Only the agents this person may actually assign to. For a support agent
   // that is one name - their own - so the menu becomes "take this ticket".
@@ -15990,6 +16296,12 @@ function makeCard(ticket,isNew=false){
       showToast(assignRefusedMessage(),'warn');
       return;
     }
+    // A greyed-out option is disabled, but a menu drawn before the leave was
+    // set can still be on screen until the next render.
+    if(isAgentOff(btn.dataset.agentPick)&&btn.dataset.agentPick!==ticketAssignee[ticket.id]){
+      showToast(`${btn.dataset.agentPick} is ${agentLeaveText(btn.dataset.agentPick).toLowerCase()} - pick someone who is in`,'warn');
+      return;
+    }
     const menu=getAgentAssignMenuElement(agentWrap);
     if(menu){
       menu.classList.remove('open');
@@ -16723,6 +17035,7 @@ async function bulkSetStage(col){
 async function bulkAssign(agent){
   const code=normalizeSupportAgent(agent);
   if(!code)return showToast('Unknown agent');
+  if(isAgentOff(code))return showToast(`${code} is ${agentLeaveText(code).toLowerCase()} - pick someone who is in`,'warn');
   const all=selectionList();
   // Destination-aware, so a bulk assign to a colleague is skipped for a
   // support agent rather than sent and refused ticket by ticket.
@@ -16786,7 +17099,7 @@ function renderSelectionBar(){
   const ids=selectionList();
   if(!ids.length){bar.classList.remove('show');bar.innerHTML='';return;}
   const stageOpts=STAGES.map(c=>`<option value="${c}">${esc(COL_NAMES[c])}</option>`).join('');
-  const agentOpts=SUPPORT_AGENTS.map(a=>`<option value="${esc(a)}">${esc(a)}</option>`).join('');
+  const agentOpts=SUPPORT_AGENTS.map(a=>`<option value="${esc(a)}"${isAgentOff(a)?' disabled':''}>${esc(a)}${isAgentOff(a)?` (${esc(agentLeaveText(a))})`:''}</option>`).join('');
   const snoozeOpts=snoozeOptions().map(o=>`<option value="${o.until}">${esc(o.label)}</option>`).join('');
   bar.innerHTML=`
     <span class="sel-count">${ids.length} selected</span>

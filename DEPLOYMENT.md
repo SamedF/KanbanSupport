@@ -794,6 +794,17 @@ in index.html). These are targets, not caps - once everyone is at or past theirs
 the ticket goes to whoever holds the fewest of that priority. The roll is seeded
 by the ticket id, so two open boards make the same choice.
 
+**Leave.** A support agent can be marked off from **Account > Availability**
+(or by clicking their name in the header's team load): admins for anyone, every
+agent for themselves, with an optional return date (the day they are back - the
+leave ends at the start of that day by itself). While off they are greyed out and
+cannot be picked in the assign menu, the bulk-assign bar or the new-ticket form;
+the automatic distribution skips them at every step (named in the mail, tagged,
+the weighted roll); the SGU redistribution gives them nothing; and the Claude
+connector's `update_ticket` refuses them (`409 agent_on_leave`). Tickets they
+already hold stay with them. Stored in Postgres (`OAuthToken`, provider
+`agent-leave:<CODE>`), so a redeploy does not forget it; no migration needed.
+
 **One-off on first start of this build:** SGU's tickets in **New** are handed to
 the other six support agents, at random within the same numbers used as hard caps
 (8 High / 10 Medium / 10 Low open each); anything that would push everyone past

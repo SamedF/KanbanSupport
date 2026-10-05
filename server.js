@@ -1473,6 +1473,91 @@ function shiftSnapshotFor(code) {
 shiftStore = loadShiftStore();
 setInterval(sweepIdleShifts, SHIFT_SWEEP_MS).unref?.();
 
+/* Leave: a support agent who is off (holiday, sick, off for the day).
+
+   While off, an agent cannot be given tickets - not by the board's automatic
+   distribution, not from the assign menu, not by the SGU redistribution and
+   not through the Claude connector. Tickets they already hold stay with them.
+
+   Set by an admin for anyone, or by the agent for themselves, with an optional
+   return date: the day they are back, so the leave ends at the start of that
+   day and nobody has to remember to switch them on again. No return date means
+   off until someone turns it off.
+
+   Kept in Postgres (OAuthToken, provider "agent-leave:<CODE>", the same
+   key-value use the Jira settings make of it) rather than in data/shifts.json:
+   leave runs for days or weeks, and must not be forgotten by a redeploy that
+   starts on an empty volume. Held in memory as well, because every board reads
+   it on each shift poll. */
+const AGENT_LEAVE_PREFIX = 'agent-leave:';
+const AGENT_LEAVE_MAX_MS = 366 * 24 * 60 * 60 * 1000;
+let agentLeave = {};
+const isLeaveActive = (leave, now = Date.now()) => !!leave && (!leave.until || Number(leave.until) > now);
+function activeAgentLeave(now = Date.now()) {
+  return Object.fromEntries(Object.entries(agentLeave).filter(([, leave]) => isLeaveActive(leave, now)));
+}
+const isAgentOnLeave = (code, now = Date.now()) => isLeaveActive(agentLeave[String(code || '').trim().toUpperCase()], now);
+async function loadAgentLeave() {
+  try {
+    const rows = await prisma.oAuthToken.findMany({ where: { provider: { startsWith: AGENT_LEAVE_PREFIX } } });
+    const next = {};
+    const now = Date.now();
+    for (const row of rows) {
+      const code = row.provider.slice(AGENT_LEAVE_PREFIX.length);
+      const meta = (row.metadata && typeof row.metadata === 'object' && !Array.isArray(row.metadata)) ? row.metadata : null;
+      if (!meta || !SUPPORT_AGENT_CODES.has(code)) continue;
+      // A leave that has run out is removed rather than kept around, so the
+      // table only ever holds who is off now or later.
+      if (!isLeaveActive(meta, now)) { await prisma.oAuthToken.delete({ where: { provider: row.provider } }).catch(() => null); continue; }
+      next[code] = meta;
+    }
+    agentLeave = next;
+  } catch (error) {
+    console.warn('Agent leave load failed:', error?.message || error);
+  }
+  return agentLeave;
+}
+async function setAgentLeave(code, leave) {
+  const provider = `${AGENT_LEAVE_PREFIX}${code}`;
+  if (leave) {
+    await prisma.oAuthToken.upsert({
+      where: { provider },
+      create: { provider, metadata: leave },
+      update: { metadata: leave }
+    });
+    agentLeave[code] = leave;
+  } else {
+    await prisma.oAuthToken.delete({ where: { provider } }).catch(() => null);
+    delete agentLeave[code];
+  }
+  // Every open board greys the agent out (or back in) straight away, rather
+  // than on its next shift poll.
+  sseBroadcast('agent_leave', { leave: activeAgentLeave() });
+}
+void loadAgentLeave();
+// A leave whose return date has passed simply stops counting; this tidies the
+// rows and tells open boards, so the agent turns back on without a reload.
+setInterval(async () => {
+  const expired = Object.keys(agentLeave).filter(code => !isLeaveActive(agentLeave[code]));
+  for (const code of expired) await setAgentLeave(code, null).catch(() => null);
+}, 60 * 1000).unref?.();
+
+// The roster code this login is, from its username or its email's local part
+// - the two places the rest of the app reads an agent code from. Unlike
+// shiftAgentFromRequest this never takes a code the browser sends: it decides
+// whose leave a non-admin may change, so it has to come from the account.
+async function ownSupportAgentCode(req) {
+  const fromSession = String(req.session?.username || '').trim().toUpperCase();
+  if (SUPPORT_AGENT_CODES.has(fromSession)) return fromSession;
+  try {
+    const user = await prisma.user.findUnique({ where: { id: Number(req.session?.userId) }, select: { email: true } });
+    const local = String(user?.email || '').split('@')[0].trim().toUpperCase();
+    return SUPPORT_AGENT_CODES.has(local) ? local : null;
+  } catch (_) {
+    return null;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // SLA, measured in shift time
 //
@@ -3861,7 +3946,65 @@ app.get('/api/shift/state', requireAuth, (req, res) => {
   const me = shiftAgentFromRequest(req, req.query?.agent);
   const agents = {};
   Object.keys(shiftStore.agents).forEach((code) => { agents[code] = shiftSnapshotFor(code); });
-  return res.json({ me, agents, idleMs: SHIFT_IDLE_MS, serverNow: Date.now() });
+  return res.json({ me, agents, idleMs: SHIFT_IDLE_MS, serverNow: Date.now(), leave: activeAgentLeave() });
+});
+
+// Who is off, and whose leave this login may change.
+app.get('/api/agents/leave', requireAuth, async (req, res) => {
+  res.json({
+    leave: activeAgentLeave(),
+    canManageAll: isAdminRole(req.session.role),
+    me: await ownSupportAgentCode(req)
+  });
+});
+
+/* Put an agent on leave, or change their return date.
+
+   Body: { until: <ms timestamp> | null, note?: string }. until is the moment
+   they are back - the board sends the start of the chosen day - and null
+   means off until someone turns it off. Admins may set anyone; anybody else
+   only themselves. */
+app.put('/api/agents/:code/leave', requireAuth, async (req, res) => {
+  try {
+    const code = String(req.params.code || '').trim().toUpperCase();
+    if (!SUPPORT_AGENT_CODES.has(code)) return res.status(400).json({ error: 'not_a_support_agent' });
+    const own = await ownSupportAgentCode(req);
+    if (!isAdminRole(req.session.role) && own !== code) return res.status(403).json({ error: 'only_admins_can_set_others' });
+    const now = Date.now();
+    const rawUntil = req.body?.until;
+    let until = null;
+    if (rawUntil !== null && rawUntil !== undefined && rawUntil !== '') {
+      until = Number(rawUntil);
+      if (!Number.isFinite(until) || until <= now) return res.status(400).json({ error: 'return_date_must_be_in_the_future' });
+      if (until - now > AGENT_LEAVE_MAX_MS) return res.status(400).json({ error: 'return_date_too_far' });
+    }
+    const previous = agentLeave[code] && isLeaveActive(agentLeave[code], now) ? agentLeave[code] : null;
+    const leave = {
+      // Changing the return date of a leave already running keeps its start.
+      since: previous?.since || now,
+      until,
+      note: String(req.body?.note || '').trim().slice(0, 200) || null,
+      setBy: String(req.session.username || '').toUpperCase() || null,
+      setAt: now
+    };
+    await setAgentLeave(code, leave);
+    return res.json({ ok: true, code, leave, all: activeAgentLeave() });
+  } catch (error) {
+    return res.status(500).json({ error: String(error.message || error) });
+  }
+});
+
+app.delete('/api/agents/:code/leave', requireAuth, async (req, res) => {
+  try {
+    const code = String(req.params.code || '').trim().toUpperCase();
+    if (!SUPPORT_AGENT_CODES.has(code)) return res.status(400).json({ error: 'not_a_support_agent' });
+    const own = await ownSupportAgentCode(req);
+    if (!isAdminRole(req.session.role) && own !== code) return res.status(403).json({ error: 'only_admins_can_set_others' });
+    await setAgentLeave(code, null);
+    return res.json({ ok: true, code, all: activeAgentLeave() });
+  } catch (error) {
+    return res.status(500).json({ error: String(error.message || error) });
+  }
 });
 
 app.post('/auth/logout', (req, res) => {
@@ -7711,6 +7854,11 @@ async function mcpUpdateTicket(apiUser, id, fields) {
     if (status !== 'Resolved') data.resolvedTeamsNotifiedAt = null;
   }
   if (fields?.assignedAgent !== undefined) data.assignedAgent = fields.assignedAgent ? String(fields.assignedAgent).trim().toUpperCase() : null;
+  // Nobody is handed a ticket while they are off - the same rule the board's
+  // assign menu and distribution follow.
+  if (data.assignedAgent && data.assignedAgent !== existingTicket.assignedAgent && isAgentOnLeave(data.assignedAgent)) {
+    throw Object.assign(new Error(`agent_on_leave: ${data.assignedAgent} is off${agentLeave[data.assignedAgent]?.until ? ` until ${new Date(agentLeave[data.assignedAgent].until).toISOString().slice(0, 10)}` : ''}`), { status: 409 });
+  }
   if (fields?.csAgent !== undefined) data.csAgent = fields.csAgent ? String(fields.csAgent).trim().toUpperCase() : null;
   if (fields?.priority !== undefined) data.priority = String(fields.priority || 'Normal').trim();
   if (!Object.keys(data).length) throw Object.assign(new Error('no_fields'), { status: 400 });
@@ -12885,7 +13033,7 @@ const redistributionPriority = (value) => {
 };
 // Pure planning step, kept apart from the writes so it can be checked on its
 // own. random is injectable for the same reason.
-function planSguNewRedistribution(state, random = Math.random) {
+function planSguNewRedistribution(state, random = Math.random, onLeave = new Set()) {
   const stage = id => String(state.ticketState?.[id] || 'new').trim().toLowerCase();
   const isLive = id => state.ticketCategory?.[id] !== 'Spam'
     && !state.ticketArchived?.[id]
@@ -12911,7 +13059,10 @@ function planSguNewRedistribution(state, random = Math.random) {
   for (const id of candidates) {
     const priority = priorityOf(id);
     const cap = REDISTRIBUTION_CAPS[priority];
-    const room = REDISTRIBUTION_TO.map(agent => ({ agent, room: Math.max(0, cap - load[agent][priority]) })).filter(x => x.room > 0);
+    const room = REDISTRIBUTION_TO
+      .filter(agent => !onLeave.has(agent))
+      .map(agent => ({ agent, room: Math.max(0, cap - load[agent][priority]) }))
+      .filter(x => x.room > 0);
     if (!room.length) { kept.push(id); continue; }
     let roll = random() * room.reduce((sum, x) => sum + x.room, 0);
     const pick = room.find(x => (roll -= x.room) < 0) || room[room.length - 1];
@@ -12932,7 +13083,9 @@ async function redistributeSguNewTicketsOnce() {
   if (done) return;
   // The database's view of who holds what wins over a stale state file.
   const state = await hydrateStateFromDatabase(safeReadState());
-  const { moves, kept, load } = planSguNewRedistribution(state);
+  // Who is off has to be known before anything is handed out.
+  await loadAgentLeave();
+  const { moves, kept, load } = planSguNewRedistribution(state, Math.random, new Set(Object.keys(activeAgentLeave())));
   const now = Date.now();
   if (moves.length) {
     const entries = [];
