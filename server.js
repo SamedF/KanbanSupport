@@ -4428,20 +4428,44 @@ async function saveGoogleConnection(userId, { accessToken, refreshToken, expires
   });
 }
 
+/* The Google OAuth client the sign-in uses.
+
+   Set either in the environment (GOOGLE_OAUTH_CLIENT_ID / _SECRET, which win)
+   or by an admin from the board itself (Account > Google account), stored in
+   OAuthToken as "google-oauth-client" with the secret encrypted. The second
+   exists so that turning Google sign-in on is pasting two values into the
+   board, not a server config change and a redeploy. */
+const GOOGLE_OAUTH_CLIENT_PROVIDER = 'google-oauth-client';
+let googleOAuthClientCache = { at: 0, value: null };
+async function googleOAuthClient() {
+  if (GOOGLE_OAUTH_CLIENT_ID && GOOGLE_OAUTH_CLIENT_SECRET) {
+    return { clientId: GOOGLE_OAUTH_CLIENT_ID, clientSecret: GOOGLE_OAUTH_CLIENT_SECRET, source: 'env' };
+  }
+  if (googleOAuthClientCache.at && Date.now() - googleOAuthClientCache.at < 60 * 1000) return googleOAuthClientCache.value;
+  const row = await getStoredOAuthTokens(GOOGLE_OAUTH_CLIENT_PROVIDER);
+  const clientId = String(row?.metadata?.clientId || '').trim();
+  const clientSecret = decryptClaudeCredential(row?.accessToken || '');
+  const value = clientId && clientSecret ? { clientId, clientSecret, source: 'board', savedBy: row?.metadata?.savedBy || null } : null;
+  googleOAuthClientCache = { at: Date.now(), value };
+  return value;
+}
+
 // A fresh access token for one connection, refreshing it when it is about to
 // expire. A refresh Google refuses (the person revoked access, or the token
 // went unused for six months) removes the connection, so the board stops
 // reporting an account as connected when it cannot read anything.
 async function googleConnectionToken(connection) {
   if (connection.accessToken && connection.expiresAt > Date.now() + 60000) return connection.accessToken;
+  const client = await googleOAuthClient();
+  if (!client) throw new Error('google_auth_failed: Google sign-in is not set up');
   const res = await fetch('https://oauth2.googleapis.com/token', {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({
       grant_type: 'refresh_token',
       refresh_token: connection.refreshToken,
-      client_id: GOOGLE_OAUTH_CLIENT_ID,
-      client_secret: GOOGLE_OAUTH_CLIENT_SECRET
+      client_id: client.clientId,
+      client_secret: client.clientSecret
     })
   });
   const out = await res.json().catch(() => ({}));
@@ -4468,7 +4492,7 @@ async function googleSheetCredentials(preferUserId = null) {
   const out = [];
   const account = googleServiceAccount();
   if (account) out.push({ kind: 'service_account', label: account.email, token: () => googleServiceAccountToken(account) });
-  if (GOOGLE_OAUTH_CLIENT_ID && GOOGLE_OAUTH_CLIENT_SECRET) {
+  if (await googleOAuthClient()) {
     const connections = await listGoogleConnections();
     connections.sort((x, y) => (y.userId === preferUserId) - (x.userId === preferUserId));
     connections.forEach(connection => out.push({
@@ -4850,15 +4874,48 @@ app.post('/api/velma-bug/sync', requireAuth, async (req, res) => {
 function googleRedirectUri(req) {
   return GOOGLE_OAUTH_REDIRECT_URI || `${publicBaseUrlForRequest(req)}/auth/google/callback`;
 }
-app.get('/auth/google/start', requireAuth, (req, res) => {
-  if (!GOOGLE_OAUTH_CLIENT_ID || !GOOGLE_OAUTH_CLIENT_SECRET) {
-    return res.status(500).send('Google sign-in is not set up on this server: set GOOGLE_OAUTH_CLIENT_ID and GOOGLE_OAUTH_CLIENT_SECRET.');
-  }
+
+/* The end of a sign-in started in a new tab (the board opens
+   /auth/google/start?tab=1). It cannot hand the result back through
+   window.opener: helmet's Cross-Origin-Opener-Policy cuts that link the moment
+   the tab visits accounts.google.com. A BroadcastChannel (and a localStorage
+   write, for browsers without one) reaches the board tab instead, since both
+   are on this origin; the tab then closes itself, or says it can be closed. */
+const GOOGLE_RESULT_TEXT = {
+  connected: 'Google account connected - the board can read the Velma bug sheet.',
+  connected_unverified: 'Google account connected. The sheet could not be checked yet.',
+  no_sheet_access: 'Connected, but this Google account cannot open the Velma bug sheet. Ask for it to be shared with you.',
+  sheets_scope_missing: 'Google sign-in needs the "See your Google Sheets" permission. Tick it on the consent screen and try again.',
+  no_refresh_token: 'Google did not grant offline access. Remove the board under myaccount.google.com > Security > Third-party access, then sign in again.',
+  access_denied: 'Google sign-in was cancelled.',
+  not_configured: 'Google sign-in is not set up on this board yet. An admin can set it up under Account > Google account.',
+  invalid_state: 'This sign-in expired. Start it again from the board.'
+};
+function finishGoogleSignIn(req, res, pending, outcome, detail = '') {
+  if (!pending?.tab) return res.redirect(`/?google=${encodeURIComponent(outcome)}`);
+  const ok = outcome === 'connected';
+  const text = GOOGLE_RESULT_TEXT[outcome] || `Google sign-in failed: ${detail || outcome}`;
+  const payload = JSON.stringify({ type: 'google-signin', outcome, detail: String(detail || '').slice(0, 300), at: Date.now() }).replace(/</g, '\\u003c');
+  res.set('Cache-Control', 'no-store');
+  return res.send(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Google sign-in</title>
+<style>body{margin:0;min-height:100vh;display:grid;place-items:center;font-family:Inter,'Segoe UI',Arial,sans-serif;background:linear-gradient(180deg,#1a1d38,#0d0f20);color:#fff}
+.box{max-width:420px;margin:24px;padding:26px 26px 22px;border-radius:18px;background:#fff;color:#13152c;box-shadow:0 30px 80px rgba(0,0,0,.45);text-align:center}
+.mark{width:44px;height:44px;margin:0 auto 12px;border-radius:50%;display:grid;place-items:center;font-size:22px;color:#fff;background:${ok ? '#10b981' : '#f59e0b'}}
+h1{font-size:18px;margin:0 0 8px}p{margin:0;color:#565c80;font-size:14px;line-height:1.55}</style></head>
+<body><div class="box"><div class="mark">${ok ? '&#10003;' : '!'}</div><h1>${ok ? 'You are connected' : 'Not connected'}</h1><p>${escapeHtml(text)}</p><p style="margin-top:12px;font-size:12.5px;" id="closing">This tab will close by itself - you can also close it and go back to the board.</p></div>
+<script>(function(){var m=${payload};try{var c=new BroadcastChannel('kanban-google-signin');c.postMessage(m);c.close();}catch(e){}try{localStorage.setItem('kanban-google-signin',JSON.stringify(m));}catch(e){}setTimeout(function(){window.close();},${ok ? 1200 : 4000});})();</script>
+</body></html>`);
+}
+
+app.get('/auth/google/start', requireAuth, async (req, res) => {
+  const tab = String(req.query.tab || '') === '1';
+  const client = await googleOAuthClient();
+  if (!client) return finishGoogleSignIn(req, res, { tab }, 'not_configured');
   const state = crypto.randomBytes(16).toString('hex');
   const redirectUri = googleRedirectUri(req);
-  req.session.googleOAuth = { state, redirectUri };
+  req.session.googleOAuth = { state, redirectUri, tab };
   const params = new URLSearchParams({
-    client_id: GOOGLE_OAUTH_CLIENT_ID,
+    client_id: client.clientId,
     redirect_uri: redirectUri,
     response_type: 'code',
     scope: `openid email ${GOOGLE_SHEETS_SCOPE}`,
@@ -4877,26 +4934,28 @@ app.get('/auth/google/callback', requireAuth, async (req, res) => {
   const pending = req.session.googleOAuth || null;
   delete req.session.googleOAuth;
   try {
-    if (req.query.error) return res.redirect(`/?google=${encodeURIComponent(String(req.query.error))}`);
+    if (req.query.error) return finishGoogleSignIn(req, res, pending, String(req.query.error));
     const { code, state } = req.query;
-    if (!code || !state || !pending || state !== pending.state) return res.status(400).send('Invalid Google sign-in state. Start again from the board.');
+    if (!code || !state || !pending || state !== pending.state) return finishGoogleSignIn(req, res, pending, 'invalid_state');
+    const client = await googleOAuthClient();
+    if (!client) return finishGoogleSignIn(req, res, pending, 'not_configured');
     const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({
         grant_type: 'authorization_code',
         code: String(code),
-        client_id: GOOGLE_OAUTH_CLIENT_ID,
-        client_secret: GOOGLE_OAUTH_CLIENT_SECRET,
+        client_id: client.clientId,
+        client_secret: client.clientSecret,
         redirect_uri: pending.redirectUri
       })
     });
     const tokenJson = await tokenRes.json().catch(() => ({}));
     if (!tokenRes.ok || !tokenJson.access_token) {
-      return res.status(502).send(`Google sign-in failed: ${tokenJson.error_description || tokenJson.error || tokenRes.status}`);
+      return finishGoogleSignIn(req, res, pending, 'token_exchange_failed', tokenJson.error_description || tokenJson.error || String(tokenRes.status));
     }
     const granted = String(tokenJson.scope || '').split(/\s+/);
-    if (!granted.includes(GOOGLE_SHEETS_SCOPE)) return res.redirect('/?google=sheets_scope_missing');
+    if (!granted.includes(GOOGLE_SHEETS_SCOPE)) return finishGoogleSignIn(req, res, pending, 'sheets_scope_missing');
     // The id_token came straight from Google's token endpoint over TLS, so its
     // payload can be read without verifying the signature.
     let email = '';
@@ -4908,7 +4967,7 @@ app.get('/auth/google/callback', requireAuth, async (req, res) => {
     // Google omits the refresh token when this account already granted one to
     // this client; keep the stored one rather than losing offline access.
     const refreshToken = tokenJson.refresh_token || decryptClaudeCredential(existing?.refreshToken || '');
-    if (!refreshToken) return res.redirect('/?google=no_refresh_token');
+    if (!refreshToken) return finishGoogleSignIn(req, res, pending, 'no_refresh_token');
     await saveGoogleConnection(req.session.userId, {
       accessToken: tokenJson.access_token,
       refreshToken,
@@ -4925,9 +4984,9 @@ app.get('/auth/google/callback', requireAuth, async (req, res) => {
       result = /not_shared/.test(String(error.message)) ? 'no_sheet_access' : 'connected_unverified';
     }
     void syncVelmaBugStatuses();
-    return res.redirect(`/?google=${result}`);
+    return finishGoogleSignIn(req, res, pending, result);
   } catch (error) {
-    return res.status(500).send(String(error.message || error));
+    return finishGoogleSignIn(req, res, pending, 'failed', String(error.message || error));
   }
 });
 
@@ -4937,7 +4996,12 @@ app.get('/auth/google/status', requireAuth, async (req, res) => {
   const account = googleServiceAccount();
   const meta = (mine?.metadata && typeof mine.metadata === 'object') ? mine.metadata : {};
   res.json({
-    configured: !!(GOOGLE_OAUTH_CLIENT_ID && GOOGLE_OAUTH_CLIENT_SECRET),
+    configured: !!(await googleOAuthClient()),
+    // Admins get the setup form when it is not configured, and need the exact
+    // redirect URI to paste into Google Cloud.
+    canConfigure: isAdminRole(req.session.role),
+    clientSource: (await googleOAuthClient())?.source || null,
+    redirectUri: googleRedirectUri(req),
     serviceAccount: account ? account.email : null,
     connected: !!mine?.refreshToken,
     email: meta.email || null,
@@ -4965,6 +5029,46 @@ app.post('/auth/google/disconnect', requireAuth, async (req, res) => {
     }).catch(() => null);
   }
   velmaSheetCache = { at: 0, rows: null, title: '' };
+  res.json({ ok: true });
+});
+
+// Turning Google sign-in on from the board: an admin pastes the OAuth client
+// they created in Google Cloud. The secret is never sent back - only whether
+// one is stored. An environment-configured client cannot be changed here.
+app.get('/api/google/oauth-client', requireAdmin, async (req, res) => {
+  const client = await googleOAuthClient();
+  res.json({
+    source: client?.source || null,
+    clientId: client?.clientId || null,
+    hasSecret: !!client?.clientSecret,
+    redirectUri: googleRedirectUri(req),
+    javascriptOrigin: publicBaseUrlForRequest(req)
+  });
+});
+app.put('/api/google/oauth-client', requireAdmin, async (req, res) => {
+  try {
+    if (GOOGLE_OAUTH_CLIENT_ID && GOOGLE_OAUTH_CLIENT_SECRET) return res.status(409).json({ error: 'set_in_environment' });
+    const clientId = String(req.body?.clientId || '').trim();
+    let clientSecret = String(req.body?.clientSecret || '').trim();
+    if (!/^[\w.-]+\.apps\.googleusercontent\.com$/.test(clientId)) return res.status(400).json({ error: 'client_id_should_end_with_apps.googleusercontent.com' });
+    // A blank secret on an update keeps the one already stored, so changing
+    // only the ID does not mean finding the secret again.
+    if (!clientSecret) clientSecret = (await googleOAuthClient())?.clientSecret || '';
+    if (!clientSecret) return res.status(400).json({ error: 'client_secret_required' });
+    await setStoredOAuthTokens(GOOGLE_OAUTH_CLIENT_PROVIDER, {
+      accessToken: encryptClaudeCredential(clientSecret),
+      metadata: { clientId, savedBy: String(req.session.username || '').toUpperCase() || null, savedAt: new Date().toISOString() }
+    });
+    googleOAuthClientCache = { at: 0, value: null };
+    return res.json({ ok: true, clientId, hasSecret: true, source: 'board' });
+  } catch (error) {
+    return res.status(500).json({ error: String(error.message || error) });
+  }
+});
+app.delete('/api/google/oauth-client', requireAdmin, async (req, res) => {
+  if (GOOGLE_OAUTH_CLIENT_ID && GOOGLE_OAUTH_CLIENT_SECRET) return res.status(409).json({ error: 'set_in_environment' });
+  await prisma.oAuthToken.delete({ where: { provider: GOOGLE_OAUTH_CLIENT_PROVIDER } }).catch(() => null);
+  googleOAuthClientCache = { at: 0, value: null };
   res.json({ ok: true });
 });
 app.get('/api/jira/issues', requireAuth, async (req, res) => {

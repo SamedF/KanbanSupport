@@ -7802,6 +7802,27 @@ th {
 }
 .kpi-alltime .kpi-alltime-btn:hover { background: rgba(255, 255, 255, .16); color: #fff; }
 
+/* Google sign-in setup, for admins. */
+.google-setup { gap: 10px; }
+.google-setup-steps { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 7px; font-size: 13.5px; line-height: 1.5; color: var(--text-soft); }
+.google-setup-steps a { color: var(--primary); font-weight: 600; }
+.google-setup-copy {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+  padding: 6px 6px 6px 10px;
+  border-radius: 9px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  flex-wrap: wrap;
+}
+.google-setup-copy span { flex: 0 0 100%; font-size: 10.5px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--muted-light); }
+.google-setup-copy code { flex: 1 1 200px; min-width: 0; overflow-wrap: anywhere; font-family: ui-monospace, Consolas, monospace; font-size: 12.5px; color: var(--text); }
+.google-setup-copy .btn-out { padding: 4px 10px; font-size: 12px; }
+.google-setup-fields { display: grid; grid-template-columns: 1fr 1fr auto; gap: 8px; }
+@media (max-width: 560px) { .google-setup-fields { grid-template-columns: 1fr; } }
+
 /* ---- Small screens ---------------------------------------------------------------- */
 
 @media (max-width: 900px) {
@@ -8756,7 +8777,7 @@ th {
   </div>
 </div>
 <div class="modal-bg" id="google-account-modal">
-  <div class="modal" style="max-width:460px;">
+  <div class="modal" style="max-width:600px;">
     <div class="modal-head"><h2>Google account</h2><button class="modal-close-x" data-close="google-account-modal"></button></div>
     <div style="padding:16px 18px;display:flex;flex-direction:column;gap:12px;">
       <div style="font-size:14px;line-height:1.55;color:var(--text-soft);">The board reads the Velma bug sheet with a Google account that can already open it. Linked bugs are re-checked every few minutes, and a bug whose Status turns DONE puts its ticket's SLA back on the clock.</div>
@@ -11504,9 +11525,102 @@ async function fetchGoogleAccessStatus(){
   return googleAccessStatus;
 }
 function googleCanReadSheet(st){return!!(st&&(st.connected||st.serviceAccount||(st.others||[]).length));}
-// Leave the board for Google's consent screen. The callback brings the person
-// back to the board with ?google=<outcome>, handled by showGoogleReturnNotice.
-function startGoogleSignIn(){window.location.href='/auth/google/start';}
+/* Sign in with Google in a new tab, so the board stays where it was.
+
+   The tab reports back over a BroadcastChannel (the server's sign-in result
+   page posts on it, and writes localStorage for browsers without one) - not
+   window.opener, which the Cross-Origin-Opener-Policy header severs once the
+   tab has been to accounts.google.com. Status is also polled for a few minutes
+   as a last resort. If the browser blocks the new tab, the board goes to
+   Google itself and comes back with ?google=<outcome>. */
+let googleSignInPoll=null;
+function startGoogleSignIn(){
+  const tab=window.open('/auth/google/start?tab=1','_blank');
+  if(!tab){window.location.href='/auth/google/start';return;}
+  showToast('Finish signing in in the new tab - the board updates by itself');
+  clearInterval(googleSignInPoll);
+  const until=Date.now()+5*60*1000;
+  const wasConnected=!!googleAccessStatus?.connected;
+  googleSignInPoll=setInterval(async()=>{
+    if(Date.now()>until){clearInterval(googleSignInPoll);return;}
+    const st=await fetchGoogleAccessStatus();
+    if(st?.connected&&!wasConnected){clearInterval(googleSignInPoll);onGoogleSignInResult({outcome:'connected'});}
+  },4000);
+}
+function rerenderGoogleBlocks(){
+  const body=document.getElementById('google-account-body');
+  if(document.getElementById('google-account-modal')?.classList.contains('open'))renderGoogleAccessBlock(body);
+  const velma=document.getElementById('velma-google');
+  if(document.getElementById('velma-modal')?.classList.contains('open')){
+    if(googleCanReadSheet(googleAccessStatus))velma.style.display='none';
+    else renderGoogleAccessBlock(velma,{compact:true});
+  }
+}
+let lastGoogleSignInAt=0;
+async function onGoogleSignInResult(msg){
+  if(!msg||msg.type&&msg.type!=='google-signin')return;
+  if(msg.at&&msg.at<=lastGoogleSignInAt)return;
+  lastGoogleSignInAt=msg.at||Date.now();
+  clearInterval(googleSignInPoll);
+  await fetchGoogleAccessStatus();
+  rerenderGoogleBlocks();
+  const ok=msg.outcome==='connected';
+  showToast(ok?'Google account connected - the board can read the Velma bug sheet':
+    msg.outcome==='no_sheet_access'?'Connected, but this account cannot open the Velma bug sheet':
+    `Google sign-in did not finish: ${msg.detail||msg.outcome}`,ok?'ok':'warn');
+}
+try{
+  const ch=new BroadcastChannel('kanban-google-signin');
+  ch.onmessage=e=>{void onGoogleSignInResult(e.data);};
+}catch(_){}
+window.addEventListener('storage',e=>{
+  if(e.key!=='kanban-google-signin'||!e.newValue)return;
+  try{void onGoogleSignInResult(JSON.parse(e.newValue));}catch(_){}
+});
+
+// Admin setup: the two values from Google Cloud, pasted into the board.
+function googleSetupFormHtml(st){
+  const copy=(label,value)=>`<div class="google-setup-copy"><span>${esc(label)}</span><code>${esc(value)}</code><button class="btn-out" type="button" data-copy-text="${esc(value)}">Copy</button></div>`;
+  const origin=String(st.redirectUri||'').replace(/\/auth\/google\/callback$/,'');
+  return `<div class="google-access-callout google-setup">
+    <strong>Turn on "Sign in with Google" (one time, about five minutes)</strong>
+    <ol class="google-setup-steps">
+      <li>Open <a href="https://console.cloud.google.com/apis/library/sheets.googleapis.com" target="_blank" rel="noopener">Google Cloud &gt; Google Sheets API</a> and click <b>Enable</b>.</li>
+      <li>Under <a href="https://console.cloud.google.com/apis/credentials/consent" target="_blank" rel="noopener">OAuth consent screen</a>, choose <b>Internal</b> and save.</li>
+      <li>In <a href="https://console.cloud.google.com/apis/credentials/oauthclient" target="_blank" rel="noopener">Credentials &gt; Create OAuth client ID</a>, pick <b>Web application</b> and add:${copy('Authorised JavaScript origin',origin)}${copy('Authorised redirect URI',st.redirectUri||'')}</li>
+      <li>Paste the client ID and secret Google shows you:</li>
+    </ol>
+    <div class="google-setup-fields">
+      <input class="form-input" id="google-client-id" type="text" placeholder="1234-abc.apps.googleusercontent.com" autocomplete="off" spellcheck="false">
+      <input class="form-input" id="google-client-secret" type="password" placeholder="Client secret" autocomplete="off" spellcheck="false">
+      <button class="btn-primary" type="button" data-google-save-client>Save and turn on</button>
+    </div>
+    <span class="google-access-hint">Stored encrypted on the board. After this, anyone can click "Sign in with Google" here.</span>
+  </div>`;
+}
+document.addEventListener('click',async e=>{
+  const copyBtn=e.target.closest('[data-copy-text]');
+  if(copyBtn){
+    try{await navigator.clipboard.writeText(copyBtn.dataset.copyText);showToast('Copied','ok');}catch(_){showToast('Could not copy - select the text instead','warn');}
+    return;
+  }
+  const save=e.target.closest('[data-google-save-client]');
+  if(!save)return;
+  const clientId=document.getElementById('google-client-id')?.value.trim()||'';
+  const clientSecret=document.getElementById('google-client-secret')?.value.trim()||'';
+  save.disabled=true;
+  const res=await fetch('/api/google/oauth-client',{method:'PUT',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({clientId,clientSecret})}).catch(()=>null);
+  const out=res?await res.json().catch(()=>({})):{};
+  save.disabled=false;
+  if(!res||!res.ok){
+    const why={'client_id_should_end_with_apps.googleusercontent.com':'The client ID should end with .apps.googleusercontent.com',client_secret_required:'Paste the client secret too',set_in_environment:'Google sign-in is set in the server environment and cannot be changed here',admin_required:'Only admins can set this up'}[out?.error]||out?.error||'could not reach the server';
+    showToast(`Not saved: ${why}`,'warn');
+    return;
+  }
+  await fetchGoogleAccessStatus();
+  rerenderGoogleBlocks();
+  showToast('Google sign-in is on - click "Sign in with Google" to connect','ok');
+});
 function renderGoogleAccessBlock(el,{compact=false,error=''}={}){
   if(!el)return;
   const st=googleAccessStatus;
@@ -11523,8 +11637,12 @@ function renderGoogleAccessBlock(el,{compact=false,error=''}={}){
       +(compact?'':`<div class="google-access-hint">You can connect your own account too - the board then reads as you when you link a bug.</div>${st.configured?signInBtn:''}`);
   }else if(st.configured){
     html=`<div class="google-access-callout"><strong>Nothing can read the Velma bug sheet yet.</strong><span>Sign in with a Google account that can already open the sheet. You only do this once - the board keeps reading with it after you close the tab.</span>${signInBtn}</div>`;
+  }else if(st.canConfigure&&!compact){
+    html=googleSetupFormHtml(st);
+  }else if(st.canConfigure){
+    html='<div class="google-access-callout warn"><strong>Google sign-in is not turned on yet.</strong><span>It takes one setup, about five minutes, and then anyone can sign in from here.</span><button class="btn-primary" type="button" data-google-open-setup>Set up Google sign-in</button></div>';
   }else{
-    html='<div class="google-access-callout warn"><strong>Google sign-in is not set up on this server.</strong><span>An admin has to set GOOGLE_OAUTH_CLIENT_ID and GOOGLE_OAUTH_CLIENT_SECRET (or GOOGLE_SERVICE_ACCOUNT_JSON) - see DEPLOYMENT.md, "Velma bug links".</span></div>';
+    html='<div class="google-access-callout warn"><strong>Google sign-in is not turned on yet.</strong><span>An admin turns it on once under Account &gt; Google account. After that, "Sign in with Google" appears here.</span></div>';
   }
   if(error)html=`<div class="google-access-error">${esc(error)}</div>`+html;
   if(!compact&&st?.lastSyncError)html+=`<div class="google-access-hint">Last check of linked bugs failed: ${esc(st.lastSyncError)}</div>`;
@@ -11534,6 +11652,11 @@ function renderGoogleAccessBlock(el,{compact=false,error=''}={}){
 }
 document.addEventListener('click',async e=>{
   if(e.target.closest('[data-google-signin]')){e.preventDefault();startGoogleSignIn();return;}
+  if(e.target.closest('[data-google-open-setup]')){
+    document.getElementById('velma-modal').classList.remove('open');
+    void openGoogleAccountModal();
+    return;
+  }
   const off=e.target.closest('[data-google-disconnect]');
   if(off){
     off.disabled=true;

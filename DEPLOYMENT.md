@@ -752,9 +752,17 @@ an account without access to the sheet is skipped for the next.
 3. Create an **OAuth client ID** of type *Web application* with the authorised
    redirect URI `https://<board host>/auth/google/callback` - one per environment
    (pre-prod and prod each need their own URI listed).
-4. Set `GOOGLE_OAUTH_CLIENT_ID` and `GOOGLE_OAUTH_CLIENT_SECRET`. The redirect URI
-   is derived from `APP_BASE_URL`; set `GOOGLE_OAUTH_REDIRECT_URI` only if it has
-   to differ.
+4. Paste the client ID and secret into the board: **Account > Google account**
+   (admins only) shows these steps with the exact origin and redirect URI to copy,
+   and a form to save the two values - stored in `OAuthToken`
+   (`google-oauth-client`), the secret encrypted. No env change or redeploy.
+   Alternatively set `GOOGLE_OAUTH_CLIENT_ID` and `GOOGLE_OAUTH_CLIENT_SECRET`,
+   which take precedence and lock the board form. The redirect URI is derived
+   from `APP_BASE_URL`; set `GOOGLE_OAUTH_REDIRECT_URI` only if it has to differ.
+
+"Sign in with Google" then opens Google in a new tab; when it finishes, the tab
+tells the board (over a BroadcastChannel, since Cross-Origin-Opener-Policy cuts
+`window.opener`) and closes itself.
 
 The stored tokens are encrypted with `CLAUDE_CREDENTIAL_SECRET` (falling back to
 `SESSION_SECRET`), the same key as the Claude connector - changing it disconnects
