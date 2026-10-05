@@ -14063,12 +14063,15 @@ async function renderKpiView(){
     const overdueDrilldownRows=(data.overdueRows||[]).map(r=>({id:r.externalId,ticketNumber:r.ticketNumber,subject:r.subject,company:r.company,agent:r.agent,priority:r.priority,statusLabel:COL_NAMES[r.status]||r.status,detail:fmtHours(r.overdueHours)+' overdue'}));
     resetKpiDrilldownStore();
     document.getElementById('kpi-status-cards').innerHTML=[
-      kpiCard('New',s.new||0,{category:'new'}),
-      kpiCard('In Progress',s.inp||0,{category:'inp'}),
-      kpiCard('Waiting On Us',s.wus||0,{category:'wus'}),
-      kpiCard('Due for test',s.dft||0,{category:'dft'}),
-      kpiCard('Waiting On Contact',s.wct||0,{category:'wct'}),
-      kpiCard('Resolved',s.res||0,{category:'res'}),
+      // The open columns are what is on the board right now; Resolved is what
+      // was resolved inside the selected range. Said on each card, since the
+      // row mixes the two.
+      kpiCard('New',s.new||0,{category:'new',hint:'Open now'}),
+      kpiCard('In Progress',s.inp||0,{category:'inp',hint:'Open now'}),
+      kpiCard('Waiting On Us',s.wus||0,{category:'wus',hint:'Open now'}),
+      kpiCard('Due for test',s.dft||0,{category:'dft',hint:'Open now'}),
+      kpiCard('Waiting On Contact',s.wct||0,{category:'wct',hint:'Open now'}),
+      kpiCard('Resolved',s.res||0,{category:'res',hint:'In this range'}),
       kpiCard('Tickets with CS',totals.ticketsWithCs||0,{category:'ticketsWithCs'}),
       kpiCard('Jira Linked',totals.jiraLinked||0,{category:'jiraLinked'})
     ].join('');

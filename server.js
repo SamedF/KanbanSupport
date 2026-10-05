@@ -5373,10 +5373,17 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
       }
     };
 
+    // The open columns are a snapshot of the board right now - a ticket that
+    // has sat in Waiting on Us for a month is still there today, whatever the
+    // range. Resolved is the exception: counted from every ticket ever, it was
+    // the all-time total (441 on any range, Today included), which is not a
+    // figure anybody can use. It is the work resolved inside the selected
+    // range, the same set as the throughput card and the drilldown below.
     for (const ticket of workTickets) {
       const statusKey = normalizeDbStatusForBoard(ticket.status);
-      if (statusKey in statusCounts) statusCounts[statusKey]++;
+      if (statusKey !== 'res' && statusKey in statusCounts) statusCounts[statusKey]++;
     }
+    statusCounts.res = scopedTickets.filter(t => normalizeDbStatusForBoard(t.status) === 'res').length;
 
     for (const ticket of scopedTickets) {
       const statusKey = normalizeDbStatusForBoard(ticket.status);
@@ -5630,7 +5637,8 @@ app.get('/api/tickets/kpis/drilldown', requireAuth, async (req, res) => {
     let rows;
 
     if (KPI_STATUS_CATEGORIES.has(category)) {
-      rows = workTickets
+      // Resolved is range-bound, like its card; the open columns are now.
+      rows = (category === 'res' ? scopedTickets : workTickets)
         .filter(t => normalizeDbStatusForBoard(t.status) === category)
         .map(t => kpiDrilldownRow(t));
     } else if (category === 'ticketsWithCs') {
