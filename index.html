@@ -6603,7 +6603,7 @@ input.filter-sel { cursor: text; }
   border-radius: 0 13px 13px 0;
 }
 
-.card-top-meta { margin-bottom: 8px; gap: 6px; }
+.card-top-meta { margin-bottom: 8px; gap: 6px; flex-wrap: wrap; row-gap: 5px; }
 
 .ticket-no {
   gap: 5px;
@@ -7495,6 +7495,145 @@ th {
    which looked like a second text field under the real one. */
 .fb-foot .fb-context { border: 0; background: none; padding: 0; display: block; border-radius: 0; }
 
+/* ---- Velma bug status and Google access --------------------------------------------- */
+
+/* The sheet's own Status value, as a small pill inside the chip and panel. */
+.velma-status {
+  display: inline-flex;
+  align-items: center;
+  height: 17px;
+  padding: 0 6px;
+  margin-left: 4px;
+  border-radius: 5px;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  color: var(--violet-600);
+  background: color-mix(in srgb, var(--violet-600) 14%, var(--surface));
+}
+
+.velma-status.done,
+.velma-badge-card.done .velma-status,
+.velma-details.done .velma-status {
+  color: #fff;
+  background: #10b981;
+}
+
+/* The footer chip stays short - the panel above it already shows the status.
+   Only DONE rides along on the chip, because that one changes the SLA. */
+.velma-badge-card { max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+.velma-badge-card .velma-status { display: none; }
+.velma-badge-card.done .velma-status { display: inline-flex; }
+
+/* DONE: the hold is over, so the chip stops looking like a hold. */
+.velma-badge-card.done {
+  color: var(--green-700);
+  background: color-mix(in srgb, #10b981 10%, var(--surface));
+  border-color: color-mix(in srgb, #10b981 40%, transparent);
+}
+
+.velma-details {
+  margin-top: 6px;
+  padding: 8px 9px;
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--violet-600) 35%, transparent);
+  background: color-mix(in srgb, var(--violet-600) 7%, var(--surface));
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--text-soft);
+}
+
+.velma-details.done {
+  border-color: color-mix(in srgb, #10b981 38%, transparent);
+  background: color-mix(in srgb, #10b981 7%, var(--surface));
+}
+
+.velma-details-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.velma-details-head strong { color: var(--violet-600); }
+.velma-details.done .velma-details-head strong { color: var(--green-700); }
+.velma-details-head .velma-status { margin-left: 0; }
+.velma-details-head a { margin-left: auto; color: var(--violet-600); font-weight: 600; }
+.velma-details-note { margin-top: 4px; font-weight: 600; color: var(--green-700); }
+
+/* Google's "G", for the sign-in button and the account menu. Drawn in Google's
+   own colours, as their sign-in guidelines ask. */
+.google-g {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 48 48'%3E%3Cpath fill='%23EA4335' d='M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z'/%3E%3Cpath fill='%234285F4' d='M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z'/%3E%3Cpath fill='%23FBBC05' d='M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z'/%3E%3Cpath fill='%2334A853' d='M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z'/%3E%3C/svg%3E") center / contain no-repeat;
+}
+
+.account-icon.google-icon {
+  background: var(--surface) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 48 48'%3E%3Cpath fill='%23EA4335' d='M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z'/%3E%3Cpath fill='%234285F4' d='M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z'/%3E%3Cpath fill='%23FBBC05' d='M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z'/%3E%3Cpath fill='%2334A853' d='M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z'/%3E%3C/svg%3E") center / 16px no-repeat;
+  border-color: var(--border);
+}
+
+/* Google's sign-in button is white with the G, never the board's gradient. */
+.btn-primary.google-signin-btn {
+  align-self: flex-start;
+  gap: 9px;
+  color: #1f1f1f;
+  background: #fff;
+  border: 1px solid #dadce0;
+  box-shadow: 0 1px 2px rgba(60, 64, 67, .2);
+  font-family: Inter, Roboto, Arial, sans-serif;
+}
+
+.btn-primary.google-signin-btn:hover {
+  background: #f8f9fb;
+  filter: none;
+  box-shadow: 0 1px 3px rgba(60, 64, 67, .3), 0 4px 8px rgba(60, 64, 67, .12);
+}
+
+.google-access { display: flex; flex-direction: column; gap: 8px; font-size: 13.5px; line-height: 1.5; color: var(--text-soft); }
+
+.google-access-line {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 9px 11px;
+  border-radius: 11px;
+  border: 1px solid var(--border);
+  background: var(--surface-soft);
+}
+
+.google-access-line > span:not(.google-g) { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.google-access-line .btn-out { padding: 4px 10px; font-size: 12.5px; }
+.google-access-line.ok { border-color: color-mix(in srgb, #10b981 30%, var(--border)); }
+
+.google-access-callout {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 13px;
+  border-radius: 12px;
+  border: 1px solid color-mix(in srgb, var(--primary) 30%, var(--border));
+  background: color-mix(in srgb, var(--primary) 6%, var(--surface));
+}
+
+.google-access-callout strong { color: var(--text); font-size: 14px; }
+.google-access-callout.warn { border-color: color-mix(in srgb, #f59e0b 45%, var(--border)); background: color-mix(in srgb, #f59e0b 8%, var(--surface)); }
+
+.google-access-error {
+  padding: 8px 11px;
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, #ef4444 35%, transparent);
+  background: color-mix(in srgb, #ef4444 8%, var(--surface));
+  color: var(--red-700);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.google-access-hint { font-size: 12.5px; color: var(--muted); }
+
 /* ---- Small screens ---------------------------------------------------------------- */
 
 @media (max-width: 900px) {
@@ -7573,6 +7712,14 @@ th {
     <span>
       <strong>Templates</strong>
       <small>Reusable message templates</small>
+    </span>
+  </button>
+
+  <button class="account-item" id="google-account-btn" type="button">
+    <span class="account-icon google-icon" aria-hidden="true"></span>
+    <span>
+      <strong>Google account</strong>
+      <small id="google-account-sub">Read the Velma bug sheet</small>
     </span>
   </button>
 
@@ -8419,18 +8566,34 @@ th {
     </div>
   </div>
 </div>
+<div class="modal-bg" id="google-account-modal">
+  <div class="modal" style="max-width:460px;">
+    <div class="modal-head"><h2>Google account</h2><button class="modal-close-x" data-close="google-account-modal"></button></div>
+    <div style="padding:16px 18px;display:flex;flex-direction:column;gap:12px;">
+      <div style="font-size:14px;line-height:1.55;color:var(--text-soft);">The board reads the Velma bug sheet with a Google account that can already open it. Linked bugs are re-checked every few minutes, and a bug whose Status turns DONE puts its ticket's SLA back on the clock.</div>
+      <div id="google-account-body" class="google-access"></div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn-out" id="google-sync-now" type="button">Check linked bugs now</button>
+      <button class="btn-out" data-close="google-account-modal">Close</button>
+    </div>
+  </div>
+</div>
 <div class="modal-bg" id="velma-modal">
-  <div class="modal" style="max-width:420px;">
+  <div class="modal" style="max-width:480px;">
     <div class="modal-head"><h2 id="velma-modal-title">Link a Velma bug</h2><button class="modal-close-x" data-close="velma-modal"></button></div>
     <div style="padding:16px 18px;display:flex;flex-direction:column;gap:12px;">
       <div style="font-size:14px;color:var(--slate-500);line-height:1.4;" id="velma-ticket-title"></div>
       <!-- The bug this ticket is linked to right now, as the sheet row read
            when it was linked. Hidden while there is no link. -->
       <div id="velma-current" style="display:none;font-size:13px;line-height:1.45;color:var(--slate-700);background:var(--purple-soft);border:1px solid var(--violet-600);border-radius:10px;padding:10px;"></div>
+      <!-- Whose Google access reads the sheet, or how to give it one. Filled by
+           renderGoogleAccessBlock. -->
+      <div id="velma-google" class="google-access" style="display:none;"></div>
       <div class="form-field">
         <label id="velma-input-label">Velma bug ticket ID</label>
         <input id="velma-input" class="form-input" type="text" placeholder="The ID from the Velma bug sheet" style="font-size:16.5px;font-weight:700;letter-spacing:.5px;"/>
-        <div style="font-size:12px;color:var(--slate-400);margin-top:3px;">The row with this ID is looked up in the Velma bug sheet and linked to the ticket. The SLA goes on hold while it is linked.</div>
+        <div style="font-size:12px;color:var(--slate-400);margin-top:3px;">The row with this ID is looked up in the Velma bug sheet and linked to the ticket. The SLA goes on hold while the bug is open, and starts again by itself once its Status is DONE.</div>
       </div>
     </div>
     <div class="modal-actions">
@@ -8662,39 +8825,71 @@ function supportAgentNamedInEmail(emailObj){
 }
 /* Where a ticket goes when the mail names nobody who can take it.
 
-   Spread evenly across the support team - every agent on the roster except
-   SGU - to whoever holds the fewest open tickets. SGU is the overflow, not the
-   default: a ticket only lands there once every other agent is holding
-   SUPPORT_AUTO_ASSIGN_CAP open tickets. Sending every untagged ticket to SGU
-   left one admin triaging the whole inbox while the rest of the team waited
-   to be handed work.
+   At random across the support team - every agent on the roster except SGU,
+   who no longer takes the untagged queue - weighted by how far each agent is
+   below their share for the ticket's priority: on average 8 open High, 10
+   Medium and 10 Low tickets each (SUPPORT_PRIORITY_TARGETS). An agent at 2 of
+   8 High is four times as likely to get the next High as one at 6 of 8, so the
+   spread evens out without becoming a predictable rotation. These are targets,
+   not caps: once everyone is at or past theirs for that priority, the ticket
+   goes to whoever holds the fewest of it.
 
    Only SUPPORT_AGENTS trigrams are valid here: the server independently
    rejects anything else for this field (see the assignedAgent check in
    upsertBoardTicketsToDatabase), so an admin who is not on that roster - AHK,
    OWNER, or VGU, who is CS - cannot be given a ticket even by name.
 
-   Ties go to the earlier agent in SUPPORT_AGENTS rather than at random, so two
-   tabs looking at the same board reach the same answer for the same ticket.
-   This only ever runs for a ticket that has nobody on it: once assigned, the
-   choice is stored and never recomputed. */
+   The roll is seeded by the ticket id rather than Math.random, so two tabs
+   looking at the same board still reach the same answer for the same ticket -
+   random across tickets, repeatable for any one of them. This only ever runs
+   for a ticket that has nobody on it: once assigned, the choice is stored and
+   never recomputed. */
 const FALLBACK_SUPPORT_OWNER='SGU';
-const SUPPORT_AUTO_ASSIGN_CAP=10;
-function fallbackSupportOwner(){
-  const load=openWorkloadByAgent();
-  const pool=SUPPORT_AGENTS.filter(a=>a!==FALLBACK_SUPPORT_OWNER&&load[a]<SUPPORT_AUTO_ASSIGN_CAP);
-  if(pool.length)return pool.reduce((m,a)=>load[a]<load[m]?a:m,pool[0]);
-  // Everyone is full. If SGU is ever retired from the roster, the least loaded
-  // agent takes it instead - an invalid assignee would be rejected on save
-  // and re-stamped on every render.
-  return normalizeSupportAgent(FALLBACK_SUPPORT_OWNER)||leastLoadedSupportAgent();
+const SUPPORT_PRIORITY_TARGETS={High:8,Medium:10,Low:10};
+function ticketPriorityBucket(id){
+  const p=String(ticketPriority[id]||allTickets.find(t=>t.id===id)?.priority||'').trim().toLowerCase();
+  if(p==='high'||p==='urgent')return'High';
+  if(p==='low')return'Low';
+  return'Medium';
+}
+function openWorkloadByAgentAndPriority(){
+  const load=Object.fromEntries(SUPPORT_AGENTS.map(a=>[a,{High:0,Medium:0,Low:0}]));
+  allTickets.forEach(t=>{if(!isOpenWorkloadTicket(t.id))return;const a=ticketAssignee[t.id];if(a in load)load[a][ticketPriorityBucket(t.id)]++;});
+  return load;
+}
+// A stable number in [0,1) from a string (FNV-1a). Not for anything secret -
+// only so the same ticket rolls the same way in every tab.
+function seededUnit(seed){
+  let h=0x811c9dc5;
+  const s=String(seed||'');
+  for(let i=0;i<s.length;i++){h^=s.charCodeAt(i);h=Math.imul(h,0x01000193);}
+  return ((h>>>0)%1000003)/1000003;
+}
+function fallbackSupportOwner(id){
+  const pool=SUPPORT_AGENTS.filter(a=>a!==FALLBACK_SUPPORT_OWNER);
+  // If SGU is ever the only agent left on the roster, SGU it is - an invalid
+  // assignee would be rejected on save and re-stamped on every render.
+  if(!pool.length)return normalizeSupportAgent(FALLBACK_SUPPORT_OWNER)||leastLoadedSupportAgent();
+  const priority=ticketPriorityBucket(id);
+  const target=SUPPORT_PRIORITY_TARGETS[priority];
+  const byPriority=openWorkloadByAgentAndPriority();
+  const held=a=>byPriority[a]?.[priority]||0;
+  const weighted=pool.map(agent=>({agent,room:Math.max(0,target-held(agent))})).filter(x=>x.room>0);
+  if(weighted.length){
+    let roll=(id?seededUnit(`${id}|${priority}`):Math.random())*weighted.reduce((sum,x)=>sum+x.room,0);
+    return(weighted.find(x=>(roll-=x.room)<0)||weighted[weighted.length-1]).agent;
+  }
+  // Everyone is at or past their share: the fewest of this priority, then the
+  // fewest open overall, then roster order - deterministic, like the roll.
+  const total=openWorkloadByAgent();
+  return pool.reduce((best,a)=>(held(a)<held(best)||(held(a)===held(best)&&total[a]<total[best]))?a:best,pool[0]);
 }
 // Who a ticket lands on when nobody has chosen yet: the agent the email
 // names in its text, then the agent it is addressed to (To/Cc), and failing
-// both the next agent in the rotation above. The text comes first because it
-// is what the client actually wrote - a CC is often just habit.
-function defaultSupportAgentForTicket(emailObj){
-  return supportAgentNamedInEmail(emailObj)||supportAgentsTaggedInEmail(emailObj)[0]||fallbackSupportOwner();
+// both the weighted roll above. The text comes first because it is what the
+// client actually wrote - a CC is often just habit.
+function defaultSupportAgentForTicket(emailObj,id){
+  return supportAgentNamedInEmail(emailObj)||supportAgentsTaggedInEmail(emailObj)[0]||fallbackSupportOwner(id);
 }
 function normalizeEmailList(values){return (Array.isArray(values)?values:[]).map(v=>String(v||'').trim().toLowerCase()).filter(Boolean);}
 function isAutomatic(e){if(!e||!e.sender)return true;const sl=e.sender.toLowerCase();if(sl===SUPPORT_BOX)return true;if(BLOCKED_EMAILS.has(sl))return true;const domain=(sl.split('@')[1]||'');if(BLOCKED_DOMAINS.has(domain))return true;if(NO_REPLY_PATTERNS.some(p=>sl.includes(p)))return true;if(!e.subject&&!e.summary)return true;const tl=((e.subject||'')+' '+(e.summary||'')).toLowerCase();if(NO_REPLY_SUBJECTS.some(p=>tl.includes(p)))return true;if(/\b(newsletter|webinar|digest|event reminder)\b/.test(tl))return true;if(/(microsoft teams meeting|join microsoft teams meeting|meeting invitation|accepted:|declined:|tentative:)/.test(tl))return true;return false;}
@@ -10016,7 +10211,7 @@ async function loadState(){
 // slot. Runs at the end of every loadState, which makes it dangerous: it used
 // to pick a replacement with leastLoadedSupportAgent() - a session-local
 // calculation, so two tabs chose different agents and the ticket flapped (it
-// takes fallbackSupportOwner() now, which breaks ties by roster order and
+// takes fallbackSupportOwner(id) now, whose roll is seeded by the ticket id, and
 // runs once per ticket, since the migrated assignee is a support agent) - and it cleared
 // manualSupportOverride, destroying the protection a deliberate
 // assignment had just been given. Both are now fixed, and the migration is
@@ -10032,7 +10227,7 @@ function normalizeLegacyAssignmentModes(){
       if(!ticketCSOwner[id])ticketCSOwner[id]=assignee;
       // Never overwrite a deliberate assignment during a data migration.
       if(!manualSupportOverride[id]){
-        setTicketAssignee(id,fallbackSupportOwner(),undefined,'legacyMigration');
+        setTicketAssignee(id,fallbackSupportOwner(id),undefined,'legacyMigration');
         migrated++;
       }
       ticketAssignmentMode[id]='support';
@@ -10300,9 +10495,12 @@ function getSLAStatus(id){
      ticketSlaSnapshot, which is what the dashboard is computed from. */
   const jiraHoldKey=canonicalJiraKey(ticketJira[id]);
   if(jiraHoldKey)return{text:`SLA on hold - ${jiraHoldKey}`,cls:'sla-warn',overdue:false,wallText,shiftMs:0,noClock:true,jiraHold:jiraHoldKey};
-  // Waiting on a Velma bug: the same hold, for the same reason. Mirrors
-  // velma_hold in ticketSlaSnapshot.
-  const velmaHoldId=ticketVelmaBug[id]?.id;
+  // Waiting on a Velma bug: the same hold, for the same reason - until the
+  // sheet's status says DONE, when the bug is fixed and the ticket is ours
+  // again. The server's Velma sync moves the restart point forward by the
+  // length of the hold at that moment, so the clock resumes rather than
+  // counting the wait. Mirrors velma_hold in ticketSlaSnapshot.
+  const velmaHoldId=ticketVelmaBug[id]&&!ticketVelmaBug[id].done?ticketVelmaBug[id].id:null;
   if(velmaHoldId)return{text:`SLA on hold - Velma bug ${velmaHoldId}`,cls:'sla-warn',overdue:false,wallText,shiftMs:0,noClock:true,velmaHold:velmaHoldId};
   /* Waiting on the client, so the clock is frozen: the ball is in their court
      and the time they take to answer is not ours to be late with. It resumes
@@ -10970,7 +11168,7 @@ function openVelmaModal(id){
   const currentEl=document.getElementById('velma-current');
   currentEl.style.display=link?'':'none';
   currentEl.innerHTML=link
-    ?`<div>Linked to Velma bug <strong style="font-size:15px;">${esc(link.id)}</strong>${link.row?` <span style="color:var(--slate-500);">(sheet row ${esc(link.row)})</span>`:''}</div>${velmaFieldsHtml(link,8)}`
+    ?`<div>Linked to Velma bug <strong style="font-size:15px;">${esc(link.id)}</strong>${link.row?` <span style="color:var(--slate-500);">(sheet row ${esc(link.row)})</span>`:''}${link.status?` <span class="velma-status${link.done?' done':''}">${esc(link.status)}</span>`:''}</div>${link.done?'<div style="margin-top:4px;font-weight:600;color:var(--green-700);">DONE on the sheet - the SLA is running again.</div>':(link.status?'<div style="margin-top:4px;color:var(--slate-500);">SLA on hold until the Status is DONE.</div>':'')}${velmaFieldsHtml(link,8)}`
     :'';
   const input=document.getElementById('velma-input');
   input.value=link?link.id:'';
@@ -10980,6 +11178,12 @@ function openVelmaModal(id){
   const openBtn=document.getElementById('velma-open-link');
   openBtn.style.display=link?.url?'':'none';
   openBtn.onclick=()=>{if(link?.url)window.open(link.url,'_blank');};
+  // Only take room in the modal when there is something to do about access:
+  // when the sheet can already be read, the agent needs the ID field, not a
+  // reminder of whose account is reading it.
+  const googleEl=document.getElementById('velma-google');
+  googleEl.style.display='none';
+  fetchGoogleAccessStatus().then(st=>{if(velmaTicketId===id&&!googleCanReadSheet(st))renderGoogleAccessBlock(googleEl,{compact:true});});
   document.getElementById('velma-modal').classList.add('open');
   setTimeout(()=>{input.focus();if(link)input.select();},100);
 }
@@ -10997,14 +11201,24 @@ document.getElementById('velma-save').addEventListener('click',async()=>{
   saveBtn.disabled=true;
   const out=await apiLinkVelmaBug(linkedId,bugId).finally(()=>{saveBtn.disabled=false;});
   if(!out?.ok||!out.link){
-    showToast(`Velma bug link failed: ${out?.error||'unknown error'}`);
+    const error=String(out?.error||'unknown error');
+    // Access problems are answered in the modal, with the way out next to
+    // them; anything else (no such ID, the sheet API down) is a toast.
+    if(/^velma_sheet_(not_configured|not_shared)|^google_(refresh|auth)_failed/.test(error)){
+      await fetchGoogleAccessStatus();
+      // Not configured at all is what the block itself explains; repeating
+      // the raw message above it said the same thing twice.
+      renderGoogleAccessBlock(document.getElementById('velma-google'),{compact:true,error:/not_configured/.test(error)?'':error.replace(/^[a-z_]+:s*/,'')});
+      return;
+    }
+    showToast(`Velma bug link failed: ${error}`);
     return;
   }
   ticketVelmaBug[linkedId]=out.link;
   saveState('velma_bug_linked');
   document.getElementById('velma-modal').classList.remove('open');
   renderBoard();
-  showToast(`Linked to Velma bug ${out.link.id} - SLA on hold`,'ok');
+  showToast(out.link.done?`Linked to Velma bug ${out.link.id} - already DONE, SLA keeps running`:`Linked to Velma bug ${out.link.id} - SLA on hold until it is DONE`,'ok');
 });
 document.getElementById('velma-unlink').addEventListener('click',async()=>{
   if(!velmaTicketId)return;
@@ -11020,6 +11234,105 @@ document.getElementById('velma-unlink').addEventListener('click',async()=>{
   showToast('Velma bug link removed');
 });
 document.getElementById('velma-input').addEventListener('keydown',e=>{if(e.key==='Enter')document.getElementById('velma-save').click();});
+
+/* Google access for the Velma bug sheet.
+
+   The sheet is private, so the server reads it as somebody: a service account
+   if one is configured, otherwise the Google account of anyone on the board
+   who connected theirs (the server tries them newest first). This is the
+   connect/disconnect side of that, shown in two places - the Account menu,
+   and inside the Velma modal whenever nothing can read the sheet yet, so an
+   agent who hits that wall can get past it without leaving the ticket. */
+let googleAccessStatus=null;
+async function fetchGoogleAccessStatus(){
+  try{
+    const res=await fetch('/auth/google/status',{credentials:'include'});
+    googleAccessStatus=res.ok?await res.json():null;
+  }catch(_){googleAccessStatus=null;}
+  const sub=document.getElementById('google-account-sub');
+  if(sub)sub.textContent=googleAccessStatus?.connected?`Connected as ${googleAccessStatus.email||'your account'}`:'Read the Velma bug sheet';
+  return googleAccessStatus;
+}
+function googleCanReadSheet(st){return!!(st&&(st.connected||st.serviceAccount||(st.others||[]).length));}
+// Leave the board for Google's consent screen. The callback brings the person
+// back to the board with ?google=<outcome>, handled by showGoogleReturnNotice.
+function startGoogleSignIn(){window.location.href='/auth/google/start';}
+function renderGoogleAccessBlock(el,{compact=false,error=''}={}){
+  if(!el)return;
+  const st=googleAccessStatus;
+  const signInBtn='<button class="btn-primary google-signin-btn" type="button" data-google-signin><span class="google-g" aria-hidden="true"></span>Sign in with Google</button>';
+  let html='';
+  if(!st){
+    html='<div class="google-access-line">Could not check the Google connection.</div>';
+  }else if(st.connected){
+    html=`<div class="google-access-line ok"><span class="google-g" aria-hidden="true"></span><span>Reading the sheet as <strong>${esc(st.email||'your Google account')}</strong></span>${compact?'':'<button class="btn-out" type="button" data-google-disconnect>Disconnect</button>'}</div>`;
+  }else if(st.serviceAccount){
+    html=`<div class="google-access-line ok"><span class="google-g" aria-hidden="true"></span><span>Reading the sheet with the board\'s service account <strong>${esc(st.serviceAccount)}</strong></span></div>`;
+  }else if((st.others||[]).length){
+    html=`<div class="google-access-line ok"><span class="google-g" aria-hidden="true"></span><span>Reading the sheet as <strong>${esc(st.others[0])}</strong>, who connected their account</span></div>`
+      +(compact?'':`<div class="google-access-hint">You can connect your own account too - the board then reads as you when you link a bug.</div>${st.configured?signInBtn:''}`);
+  }else if(st.configured){
+    html=`<div class="google-access-callout"><strong>Nothing can read the Velma bug sheet yet.</strong><span>Sign in with a Google account that can already open the sheet. You only do this once - the board keeps reading with it after you close the tab.</span>${signInBtn}</div>`;
+  }else{
+    html='<div class="google-access-callout warn"><strong>Google sign-in is not set up on this server.</strong><span>An admin has to set GOOGLE_OAUTH_CLIENT_ID and GOOGLE_OAUTH_CLIENT_SECRET (or GOOGLE_SERVICE_ACCOUNT_JSON) - see DEPLOYMENT.md, "Velma bug links".</span></div>';
+  }
+  if(error)html=`<div class="google-access-error">${esc(error)}</div>`+html;
+  if(!compact&&st?.lastSyncError)html+=`<div class="google-access-hint">Last check of linked bugs failed: ${esc(st.lastSyncError)}</div>`;
+  else if(!compact&&st?.lastSyncAt)html+=`<div class="google-access-hint">Linked bugs last checked ${esc(fmtTime(new Date(st.lastSyncAt).toISOString()))}.</div>`;
+  el.innerHTML=html;
+  el.style.display=html?'':'none';
+}
+document.addEventListener('click',async e=>{
+  if(e.target.closest('[data-google-signin]')){e.preventDefault();startGoogleSignIn();return;}
+  const off=e.target.closest('[data-google-disconnect]');
+  if(off){
+    off.disabled=true;
+    await fetch('/auth/google/disconnect',{method:'POST',credentials:'include'}).catch(()=>null);
+    await fetchGoogleAccessStatus();
+    renderGoogleAccessBlock(document.getElementById('google-account-body'));
+    showToast('Google account disconnected');
+  }
+});
+async function openGoogleAccountModal(){
+  const body=document.getElementById('google-account-body');
+  body.innerHTML='<div class="loading" style="height:70px;"><div class="spinner"></div></div>';
+  document.getElementById('google-account-modal').classList.add('open');
+  await fetchGoogleAccessStatus();
+  renderGoogleAccessBlock(body);
+}
+document.getElementById('google-account-btn').addEventListener('click',e=>{e.stopPropagation();document.getElementById('account-panel').classList.remove('open');void openGoogleAccountModal();});
+document.getElementById('google-sync-now').addEventListener('click',async e=>{
+  const btn=e.currentTarget;
+  btn.disabled=true;
+  const res=await fetch('/api/velma-bug/sync',{method:'POST',credentials:'include'}).catch(()=>null);
+  const out=res?await res.json().catch(()=>({})):{};
+  btn.disabled=false;
+  await fetchGoogleAccessStatus();
+  renderGoogleAccessBlock(document.getElementById('google-account-body'));
+  if(!res||!res.ok)showToast(`Check failed: ${out?.error||'could not reach the server'}`);
+  else if(out.skipped==='not_configured')showToast('Nothing can read the sheet yet - connect a Google account first.');
+  else if(!out.checked)showToast('No tickets are linked to a Velma bug.');
+  else showToast(out.released?`${out.released} bug(s) are DONE - their SLA is running again`:`Checked ${out.checked} linked bug(s) - nothing changed`,'ok');
+});
+// Back from Google's consent screen.
+(function showGoogleReturnNotice(){
+  const params=new URLSearchParams(location.search);
+  const outcome=params.get('google');
+  if(!outcome)return;
+  params.delete('google');
+  history.replaceState(null,'',location.pathname+(params.toString()?`?${params}`:'')+location.hash);
+  const messages={
+    connected:['Google account connected - the board can read the Velma bug sheet','ok'],
+    connected_unverified:['Google account connected, but the sheet could not be checked yet',''],
+    no_sheet_access:['Connected, but this Google account cannot open the Velma bug sheet - ask for it to be shared with you',''],
+    sheets_scope_missing:['Google sign-in needs the "See your Google Sheets" permission - tick it on the consent screen',''],
+    no_refresh_token:['Google did not grant offline access - disconnect the board under myaccount.google.com and sign in again',''],
+    access_denied:['Google sign-in was cancelled','']
+  };
+  const [text,kind]=messages[outcome]||[`Google sign-in failed: ${outcome}`,''];
+  setTimeout(()=>showToast(text,kind),400);
+  void fetchGoogleAccessStatus();
+})();
 document.getElementById('jira-settings-btn').addEventListener('click',e=>{e.stopPropagation();document.getElementById('account-panel').classList.remove('open');openJiraSettingsModal();});
 
 // --- Templates: shared, team-wide reusable message templates -----------
@@ -11628,7 +11941,7 @@ document.getElementById('ct-submit').addEventListener('click',async()=>{
   if(clientEmail)ticketClientEmail[id]=clientEmail;
   ticketCategory[id]=category;
   if(subtype)ticketSubtype[id]=subtype;
-  setTicketAssignee(id,normalizeSupportAgent(document.getElementById('ct-agent').value)||fallbackSupportOwner());
+  setTicketAssignee(id,normalizeSupportAgent(document.getElementById('ct-agent').value)||fallbackSupportOwner(id));
   ticketAssignmentMode[id]='support';
   const creatorCS=currentUserCSAgent();
   if(creatorCS){ticketCSOwner[id]=creatorCS;manualCSOverride[id]=true;}
@@ -14200,7 +14513,7 @@ function ensureTicketCSOwnerResolved(id,emailObj){
   }
   return ticketCSOwner[id]||null;
 }
-function ensureSupportAssignmentForTicket(id,emailObj,opts={}){if(!id||ticketCategory[id]==='Spam'||isArchivedTicket(id))return false;const currentAssignee=ticketAssignee[id]||'';const keepExistingSupport=!!opts.keepExistingSupport&&SUPPORT_AGENTS.includes(currentAssignee);const supportAgent=keepExistingSupport?currentAssignee:defaultSupportAgentForTicket(emailObj);const csOwner=resolveDefaultCSForTicket(id,emailObj);let changed=false;if(csOwner&&ticketCSOwner[id]!==csOwner&&!manualCSOverride[id]){ticketCSOwner[id]=csOwner;changed=true;}if(ticketAssignee[id]!==supportAgent||ticketAssignmentMode[id]!=='support'){setTicketAssignee(id,supportAgent);ticketAssignmentMode[id]='support';changed=true;}if(manualSupportOverride[id]===undefined){manualSupportOverride[id]=false;changed=true;}return changed;}
+function ensureSupportAssignmentForTicket(id,emailObj,opts={}){if(!id||ticketCategory[id]==='Spam'||isArchivedTicket(id))return false;const currentAssignee=ticketAssignee[id]||'';const keepExistingSupport=!!opts.keepExistingSupport&&SUPPORT_AGENTS.includes(currentAssignee);const supportAgent=keepExistingSupport?currentAssignee:defaultSupportAgentForTicket(emailObj,id);const csOwner=resolveDefaultCSForTicket(id,emailObj);let changed=false;if(csOwner&&ticketCSOwner[id]!==csOwner&&!manualCSOverride[id]){ticketCSOwner[id]=csOwner;changed=true;}if(ticketAssignee[id]!==supportAgent||ticketAssignmentMode[id]!=='support'){setTicketAssignee(id,supportAgent);ticketAssignmentMode[id]='support';changed=true;}if(manualSupportOverride[id]===undefined){manualSupportOverride[id]=false;changed=true;}return changed;}
 function shouldRefreshHubspotCacheEntry(email){const ce=String(email||'').toLowerCase();if(!ce)return false;if(!(ce in hsCache))return true;const cached=hsCache[ce];const related=allTickets.filter(t=>ticketCategory[t.id]!=='Spam'&&!isArchivedTicket(t.id)&&(ticketClientEmail[t.id]||getClientEmail(t.email))===ce);if(!related.length)return false;if(cached===null)return related.some(t=>isSupportAssignedTicket(t.id)&&!ticketCSOwner[t.id]);if(!cached||!cached.companyName||!cached.companyId||!cached.coOwner)return true;return related.some(t=>isSupportAssignedTicket(t.id)&&!ticketCSOwner[t.id]);}
 function applyCompanyCSAssignments(){let changed=0;let reassigned=0;allTickets.forEach(t=>{if(ticketCategory[t.id]==='Spam'||isArchivedTicket(t.id))return;const id=t.id;const ce=ticketClientEmail[id]||getClientEmail(t.email);if(!ce)return;const cs=resolveDefaultCSForTicket(id,t.email);if(cs&&ticketCSOwner[id]!==cs&&!manualCSOverride[id]){ticketCSOwner[id]=cs;changed++;}if(manualSupportOverride[id])return;if(!SUPPORT_AGENTS.includes(ticketAssignee[id])||ticketAssignmentMode[id]!=='support'){if(ensureSupportAssignmentForTicket(id,t.email,{keepExistingSupport:true})){changed++;reassigned++;}}});
   // Retiring an agent from SUPPORT_AGENTS makes every ticket they hold fail the
@@ -15405,7 +15718,7 @@ function makeCard(ticket,isNew=false){
   const{email,id}=ticket;
   ensureTicketNumber(id);
   const priority=ticketPriority[id]||ticket.priority;
-  const agent=normalizeSupportAgent(ticketAssignee[id])||defaultSupportAgentForTicket(email);
+  const agent=normalizeSupportAgent(ticketAssignee[id])||defaultSupportAgentForTicket(email,id);
   if(ticketAssignee[id]!==agent)setTicketAssignee(id,agent);
   // Who the mail put on the To/Cc line, for the assign menu and the hint next
   // to it. Computed once per card rather than per control.
@@ -15491,10 +15804,18 @@ function makeCard(ticket,isNew=false){
   // linked the row's first few columns show above the footer, like the Jira
   // panel, so the card says what the bug is without opening the sheet.
   const velmaLink=ticketVelmaBug[id]||null;
+  // The sheet's status rides along: DONE turns the chip green, because it is
+  // also the moment the SLA starts running again.
+  // DONE ends this hold, but the ticket can still be held for another reason;
+  // say which, rather than promising a clock that is not running.
+  const velmaDoneNote=jiraKey?`Fixed on the Velma side - the SLA stays on hold for the Jira link ${jiraKey}.`
+    :normalizeTicketStage(ticketState[id]||'new')==='wct'?'Fixed on the Velma side - the SLA resumes when the ticket leaves Waiting on Contact.'
+    :'Fixed on the Velma side - the SLA is running again.';
+  const velmaStatusHtml=velmaLink?.status?` <span class="velma-status">${esc(velmaLink.status)}</span>`:'';
   const velmaBtn=velmaLink
-    ?`<button class="velma-badge-card" data-velma-open="${id}" title="Velma bug ${esc(velmaLink.id)} - click to change or remove">Velma ${esc(velmaLink.id)}</button>`
+    ?`<button class="velma-badge-card${velmaLink.done?' done':''}" data-velma-open="${id}" title="Velma bug ${esc(velmaLink.id)}${velmaLink.status?' - '+esc(velmaLink.status):''}${velmaLink.done?' - SLA running again':' - SLA on hold'} - click to change or remove">Velma ${esc(velmaLink.id)}${velmaStatusHtml}</button>`
     :`<button class="velma-link-btn" data-velma-open="${id}" title="Link to a Velma bug" aria-label="Link to a Velma bug">Velma</button>`;
-  const velmaDetailsHtml=velmaLink?`<div style="margin-top:6px;padding:7px 8px;border:1px solid var(--violet-600);border-radius:10px;background:var(--purple-soft);font-size:12px;line-height:1.35;color:var(--slate-700);"><div style="display:flex;justify-content:space-between;gap:8px;align-items:center;"><strong style="color:var(--violet-600);">Velma bug ${esc(velmaLink.id)}</strong>${velmaLink.url?`<a href="${esc(velmaLink.url)}" target="_blank" rel="noopener" style="color:var(--violet-600);">Open row</a>`:''}</div>${velmaFieldsHtml(velmaLink,4)}</div>`:'';
+  const velmaDetailsHtml=velmaLink?`<div class="velma-details${velmaLink.done?' done':''}"><div class="velma-details-head"><strong>Velma bug ${esc(velmaLink.id)}</strong>${velmaLink.status?`<span class="velma-status">${esc(velmaLink.status)}</span>`:''}${velmaLink.url?`<a href="${esc(velmaLink.url)}" target="_blank" rel="noopener">Open row</a>`:''}</div>${velmaLink.done?`<div class="velma-details-note">${esc(velmaDoneNote)}</div>`:''}${velmaFieldsHtml(velmaLink,4)}</div>`:'';
   const jiraLinkedQt=(jiraInfo?.linkedIssues||[]).filter(x=>String(x.key||'').startsWith('QT-'));
   const jiraLinkedHtml=jiraLinkedQt.length?jiraLinkedQt.slice(0,2).map(x=>`<span style="display:inline-flex;align-items:center;gap:4px;border:1px solid var(--indigo-200);border-radius:999px;padding:1px 7px;background:var(--indigo-50);color:var(--indigo-800);">${esc(x.key)} <span style="color:var(--slate-500);">${esc(x.status||'')}</span></span>`).join(' '):'<span style="color:var(--slate-400);">No QT linked</span>';
   const jiraCommentHtml=jiraInfo?.comments?.length?jiraInfo.comments.slice(-2).reverse().map(c=>`<div style="margin-top:3px;"><strong>${esc(c.author||'Unknown')}:</strong> ${esc(c.body||'').slice(0,140)}</div>`).join(''):'<div style="color:var(--slate-400);margin-top:3px;">No Jira comments</div>';
