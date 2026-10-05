@@ -1,5 +1,6 @@
 require('dotenv').config();
 const prisma = require('./prismaClient');
+const { Prisma } = require('@prisma/client');
 const express = require('express');
 const helmet = require('helmet');
 const session = require('express-session');
@@ -445,21 +446,36 @@ function auditTicketWhereForActor(req) {
 function hashApiToken(rawToken) {
   return crypto.createHash('sha256').update(String(rawToken || '')).digest('hex');
 }
-// Bearer-token auth for the MCP connector, independent of the cookie session
-// used by the browser app - each token maps 1:1 to an existing Kanban user,
-// so a tool call can never do more than that person could already do in the UI.
-async function requireApiToken(req, res, next) {
+// Looks up and validates the bearer token itself, shared by the general
+// (requireApiToken) and scoped (requireScopedApiToken) middleware below so
+// the actual lookup/validation logic can't drift between the two. Returns
+// null for "no/invalid token" and re-throws for a real DB error, so callers
+// can tell the two apart.
+async function loadBearerApiToken(req) {
   const header = String(req.headers.authorization || '');
   const match = header.match(/^Bearer\s+(.+)$/i);
-  if (!match) return res.status(401).json({ error: 'missing_token' });
+  if (!match) return null;
   const tokenHash = hashApiToken(match[1].trim());
+  const token = await prisma.apiToken.findUnique({ where: { tokenHash }, include: { user: true } });
+  if (!token || token.revokedAt || !token.user || token.user.isActive === false) return null;
+  prisma.apiToken.update({ where: { id: token.id }, data: { lastUsedAt: new Date() } }).catch(() => null);
+  return token;
+}
+// Bearer-token auth for the MCP connector and general ticket API, independent
+// of the cookie session used by the browser app - each token maps 1:1 to an
+// existing Kanban user, so a tool call can never do more than that person
+// could already do in the UI.
+//
+// Rejects any token that carries a scope (see ApiToken.scope): a scoped
+// token is meant for exactly one narrow endpoint (requireScopedApiToken
+// below) and must not also work here, or "narrow" would be a lie the moment
+// someone reused this middleware on a new route without thinking about it.
+async function requireApiToken(req, res, next) {
   try {
-    const token = await prisma.apiToken.findUnique({ where: { tokenHash }, include: { user: true } });
-    if (!token || token.revokedAt || !token.user || token.user.isActive === false) {
-      return res.status(401).json({ error: 'invalid_token' });
-    }
+    const token = await loadBearerApiToken(req);
+    if (!token) return res.status(401).json({ error: 'invalid_token' });
+    if (token.scope) return res.status(403).json({ error: 'token_scope_mismatch' });
     req.apiUser = { id: token.user.id, username: token.user.username, role: token.user.role, displayName: token.user.displayName };
-    prisma.apiToken.update({ where: { id: token.id }, data: { lastUsedAt: new Date() } }).catch(() => null);
     return next();
   } catch (error) {
     console.error('API token auth failed:', error.message || error);
@@ -1149,7 +1165,7 @@ async function findTicketRecordByKanbanId(kanbanTicketId) {
     }
   });
 }
-// Server-owned board fields (ticketJira, ticketDuplicateOf) are written here
+// Server-owned board fields (ticketJira, ticketDuplicateOf, ticketVelmaBug) are written here
 // rather than by whatever board snapshot happens to arrive next. Every link,
 // unlink and duplicate marking goes through an endpoint that calls this, so
 // this is the only writer - see the note on safeWriteState for why a client
@@ -1160,7 +1176,9 @@ function writeServerOwnedFieldIntoState(field, externalId, nextValue) {
   try {
     const state = safeReadState();
     const map = (state[field] && typeof state[field] === 'object') ? state[field] : {};
-    if (String(map[id] || '') === String(nextValue || '')) return null;
+    // By content, not String(): a Velma link is an object, and every object
+    // stringifies to the same "[object Object]".
+    if (JSON.stringify(map[id] || null) === JSON.stringify(nextValue || null)) return null;
     if (nextValue) map[id] = nextValue; else delete map[id];
     state[field] = map;
     fs.mkdirSync(path.dirname(DATA_PATH), { recursive: true });
@@ -1577,6 +1595,14 @@ function shiftElapsedMs(fromMs, toMs, agentCode) {
 //                     these are counted and reported separately rather than
 //                     folded into compliance.
 //   jira_hold       - linked to a Jira issue, so the clock is off entirely.
+//   velma_hold      - linked to a row of the Velma bug sheet. Same reasoning
+//                     and same treatment as jira_hold.
+//   contact_hold    - open and in Waiting on Contact, so the clock is frozen
+//                     until the client answers. The board moves slaResetAt
+//                     forward by the length of the wait when the ticket
+//                     leaves the column (setTicketStage in index.html), so
+//                     once it is back with us the count resumes from where it
+//                     stopped and the wait never reaches met/breached either.
 //
 // The last one is a commitment we are no longer the ones able to keep. Once a
 // ticket is handed to engineering, the time it takes is theirs, and the
@@ -1608,6 +1634,8 @@ function ticketSlaSnapshot(ticket, now = Date.now()) {
   // Jira-linked ticket has no SLA position at all, so there is nothing for
   // either branch below to say about it.
   if (String(ticket?.jiraTicketKey || '').trim()) return { ...base, state: 'jira_hold', wallMs };
+  if (String(ticket?.velmaBugId || '').trim()) return { ...base, state: 'velma_hold', wallMs };
+  if (!resolved && normalizeDbStatusForBoard(ticket?.status) === 'wct') return { ...base, state: 'contact_hold', wallMs };
   if (!agent) return { ...base, wallMs };
 
   const shiftMs = shiftElapsedMs(createdMs, Number.isFinite(endMs) ? endMs : now, agent);
@@ -1684,6 +1712,18 @@ function applyRolePermissionsToStateWrite(currentState, nextState, actor) {
       else delete incomingArchived[ticketId];
       refused.push({ field: 'ticketArchived', id: ticketId, claims: ['resolved_confirmed'] });
     });
+
+    // The My Alerts entry Send back writes alongside the meta. Refused for the
+    // same reason: it tells a support agent that CS rejected their resolution.
+    const currentSendBacks = isMap(currentState.ticketSendBackAlerts) ? currentState.ticketSendBackAlerts : {};
+    const incomingSendBacks = isMap(nextState.ticketSendBackAlerts) ? nextState.ticketSendBackAlerts : {};
+    Object.keys(incomingSendBacks).forEach((ticketId) => {
+      const before = currentSendBacks[ticketId];
+      if (Number(incomingSendBacks[ticketId]?.at || 0) === Number(before?.at || 0)) return;
+      if (before) incomingSendBacks[ticketId] = before;
+      else delete incomingSendBacks[ticketId];
+      refused.push({ field: 'ticketSendBackAlerts', id: ticketId, claims: ['sentBack'] });
+    });
   }
 
   {
@@ -1718,6 +1758,59 @@ function applyRolePermissionsToStateWrite(currentState, nextState, actor) {
     console.warn(`[permissions] dropped ${refused.length} CS-only change(s) from a ${effectiveTeam(role, username)} save by ${actor?.username || 'unknown'}: ${refused.slice(0, 5).map(r => `${r.field}/${r.id}`).join(', ')}`);
   }
   return refused;
+}
+
+/* Makes state.ticketNumbers one number per ticket and one ticket per number.
+
+   dbRows, when given, are Postgres's displayNumbers and always win - that
+   sequence is what the MCP tools, the KPI exports and every past reference
+   use. Anything the database does not know yet (the ticket's row is written
+   right after this save, or the database is down) keeps its number only while
+   no other ticket holds it. A ticket left without one gets the next number
+   above everything in use, so it can never repeat one. */
+function assignUniqueTicketNumbers(state, dbRows = null) {
+  const before = (state.ticketNumbers && typeof state.ticketNumbers === 'object') ? state.ticketNumbers : {};
+  const numbers = {};
+  const holder = new Map();
+  const take = (id, n) => { numbers[id] = n; holder.set(n, id); };
+  (Array.isArray(dbRows) ? dbRows : []).forEach((row) => {
+    const id = String(row?.externalId || '').trim();
+    const n = Number(row?.displayNumber || 0);
+    if (id && n > 0 && !holder.has(n)) take(id, n);
+  });
+  Object.entries(before).forEach(([id, num]) => {
+    const n = Number(num || 0);
+    if (!id || numbers[id] || !(n > 0) || holder.has(n)) return;
+    take(id, n);
+  });
+  let next = Math.max(0, ...holder.keys());
+  (Array.isArray(state.allTickets) ? state.allTickets : []).forEach((t) => {
+    const id = String(t?.id || '').trim();
+    if (!id || numbers[id]) return;
+    next += 1;
+    take(id, next);
+  });
+  const changed = Object.keys(numbers).length !== Object.keys(before).length
+    || Object.entries(numbers).some(([id, n]) => Number(before[id] || 0) !== n);
+  state.ticketNumbers = numbers;
+  state.ticketNumberCounter = Math.max(Number(state.ticketNumberCounter || 0), next);
+  return changed;
+}
+
+// After the ticket rows are written, bring the saved board's numbers into line
+// with Postgres's. Re-reads the file after the query rather than trusting a
+// copy from before it, so a save that landed during the await is not undone.
+async function reconcileTicketNumbersWithDatabase() {
+  const rows = await prisma.ticket.findMany({
+    where: { displayNumber: { not: null } },
+    select: { externalId: true, displayNumber: true }
+  });
+  const state = safeReadState();
+  if (assignUniqueTicketNumbers(state, rows)) {
+    fs.mkdirSync(path.dirname(DATA_PATH), { recursive: true });
+    fs.writeFileSync(DATA_PATH, JSON.stringify(state, null, 2), 'utf8');
+  }
+  return state;
 }
 
 async function safeWriteState(state, actor = null) {
@@ -1757,24 +1850,23 @@ async function safeWriteState(state, actor = null) {
   nextState.ticketState = mergedStages;
   nextState.ticketStageTouchedAt = mergedTouched;
 
-  // Ticket numbers must never regress: a browser tab/session that hasn't caught
-  // up with numbers assigned elsewhere would otherwise reassign a lower number
-  // (or a duplicate) to a ticket that already has a higher one recorded.
-  const currentNumbers = (currentState.ticketNumbers && typeof currentState.ticketNumbers === 'object') ? currentState.ticketNumbers : {};
+  // Ticket numbers: a number once given to a ticket is kept, and no number is
+  // ever held by two tickets. Each tab used to make its own numbers up as mail
+  // arrived and the merge kept whichever was higher, so two agents' tabs
+  // numbering two different new tickets at the same moment both landed "#0412"
+  // - two open tickets, two people, one number. The board no longer invents
+  // numbers at all; the server hands them out here (and Postgres, which owns
+  // them, overrides after the ticket rows are written - see
+  // reconcileTicketNumbersWithDatabase).
+  const mergedNumbers = { ...((currentState.ticketNumbers && typeof currentState.ticketNumbers === 'object') ? currentState.ticketNumbers : {}) };
   const incomingNumbers = (nextState.ticketNumbers && typeof nextState.ticketNumbers === 'object') ? nextState.ticketNumbers : {};
-  const mergedNumbers = { ...currentNumbers };
   Object.entries(incomingNumbers).forEach(([ticketId, num]) => {
+    if (Number(mergedNumbers[ticketId] || 0) > 0) return;
     const n = Number(num || 0);
-    if (n > Number(mergedNumbers[ticketId] || 0)) mergedNumbers[ticketId] = n;
+    if (n > 0) mergedNumbers[ticketId] = n;
   });
-  const mergedCounter = Math.max(
-    Number(currentState.ticketNumberCounter || 0),
-    Number(nextState.ticketNumberCounter || 0),
-    ...Object.values(mergedNumbers).map(n => Number(n) || 0),
-    0
-  );
   nextState.ticketNumbers = mergedNumbers;
-  nextState.ticketNumberCounter = mergedCounter;
+  nextState.ticketNumberCounter = Math.max(Number(currentState.ticketNumberCounter || 0), Number(nextState.ticketNumberCounter || 0), 0);
 
   // Union tickets by id so a session that hasn't polled/merged every ticket yet
   // can never make tickets known to other sessions vanish from the saved board.
@@ -1791,6 +1883,7 @@ async function safeWriteState(state, actor = null) {
   const seenIdSet = new Set(Array.isArray(currentState.seenIds) ? currentState.seenIds : []);
   (Array.isArray(nextState.seenIds) ? nextState.seenIds : []).forEach(id => seenIdSet.add(id));
   nextState.seenIds = [...seenIdSet];
+  assignUniqueTicketNumbers(nextState);
 
   const mergeTicketMap = (field) => ({
     ...((currentState[field] && typeof currentState[field] === 'object') ? currentState[field] : {}),
@@ -1850,12 +1943,32 @@ async function safeWriteState(state, actor = null) {
   };
   keepServerOwned('ticketJira');
   keepServerOwned('ticketDuplicateOf');
+  keepServerOwned('ticketVelmaBug');
+
+  // The point each ticket's SLA clock counts from only ever moves forward: a
+  // client reply, the end of a hold, or a reset all push it later, and nothing
+  // pulls it back. So the later of the two wins, per ticket. Taking the
+  // payload whole let any tab saving an older snapshot undo a reset it had not
+  // heard about yet - and the ticket went back to overdue.
+  const currentSlaReset = (currentState.ticketSlaResetAt && typeof currentState.ticketSlaResetAt === 'object') ? currentState.ticketSlaResetAt : {};
+  const mergedSlaReset = { ...currentSlaReset };
+  Object.entries((nextState.ticketSlaResetAt && typeof nextState.ticketSlaResetAt === 'object') ? nextState.ticketSlaResetAt : {})
+    .forEach(([ticketId, at]) => {
+      if (Number(at || 0) > Number(mergedSlaReset[ticketId] || 0)) mergedSlaReset[ticketId] = Number(at);
+    });
+  nextState.ticketSlaResetAt = mergedSlaReset;
 
   nextState.ticketHubspotId = mergeTicketMap('ticketHubspotId');
   nextState.manualCSOverride = mergeTicketMap('manualCSOverride');
   nextState.ticketCreatedBy = mergeTicketMap('ticketCreatedBy');
   nextState.ticketResolutionMeta = mergeTicketMap('ticketResolutionMeta');
   nextState.ticketArchived = mergeTicketMap('ticketArchived');
+  // Merged rather than taken from the payload: entries are only ever added,
+  // and a tab that has not heard about a send-back yet must not erase the
+  // alert before the agent it is for has seen it.
+  nextState.ticketSendBackAlerts = mergeTicketMap('ticketSendBackAlerts');
+  // Same: only ever stamped, so a tab that missed the reopen must not erase it.
+  nextState.ticketReopenedAt = mergeTicketMap('ticketReopenedAt');
 
   const pruneResolvedHiddenTickets = (stateToPrune) => {
     const nowForPrune = Date.now();
@@ -1885,7 +1998,7 @@ async function safeWriteState(state, actor = null) {
   // A stale snapshot (e.g. from a lagging tab) must not blindly overwrite
   // fields it didn't correctly merge - keep the current state as the base and
   // only layer in the fields we've safely reconciled above by id/timestamp.
-  const reconciledFields = ['ticketState', 'ticketStageTouchedAt', 'ticketAssigneeTouchedAt', 'ticketNumbers', 'ticketNumberCounter', 'allTickets', 'seenIds', 'ticketAssignee', 'ticketCSOwner', 'ticketAssignmentMode', 'manualSupportOverride', 'manualCSOverride', 'ticketResolutionMeta', 'ticketArchived', 'ticketCreatedBy', 'ticketJira', 'ticketHubspotId', 'ticketDuplicateOf'];
+  const reconciledFields = ['ticketState', 'ticketStageTouchedAt', 'ticketAssigneeTouchedAt', 'ticketNumbers', 'ticketNumberCounter', 'allTickets', 'seenIds', 'ticketAssignee', 'ticketCSOwner', 'ticketAssignmentMode', 'manualSupportOverride', 'manualCSOverride', 'ticketResolutionMeta', 'ticketArchived', 'ticketSendBackAlerts', 'ticketReopenedAt', 'ticketCreatedBy', 'ticketJira', 'ticketHubspotId', 'ticketDuplicateOf', 'ticketVelmaBug', 'ticketSlaResetAt'];
   const finalState = isStale
     ? { ...currentState, ...Object.fromEntries(reconciledFields.map(key => [key, nextState[key]])), _meta: enrichedMeta }
     : { ...nextState, _meta: enrichedMeta };
@@ -1984,6 +2097,7 @@ async function hydrateStateFromDatabase(baseState = {}) {
   state.ticketJira = (state.ticketJira && typeof state.ticketJira === 'object') ? state.ticketJira : {};
   state.ticketHubspotId = (state.ticketHubspotId && typeof state.ticketHubspotId === 'object') ? state.ticketHubspotId : {};
   state.ticketDuplicateOf = (state.ticketDuplicateOf && typeof state.ticketDuplicateOf === 'object') ? state.ticketDuplicateOf : {};
+  state.ticketVelmaBug = (state.ticketVelmaBug && typeof state.ticketVelmaBug === 'object') ? state.ticketVelmaBug : {};
   state.ticketArchived = (state.ticketArchived && typeof state.ticketArchived === 'object') ? state.ticketArchived : {};
   state.manualCSOverride = (state.manualCSOverride && typeof state.manualCSOverride === 'object') ? state.manualCSOverride : {};
   state.ticketCreatedBy = (state.ticketCreatedBy && typeof state.ticketCreatedBy === 'object') ? state.ticketCreatedBy : {};
@@ -2053,6 +2167,9 @@ async function hydrateStateFromDatabase(baseState = {}) {
     if (ticket.createdAt) state.ticketCreatedAt[externalId] = ticket.createdAt.toISOString();
     if (ticket.jiraTicketKey) state.ticketJira[externalId] = ticket.jiraTicketKey;
     if (ticket.duplicateOfExternalId) state.ticketDuplicateOf[externalId] = ticket.duplicateOfExternalId;
+    if (ticket.velmaBugId && !state.ticketVelmaBug[externalId]) {
+      state.ticketVelmaBug[externalId] = { id: ticket.velmaBugId, ...((ticket.velmaBugRow && typeof ticket.velmaBugRow === 'object') ? ticket.velmaBugRow : {}) };
+    }
     if (ticket.hubspotTicketId) state.ticketHubspotId[externalId] = ticket.hubspotTicketId;
     if (ticket.displayNumber) state.ticketNumbers[externalId] = ticket.displayNumber;
     if (Array.isArray(ticket.comments) && ticket.comments.length) {
@@ -2069,6 +2186,10 @@ async function hydrateStateFromDatabase(baseState = {}) {
 
   state.allTickets = [...ticketsById.values()].sort((a, b) => new Date(b?.email?.receivedDateTime || 0) - new Date(a?.email?.receivedDateTime || 0));
   state.seenIds = [...seenIds];
+  // The database's numbers were laid over the file's above; this drops any
+  // number the file still had on a different ticket, so a board loading now
+  // cannot show two tickets under one number.
+  assignUniqueTicketNumbers(state, tickets.map(t => ({ externalId: String(t.externalId || t.emailMessageId || t.id), displayNumber: t.displayNumber })));
   return state;
 }
 
@@ -2451,6 +2572,10 @@ function mapMessage(msg) {
     subject: msg.subject || '',
     summary: msg.bodyPreview || '',
     sender: msg.from?.emailAddress?.address?.toLowerCase() || '',
+    // The sender's display name, so the board can tell a client signing their
+    // own name from a client naming one of our agents (see
+    // supportAgentNamedInEmail in index.html).
+    senderName: msg.from?.emailAddress?.name || '',
     recipients: [...new Set(recipients)],
     conversationId: msg.conversationId || '',
     internetMessageId: msg.internetMessageId || '',
@@ -3758,6 +3883,31 @@ app.get('/healthz', async (req, res) => {
   }
 });
 
+// The support roster's display names, so the board can recognise an agent
+// named in an email ("Hi Zied, ...") and give them the ticket. Keyed by roster
+// code, matched from the account's username or its email's local part - the
+// same two places the rest of the app reads an agent code from. Names only:
+// nothing here says anything about roles or permissions.
+app.get('/api/support-agents/names', requireAuth, async (req, res) => {
+  try {
+    const users = await prisma.user.findMany({
+      where: { isActive: true },
+      select: { username: true, displayName: true, email: true }
+    });
+    const agents = {};
+    users.forEach((user) => {
+      const candidates = [user.username, String(user.email || '').split('@')[0]]
+        .map(v => String(v || '').trim().toUpperCase());
+      const code = candidates.find(c => SUPPORT_AGENT_CODES.has(c));
+      const displayName = String(user.displayName || '').trim();
+      if (code && displayName && !agents[code]) agents[code] = displayName;
+    });
+    return res.json({ agents });
+  } catch (error) {
+    return res.status(500).json({ error: String(error.message || error) });
+  }
+});
+
 app.get('/auth/me', requireAuth, (req, res) => {
   res.json({ user: { id: req.session.userId, username: req.session.username, role: req.session.role, avatarUrl: avatarUrlForUserId(req.session.userId) } });
 });
@@ -3956,13 +4106,239 @@ app.delete('/api/jira/link/:kanbanTicketId', requireAuth, async (req, res) => {
   try {
     const kanbanTicketId = String(req.params.kanbanTicketId || '').trim();
     if (!kanbanTicketId) return res.status(400).json({ error: 'missing_kanban_ticket_id' });
+    // When the link was made, so the board can resume the SLA clock where the
+    // Jira hold stopped it rather than counting the whole engineering wait
+    // against support the moment the link comes off.
+    let linkedAt = null;
+    try {
+      const record = await findTicketRecordByKanbanId(kanbanTicketId);
+      if (record?.jiraTicketKey) {
+        const linkEvent = await prisma.ticketEvent.findFirst({
+          where: { ticketId: record.id, eventType: 'ticket_jira_linked' },
+          orderBy: { createdAt: 'desc' },
+          select: { createdAt: true }
+        });
+        linkedAt = linkEvent?.createdAt ? linkEvent.createdAt.getTime() : null;
+      }
+    } catch (_) {}
     await setTicketJiraLink({
       kanbanTicketId,
       jiraTicketKey: null,
       userId: req.session.userId || null,
       metadata: { source: 'manual' }
     });
-    return res.json({ ok: true });
+    return res.json({ ok: true, linkedAt });
+  } catch (error) {
+    return res.status(500).json({ error: String(error.message || error) });
+  }
+});
+// ---------------------------------------------------------------------------
+// Velma bugs
+//
+// Bugs on the Velma side are tracked in a Google Sheet rather than in Jira. A
+// ticket waiting on one of them is in the same position as one waiting on a
+// Jira issue: the fix is not support's to make, so linking it puts the SLA on
+// hold (velma_hold in ticketSlaSnapshot, and getSLAStatus on the board).
+//
+// The agent types the bug's ID; the server finds that row in the sheet and
+// keeps a copy of it on the ticket, so the card can show what the bug is
+// without anyone opening the sheet.
+//
+// The sheet is private, so it is read as a Google service account: create a
+// key for one, share the sheet with its email (Viewer is enough), and set
+// GOOGLE_SERVICE_ACCOUNT_JSON to the key file's contents (raw or base64).
+// ---------------------------------------------------------------------------
+const VELMA_BUG_SHEET_ID = String(process.env.VELMA_BUG_SHEET_ID || '1do2eeXmIog5af-HX_VtrVHpLGyY5GxMkn2JX96pL3NI').trim();
+const VELMA_BUG_SHEET_GID = String(process.env.VELMA_BUG_SHEET_GID || '601357266').trim();
+// Header of the column holding the bug ID. Optional: without it the column is
+// guessed from the headers, and failing that any cell in the row may match.
+const VELMA_BUG_ID_COLUMN = String(process.env.VELMA_BUG_ID_COLUMN || '').trim();
+const VELMA_SHEET_CACHE_MS = 60 * 1000;
+
+function googleServiceAccount() {
+  const raw = String(process.env.GOOGLE_SERVICE_ACCOUNT_JSON || '').trim();
+  if (!raw) return null;
+  try {
+    const json = raw.startsWith('{') ? raw : Buffer.from(raw, 'base64').toString('utf8');
+    const key = JSON.parse(json);
+    if (!key.client_email || !key.private_key) return null;
+    return { email: key.client_email, privateKey: String(key.private_key).replace(/\\n/g, '\n') };
+  } catch (_) {
+    return null;
+  }
+}
+
+let googleTokenCache = { token: '', expiresAt: 0 };
+async function googleAccessToken() {
+  if (googleTokenCache.token && googleTokenCache.expiresAt > Date.now() + 60000) return googleTokenCache.token;
+  const account = googleServiceAccount();
+  if (!account) throw new Error('velma_sheet_not_configured: set GOOGLE_SERVICE_ACCOUNT_JSON on the server');
+  const nowSec = Math.floor(Date.now() / 1000);
+  const encode = obj => Buffer.from(JSON.stringify(obj)).toString('base64url');
+  const unsigned = `${encode({ alg: 'RS256', typ: 'JWT' })}.${encode({
+    iss: account.email,
+    scope: 'https://www.googleapis.com/auth/spreadsheets.readonly',
+    aud: 'https://oauth2.googleapis.com/token',
+    iat: nowSec,
+    exp: nowSec + 3600
+  })}`;
+  const signature = crypto.createSign('RSA-SHA256').update(unsigned).sign(account.privateKey).toString('base64url');
+  const res = await fetch('https://oauth2.googleapis.com/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer', assertion: `${unsigned}.${signature}` })
+  });
+  const out = await res.json().catch(() => ({}));
+  if (!res.ok || !out.access_token) throw new Error(`google_auth_failed: ${out.error_description || out.error || res.status}`);
+  googleTokenCache = { token: out.access_token, expiresAt: Date.now() + Number(out.expires_in || 3600) * 1000 };
+  return googleTokenCache.token;
+}
+
+async function googleSheetsGet(pathAndQuery) {
+  const token = await googleAccessToken();
+  const res = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(VELMA_BUG_SHEET_ID)}${pathAndQuery}`, {
+    headers: { Authorization: `Bearer ${token}` }
+  });
+  const out = await res.json().catch(() => ({}));
+  // 403/404 here almost always means the sheet was not shared with the
+  // service account, so say that rather than Google's generic message.
+  if (res.status === 403 || res.status === 404) {
+    throw new Error(`velma_sheet_not_shared: share the sheet with ${googleServiceAccount()?.email || 'the service account'}`);
+  }
+  if (!res.ok) throw new Error(`velma_sheet_read_failed: ${out?.error?.message || res.status}`);
+  return out;
+}
+
+// The whole tab, cached briefly: a link is a handful of lookups a minute at
+// most, and re-reading the sheet for each one buys nothing.
+let velmaSheetCache = { at: 0, rows: null, title: '' };
+async function readVelmaBugSheet() {
+  if (velmaSheetCache.rows && Date.now() - velmaSheetCache.at < VELMA_SHEET_CACHE_MS) return velmaSheetCache;
+  const meta = await googleSheetsGet('?fields=sheets.properties(sheetId,title)');
+  const tab = (meta.sheets || []).map(s => s.properties || {}).find(p => String(p.sheetId) === VELMA_BUG_SHEET_GID);
+  if (!tab) throw new Error(`velma_sheet_tab_missing: no tab with gid ${VELMA_BUG_SHEET_GID}`);
+  const quoted = `'${String(tab.title).replace(/'/g, "''")}'`;
+  const values = await googleSheetsGet(`/values/${encodeURIComponent(quoted)}?majorDimension=ROWS`);
+  velmaSheetCache = { at: Date.now(), rows: Array.isArray(values.values) ? values.values : [], title: tab.title };
+  return velmaSheetCache;
+}
+
+const normalizeVelmaBugId = value => String(value || '').trim().replace(/^#/, '').toUpperCase();
+function velmaColumnLetter(index) {
+  let n = index + 1;
+  let out = '';
+  while (n > 0) { out = String.fromCharCode(65 + ((n - 1) % 26)) + out; n = Math.floor((n - 1) / 26); }
+  return out;
+}
+
+/* Find one bug's row in the sheet's values.
+
+   The sheet's layout is not under our control, so nothing here assumes it.
+   The header row is the first of the top few rows that names an ID column
+   (VELMA_BUG_ID_COLUMN if set, otherwise a header like "ID", "Bug ID" or
+   "Ticket ID"). The bug is the first row below it with the ID in that column.
+   If no ID column can be found, the first row with any cell equal to the ID
+   is taken instead - an exact whole-cell match, so "12" does not find "123". */
+function findVelmaBugRow(rows, bugId) {
+  const wanted = normalizeVelmaBugId(bugId);
+  if (!wanted || !Array.isArray(rows)) return null;
+  const headerName = v => String(v || '').trim().toLowerCase().replace(/[^a-z0-9#]+/g, ' ').trim();
+  const isIdHeader = (h) => {
+    if (VELMA_BUG_ID_COLUMN) return h === headerName(VELMA_BUG_ID_COLUMN);
+    return /^(velma )?(bug |ticket |issue )?(id|n|no|number|#)$/.test(h);
+  };
+  let headerIndex = -1;
+  let idColumn = -1;
+  for (let r = 0; r < Math.min(rows.length, 10) && idColumn < 0; r++) {
+    const col = (rows[r] || []).map(headerName).findIndex(isIdHeader);
+    if (col >= 0) { headerIndex = r; idColumn = col; }
+  }
+  const headers = headerIndex >= 0 ? rows[headerIndex] : [];
+  for (let r = headerIndex + 1; r < rows.length; r++) {
+    const row = rows[r] || [];
+    const hit = idColumn >= 0
+      ? normalizeVelmaBugId(row[idColumn]) === wanted
+      : row.some(cell => normalizeVelmaBugId(cell) === wanted);
+    if (!hit) continue;
+    const fields = {};
+    row.forEach((cell, i) => {
+      const value = String(cell ?? '').trim();
+      if (!value) return;
+      const label = String(headers[i] || '').trim() || `Column ${velmaColumnLetter(i)}`;
+      fields[label] = value.slice(0, 2000);
+    });
+    const rowNumber = r + 1;
+    const lastColumn = velmaColumnLetter(Math.max(row.length, headers.length, 1) - 1);
+    return {
+      row: rowNumber,
+      fields,
+      url: `https://docs.google.com/spreadsheets/d/${VELMA_BUG_SHEET_ID}/edit#gid=${VELMA_BUG_SHEET_GID}&range=A${rowNumber}:${lastColumn}${rowNumber}`
+    };
+  }
+  return null;
+}
+
+async function setTicketVelmaBug({ kanbanTicketId, link, userId = null }) {
+  const externalId = String(kanbanTicketId || '').trim();
+  const ticket = await findTicketRecordByKanbanId(externalId);
+  // State first, even when the ticket has no database row yet - same reason
+  // as setTicketJiraLink.
+  const stateChange = writeServerOwnedFieldIntoState('ticketVelmaBug', externalId, link || null);
+  broadcastServerOwnedFieldChange(stateChange);
+  if (!ticket) return { ticket: null, updated: !!stateChange };
+  const nextId = link ? link.id : null;
+  const { id: _id, ...rowSnapshot } = link || {};
+  const updated = await prisma.ticket.update({
+    where: { id: ticket.id },
+    data: { velmaBugId: nextId, velmaBugRow: link ? rowSnapshot : Prisma.DbNull }
+  });
+  if (String(ticket.velmaBugId || '') !== String(nextId || '')) {
+    await createTicketAuditEvent({
+      ticketId: ticket.id,
+      userId,
+      eventType: nextId ? 'ticket_velma_bug_linked' : 'ticket_velma_bug_unlinked',
+      oldValue: ticket.velmaBugId || null,
+      newValue: nextId,
+      metadata: link ? { row: link.row } : undefined
+    });
+  }
+  return { ticket: updated, updated: true };
+}
+
+app.post('/api/velma-bug/link', requireAuth, async (req, res) => {
+  try {
+    const kanbanTicketId = String(req.body?.kanbanTicketId || '').trim();
+    const bugId = normalizeVelmaBugId(req.body?.bugId);
+    if (!kanbanTicketId || !bugId) return res.status(400).json({ error: 'missing_ticket_or_bug_id' });
+    let sheet;
+    try {
+      sheet = await readVelmaBugSheet();
+    } catch (error) {
+      return res.status(502).json({ error: String(error.message || error) });
+    }
+    const found = findVelmaBugRow(sheet.rows, bugId);
+    if (!found) return res.status(404).json({ error: `No row with ID ${bugId} in the Velma bug sheet (${sheet.title}).` });
+    const link = {
+      id: bugId,
+      ...found,
+      linkedAt: Date.now(),
+      linkedBy: String(req.session.username || '').toUpperCase() || null
+    };
+    await setTicketVelmaBug({ kanbanTicketId, link, userId: req.session.userId || null });
+    return res.json({ ok: true, link });
+  } catch (error) {
+    return res.status(500).json({ error: String(error.message || error) });
+  }
+});
+app.delete('/api/velma-bug/link/:kanbanTicketId', requireAuth, async (req, res) => {
+  try {
+    const kanbanTicketId = String(req.params.kanbanTicketId || '').trim();
+    if (!kanbanTicketId) return res.status(400).json({ error: 'missing_kanban_ticket_id' });
+    // When the link was made, so the board can resume the SLA clock where the
+    // hold stopped it - the same as a Jira unlink.
+    const current = safeReadState().ticketVelmaBug?.[kanbanTicketId] || null;
+    await setTicketVelmaBug({ kanbanTicketId, link: null, userId: req.session.userId || null });
+    return res.json({ ok: true, linkedAt: Number(current?.linkedAt || 0) || null });
   } catch (error) {
     return res.status(500).json({ error: String(error.message || error) });
   }
@@ -4263,6 +4639,7 @@ const KPI_TICKET_SELECT = {
   companyName: true,
   senderEmail: true,
   jiraTicketKey: true,
+  velmaBugId: true,
   duplicateOfExternalId: true,
   createdAt: true,
   updatedAt: true,
@@ -4445,9 +4822,9 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
        the headline card disagree with the table under it. */
     const BACKLOG_KEY_BY_STATE = {
       overdue: 'overdue', at_risk: 'atRisk', on_track: 'onTrack',
-      no_clock: 'noClock', jira_hold: 'jiraHold'
+      no_clock: 'noClock', jira_hold: 'jiraHold', velma_hold: 'velmaHold', contact_hold: 'contactHold'
     };
-    const backlog = { overdue: 0, atRisk: 0, onTrack: 0, noClock: 0, jiraHold: 0 };
+    const backlog = { overdue: 0, atRisk: 0, onTrack: 0, noClock: 0, jiraHold: 0, velmaHold: 0, contactHold: 0 };
     const overdueRows = [];
     let oldestOpenMs = 0;
 
@@ -4582,6 +4959,10 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
         // Reported so they are visibly parked rather than just missing from
         // the other three figures.
         jiraHold: backlog.jiraHold,
+        // Same, for tickets waiting on a Velma bug.
+        velmaHold: backlog.velmaHold,
+        // Open tickets whose clock is frozen while they wait on the client.
+        contactHold: backlog.contactHold,
         oldestOpenHours: hoursFromMs(oldestOpenMs),
         resolvedInRange: resolvedInRange.length,
         met: slaMet,
@@ -7790,7 +8171,15 @@ const LIVE_SYNC_FIELDS = [
   // still looking at it.
   // A reply restarts the SLA clock, and every open board has to agree about
   // when - otherwise one tab shows a badge as breached and another does not.
-  'ticketDuplicateOf', 'ticketSnooze', 'ticketSlaResetAt'
+  'ticketDuplicateOf', 'ticketSnooze', 'ticketSlaResetAt',
+  // A Velma bug link puts the SLA on hold, so every board has to show it.
+  'ticketVelmaBug',
+  // A CS send-back lands in the support agent's My Alerts, so it has to reach
+  // their open board now rather than on their next reload.
+  'ticketSendBackAlerts',
+  // A client reply that brings a closed ticket back has to show as Re-opened
+  // on every board, not just the tab whose mail poll picked it up.
+  'ticketReopenedAt'
 ];
 
 function sseFrame(rev, type, data) {
@@ -7897,7 +8286,21 @@ app.post('/api/state', requireAuth, async (req, res) => {
       data: { provider: 'kanban', syncType: 'board_state_to_ticket_db', status: 'error', message: error.message || String(error) }
     }).catch(() => null);
   }
+  // New rows have just been given their Postgres number - put those on the
+  // board, and send them back to this tab too: its own live patch is ignored
+  // as an echo, so the response is the only way it hears its new tickets'
+  // numbers.
+  try {
+    const reconciled = await reconcileTicketNumbersWithDatabase();
+    if (result.state) {
+      result.state.ticketNumbers = reconciled.ticketNumbers;
+      result.state.ticketNumberCounter = reconciled.ticketNumberCounter;
+    }
+  } catch (error) {
+    console.error('Ticket number reconcile failed:', error?.message || error);
+  }
   const { state: _fullState, ...resultSummary } = result;
+  resultSummary.ticketNumbers = (_fullState && _fullState.ticketNumbers) || undefined;
 
   // Push the delta to every other open board. Note this reflects the MERGED
   // post-write state, not the raw payload - so a stale tab's rejected fields
@@ -11501,8 +11904,511 @@ app.get('/', (req, res) => {
   res.type('html').sendFile(path.join(__dirname, 'index.html'));
 });
 
+// ===========================================================================
+// Churn signals API - bulk, pre-aggregated per-company friction signals for
+// the anti-churn n8n workflow (support-api.md is the full spec). This is a
+// first pass, not the complete spec - see the deviations noted inline and
+// in each response's `meta` block, rather than silently approximating them.
+//
+// Known deviations from support-api.md:
+// - `quinta_property_id` is not stored anywhere in this app (tickets only
+//   carry a free-text `companyName` from HubSpot) and no HubSpot custom
+//   property is wired up to fetch it either. Every result is keyed by
+//   `company_name` instead - exact match, no fuzzy matching, matching the
+//   spec's own warning about name variants.
+// - `recurring_issues[]` clustering is a first-pass heuristic (shared
+//   significant subject words within the same company), not the semantic
+//   clustering the spec describes reusing from an MCP `find_duplicates`
+//   tool - that tool does not exist anywhere in this codebase.
+// - `component` is the ticket's persisted `category` (the broad bucket -
+//   "Integration", "Content / RYA", "Platform / Access", etc.). The more
+//   granular subtype label ("Booking engine broken", "PMS sync failure")
+//   is board-only state kept in a local JSON file, not the database, so
+//   it is not used here. `vendor` has no data source at all and is always
+//   null.
+// - SLA figures use wall-clock hours against SLA_HOURS_BY_PRIORITY, not
+//   the dashboard's shift-time-aware SLA clock (which excludes the
+//   assigned agent's off-hours/weekends) - a materially different, looser
+//   definition. Flagged via `meta.sla_definition` on every response.
+const CHURN_POLICY_SUBJECT_PATTERNS = [
+  /acceso\s+quick\s?text/i,
+  /quinta\s+access/i,
+  /forgot\s+your\s+password/i,
+  /reactivar\s+usuario/i,
+  /no\s+puedo\s+acceder/i
+];
+function isChurnPolicyTicket(ticket) {
+  return CHURN_POLICY_SUBJECT_PATTERNS.some(re => re.test(String(ticket.subject || '')));
+}
+
+const CHURN_SIGNALS_SELECT = {
+  externalId: true,
+  displayNumber: true,
+  subject: true,
+  status: true,
+  priority: true,
+  category: true,
+  companyName: true,
+  jiraTicketKey: true,
+  duplicateOfExternalId: true,
+  createdAt: true,
+  resolvedAt: true
+};
+
+// Replays *_changed events for one field to answer "what was this field's
+// value as of a given moment" - the ticket's CURRENT column only tells you
+// the LATEST value, which leaks present-day knowledge into a backtest
+// reconstructing what the model could have known at an earlier date
+// (support-api.md §5). Used for status, priority, and category alike -
+// point-in-time correctness for status alone is not enough when priority/
+// category (used for open_critical, SLA targets, component tagging, and
+// policy-ticket detection) are read from the same present-day columns.
+//
+// If a ticket has zero events for this field, its current value is assumed
+// to have held since creation - true unless a status/priority/category
+// write ever succeeded while its paired (fire-and-forget) audit-event
+// insert failed, a gap this app's event logging does not fully close.
+function buildFieldHistory(ticket, eventsByTicket, eventKey, currentValue) {
+  const events = (eventsByTicket.get(ticket.externalId)?.[eventKey] || [])
+    .slice()
+    .sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt) || a.id - b.id);
+  const history = [];
+  if (events.length) {
+    history.push({ atMs: new Date(ticket.createdAt).getTime(), value: events[0].oldValue });
+    for (const ev of events) {
+      history.push({ atMs: new Date(ev.createdAt).getTime(), value: ev.newValue });
+    }
+  } else {
+    history.push({ atMs: new Date(ticket.createdAt).getTime(), value: currentValue });
+  }
+  return history;
+}
+function valueAsOf(history, asOfMs) {
+  let value = history[0].value;
+  for (const entry of history) {
+    if (entry.atMs > asOfMs) break;
+    value = entry.value;
+  }
+  return value;
+}
+// The event timestamp of the resolution that was CURRENT as of asOfMs - not
+// necessarily the ticket's present resolvedAt, which reflects the latest of
+// possibly several resolve/reopen cycles.
+function resolvedAtAsOf(statusHistory, asOfMs) {
+  let resolvedAtMs = null;
+  for (const entry of statusHistory) {
+    if (entry.atMs > asOfMs) break;
+    resolvedAtMs = normalizeDbStatusForBoard(entry.value) === 'res' ? entry.atMs : null;
+  }
+  return resolvedAtMs;
+}
+
+function normalizeSubjectWords(subject) {
+  const STOPWORDS = new Set(['the', 'a', 'an', 'and', 'or', 'of', 'to', 'for', 'on', 'in', 'is', 'are', 'with', 're', 'fwd', 'issue', 'problem', 'ticket', 'help', 'support', 'please', 'hello', 'hi']);
+  return String(subject || '')
+    .toLowerCase()
+    .replace(/^(re|fwd|fw)\s*:\s*/gi, '')
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .split(/\s+/)
+    .filter(w => w.length > 2 && !STOPWORDS.has(w));
+}
+// First-pass "same underlying issue" heuristic, scoped to one company: two
+// tickets cluster together when at least half of their significant subject
+// words overlap. Real semantic clustering is future work - see the
+// deviation note at the top of this section.
+function clusterRecurringIssues(tickets) {
+  const clusters = [];
+  for (const ticket of tickets) {
+    const words = new Set(normalizeSubjectWords(ticket.subject));
+    if (!words.size) continue;
+    let best = null;
+    let bestScore = 0;
+    for (const cluster of clusters) {
+      const overlap = [...words].filter(w => cluster.words.has(w)).length;
+      const score = overlap / Math.max(words.size, cluster.words.size);
+      if (score > bestScore) { bestScore = score; best = cluster; }
+    }
+    if (best && bestScore >= 0.5) {
+      best.tickets.push(ticket);
+      words.forEach(w => best.words.add(w));
+    } else {
+      clusters.push({ tickets: [ticket], words });
+    }
+  }
+  return clusters.filter(c => c.tickets.length >= 2);
+}
+function clusterIdFor(words, usedIds) {
+  const slug = words.slice(0, 3).join('-').slice(0, 60) || 'issue';
+  let id = slug;
+  let n = 2;
+  while (usedIds.has(id)) { id = `${slug}-${n++}`; }
+  usedIds.add(id);
+  return id;
+}
+
+function churnTicketRef(t) {
+  return t.jiraTicketKey || (t.displayNumber ? `#${String(t.displayNumber).padStart(4, '0')}` : t.externalId);
+}
+
+// Core per-company aggregation. `tickets` must already be scoped to this
+// company, non-Spam, and cover everything needed for the requested windows
+// plus the full backlog of still-open tickets regardless of age.
+function computeCompanySignals(companyName, tickets, eventsByTicket, asOfMs, windows) {
+  const nonDuplicate = tickets.filter(t => !t.duplicateOfExternalId);
+  if (!nonDuplicate.length) {
+    return { quinta_property_id: null, company_name: companyName, data_available: false, reason: 'NO_TICKETS_EVER' };
+  }
+
+  const withHistory = nonDuplicate.map(t => {
+    const events = eventsByTicket.get(t.externalId) || {};
+    const statusHistory = buildFieldHistory(t, eventsByTicket, 'ticket_status_changed', t.status);
+    const priorityHistory = buildFieldHistory(t, eventsByTicket, 'ticket_priority_changed', t.priority);
+    const categoryHistory = buildFieldHistory(t, eventsByTicket, 'ticket_category_changed', t.category);
+    const statusNow = valueAsOf(statusHistory, asOfMs);
+    const stageNow = normalizeDbStatusForBoard(statusNow);
+    const resolvedAtMs = resolvedAtAsOf(statusHistory, asOfMs);
+    const priorityAsOf = valueAsOf(priorityHistory, asOfMs);
+    const categoryAsOf = valueAsOf(categoryHistory, asOfMs);
+    return {
+      t, statusHistory, stageAsOf: stageNow, resolvedAtMsAsOf: resolvedAtMs,
+      priorityAsOf, categoryAsOf, createdAtMs: new Date(t.createdAt).getTime()
+    };
+  }).filter(x => x.createdAtMs <= asOfMs); // did not exist yet as of asOf
+
+  const openAsOf = withHistory.filter(x => x.stageAsOf !== 'res');
+  // This app has four flat priorities (High/Medium/Normal/Low), not the
+  // three-tier critical/high/medium the spec's example implies. High maps to
+  // "critical" and Medium to "high" here - the closest honest fit, not an
+  // attempt to invent a tier this app doesn't track.
+  const openCritical = openAsOf.filter(x => x.priorityAsOf === 'High');
+  const oldestOpenDays = openAsOf.length
+    ? Math.max(...openAsOf.map(x => (asOfMs - x.createdAtMs) / 86400000))
+    : 0;
+
+  const maxWindow = Math.max(...windows, 0);
+  const dayMs = 86400000;
+  const windowCounts = {};
+  for (const w of windows) {
+    windowCounts[`tickets_${w}d`] = withHistory.filter(x => x.createdAtMs > asOfMs - w * dayMs).length;
+  }
+  const primaryWindow = windows[0] || 30;
+  const prevWindowCount = withHistory.filter(x =>
+    x.createdAtMs > asOfMs - 2 * primaryWindow * dayMs && x.createdAtMs <= asOfMs - primaryWindow * dayMs
+  ).length;
+
+  function avgResolutionHours(sinceMs, untilMs) {
+    const resolved = withHistory.filter(x => x.resolvedAtMsAsOf && x.resolvedAtMsAsOf > sinceMs && x.resolvedAtMsAsOf <= untilMs);
+    if (!resolved.length) return null;
+    const hours = resolved.map(x => (x.resolvedAtMsAsOf - x.createdAtMs) / 3600000);
+    return Math.round((hours.reduce((a, b) => a + b, 0) / hours.length) * 10) / 10;
+  }
+  const avgResolutionHours30d = avgResolutionHours(asOfMs - primaryWindow * dayMs, asOfMs);
+  const avgResolutionHoursPrev30d = avgResolutionHours(asOfMs - 2 * primaryWindow * dayMs, asOfMs - primaryWindow * dayMs);
+
+  // Reopens: a ticket_status_changed event moving OUT of Resolved, replayed
+  // only up to asOfMs so a backtest can't see a reopen that hadn't happened
+  // yet at that point in time.
+  let reopens90d = 0;
+  let resolutions90d = 0;
+  for (const x of withHistory) {
+    for (const entry of x.statusHistory) {
+      if (entry.atMs > asOfMs || entry.atMs <= asOfMs - 90 * dayMs) continue;
+      if (normalizeDbStatusForBoard(entry.value) === 'res') resolutions90d++;
+    }
+    for (let i = 1; i < x.statusHistory.length; i++) {
+      const prev = x.statusHistory[i - 1];
+      const cur = x.statusHistory[i];
+      if (cur.atMs > asOfMs || cur.atMs <= asOfMs - 90 * dayMs) continue;
+      if (normalizeDbStatusForBoard(prev.value) === 'res' && normalizeDbStatusForBoard(cur.value) !== 'res') reopens90d++;
+    }
+  }
+  const reopenRate90d = resolutions90d ? Math.round((reopens90d / resolutions90d) * 100) / 100 : 0;
+
+  const window90 = withHistory.filter(x => x.createdAtMs > asOfMs - 90 * dayMs);
+  const escalations90d = window90.filter(x => x.categoryAsOf === 'IT Escalation').length;
+  const policyTickets90d = window90.filter(x => isChurnPolicyTicket(x.t)).length;
+
+  // SLA: wall-clock hours vs SLA_HOURS_BY_PRIORITY - see the deviation note
+  // at the top of this section for how this differs from the dashboard's
+  // own shift-time-aware SLA clock.
+  const resolvedInWindow90 = window90.filter(x => x.resolvedAtMsAsOf);
+  let slaBreaches90d = 0;
+  for (const x of resolvedInWindow90) {
+    const targetHours = slaTargetHoursFor(x.priorityAsOf);
+    const hoursToResolve = (x.resolvedAtMsAsOf - x.createdAtMs) / 3600000;
+    if (hoursToResolve > targetHours) slaBreaches90d++;
+  }
+  const slaBreachRate90d = resolvedInWindow90.length ? Math.round((slaBreaches90d / resolvedInWindow90.length) * 100) / 100 : 0;
+
+  const byExternalId = new Map(withHistory.map(x => [x.t.externalId, x]));
+  const recurringClusters = clusterRecurringIssues(window90.map(x => x.t));
+  const usedClusterIds = new Set();
+  const recurringIssues = recurringClusters.map(cluster => {
+    const clusterTickets = cluster.tickets;
+    const clusterEntries = clusterTickets.map(t => byExternalId.get(t.externalId));
+    const dates = clusterTickets.map(t => new Date(t.createdAt).getTime());
+    const hasHigh = clusterEntries.some(x => x.priorityAsOf === 'High');
+    const componentCounts = {};
+    clusterEntries.forEach(x => { const c = x.categoryAsOf || 'Other'; componentCounts[c] = (componentCounts[c] || 0) + 1; });
+    const component = Object.entries(componentCounts).sort((a, b) => b[1] - a[1])[0]?.[0] || null;
+    const stillOpen = clusterEntries.some(x => x.stageAsOf !== 'res');
+    return {
+      cluster_id: clusterIdFor([...cluster.words], usedClusterIds),
+      label: clusterTickets[0].subject || '(no subject)',
+      occurrences_90d: clusterTickets.length,
+      first_seen: new Date(Math.min(...dates)).toISOString().slice(0, 10),
+      last_seen: new Date(Math.max(...dates)).toISOString().slice(0, 10),
+      severity: hasHigh ? 'high' : 'medium',
+      // Heuristic: Integration/IT Escalation categories are the
+      // booking-engine/PMS/payment/channel-facing ones - not a real
+      // revenue-impact assessment, which this app has no data for.
+      revenue_impacting: component === 'Integration' || component === 'IT Escalation',
+      component,
+      vendor: null,
+      currently_open: stillOpen,
+      ticket_refs: clusterTickets.map(churnTicketRef)
+    };
+  }).sort((a, b) => b.occurrences_90d - a.occurrences_90d);
+
+  const criticalOpen = openCritical
+    .sort((a, b) => a.createdAtMs - b.createdAtMs)
+    .slice(0, 25)
+    .map(x => {
+      const targetHours = slaTargetHoursFor(x.priorityAsOf);
+      const ageHours = (asOfMs - x.createdAtMs) / 3600000;
+      return {
+        ticket_ref: churnTicketRef(x.t),
+        opened_at: new Date(x.createdAtMs).toISOString(),
+        age_days: Math.round((ageHours / 24) * 10) / 10,
+        severity: 'critical',
+        revenue_impacting: x.categoryAsOf === 'Integration' || x.categoryAsOf === 'IT Escalation',
+        component: x.categoryAsOf || null,
+        sla_breached: ageHours > targetHours
+      };
+    });
+
+  return {
+    quinta_property_id: null,
+    company_name: companyName,
+    data_available: true,
+    summary: {
+      open_tickets: openAsOf.length,
+      open_critical: openCritical.length,
+      // See the mapping note above openCritical: High -> "critical", Medium
+      // -> "high" - this app has no distinct critical tier to report instead.
+      open_high: openAsOf.filter(x => x.priorityAsOf === 'Medium').length,
+      oldest_unresolved_days: Math.round(oldestOpenDays * 10) / 10,
+      ...windowCounts,
+      tickets_prev_30d: prevWindowCount,
+      avg_resolution_hours_30d: avgResolutionHours30d,
+      avg_resolution_hours_prev_30d: avgResolutionHoursPrev30d,
+      reopen_rate_90d: reopenRate90d,
+      escalations_90d: escalations90d,
+      policy_tickets_90d: policyTickets90d
+    },
+    recurring_issues: recurringIssues,
+    critical_open: criticalOpen,
+    sla: { breaches_90d: slaBreaches90d, breach_rate_90d: slaBreachRate90d }
+  };
+}
+
+// Only a token whose ApiToken.scope is exactly this value may pass - a
+// normal (scope: null) token, valid everywhere requireApiToken is used, is
+// deliberately refused here too. This is what makes a service-account token
+// handed to an external automation genuinely narrow: it authenticates
+// against this one endpoint and nothing else the token mechanism protects.
+function requireScopedApiToken(scope) {
+  return async (req, res, next) => {
+    try {
+      const token = await loadBearerApiToken(req);
+      if (!token) return res.status(401).json({ error: { code: 'missing_token', message: 'Missing or invalid bearer token.', request_id: req.churnRequestId } });
+      if (token.scope !== scope) return res.status(403).json({ error: { code: 'forbidden', message: 'Token is not scoped for this endpoint.', request_id: req.churnRequestId } });
+      req.apiUser = { id: token.user.id, username: token.user.username, role: token.user.role, displayName: token.user.displayName };
+      return next();
+    } catch (error) {
+      console.error(`Scoped API token auth failed [${req.churnRequestId}]:`, error.message || error);
+      return res.status(500).json({ error: { code: 'auth_failed', message: 'Unexpected server error.', request_id: req.churnRequestId } });
+    }
+  };
+}
+const requireChurnApiAccess = requireScopedApiToken('churn_signals');
+const churnSignalsLimiter = rateLimit({ windowMs: 60 * 1000, max: 20, standardHeaders: true, legacyHeaders: false });
+app.use('/api/churn-signals', (req, res, next) => { req.churnRequestId = crypto.randomUUID(); res.set('X-Request-Id', req.churnRequestId); next(); });
+
+async function runChurnSignalsQuery(req, res) {
+  const requestId = req.churnRequestId;
+  try {
+    const body = req.method === 'POST' ? (req.body || {}) : {};
+    const singleCompany = req.params.companyName ? decodeURIComponent(req.params.companyName) : null;
+    let companyNames = singleCompany ? [singleCompany] : body.company_names;
+    if (companyNames !== undefined && (!Array.isArray(companyNames) || companyNames.some(c => typeof c !== 'string'))) {
+      return res.status(400).json({ error: { code: 'invalid_request', message: 'company_names must be an array of strings.', request_id: requestId } });
+    }
+    if (companyNames && companyNames.length > 1000) {
+      return res.status(400).json({ error: { code: 'invalid_request', message: 'company_names exceeds the 1000-item cap.', request_id: requestId } });
+    }
+    const windows = Array.isArray(body.windows) && body.windows.every(w => Number.isFinite(w) && w > 0) ? body.windows : [30, 60, 90];
+
+    let asOfMs;
+    if (body.as_of) {
+      const parsed = new Date(`${body.as_of}T23:59:59.999Z`);
+      if (Number.isNaN(parsed.getTime())) {
+        return res.status(400).json({ error: { code: 'invalid_request', message: 'as_of must be a valid YYYY-MM-DD date.', request_id: requestId } });
+      }
+      asOfMs = parsed.getTime();
+    } else {
+      asOfMs = Date.now();
+    }
+    const asOfDate = new Date(asOfMs).toISOString().slice(0, 10);
+    const maxWindowDays = Math.max(...windows, 90) * 2;
+
+    if (!companyNames) {
+      const distinct = await prisma.ticket.findMany({
+        where: { NOT: [{ category: { equals: 'Spam', mode: 'insensitive' } }], companyName: { not: null } },
+        select: { companyName: true },
+        distinct: ['companyName']
+      });
+      companyNames = distinct.map(d => d.companyName).filter(Boolean);
+      if (companyNames.length > 1000) companyNames = companyNames.slice(0, 1000);
+    }
+
+    const CHURN_EVENT_TYPES = ['ticket_status_changed', 'ticket_priority_changed', 'ticket_category_changed'];
+
+    async function computeOneCompany(companyName) {
+      try {
+        const tickets = await prisma.ticket.findMany({
+          where: {
+            companyName,
+            NOT: [{ category: { equals: 'Spam', mode: 'insensitive' } }],
+            createdAt: { lte: new Date(asOfMs) },
+            // Bounds the query while still catching every ticket that could
+            // have been open AT as_of: created within the window (for
+            // volume/trend stats), never resolved (obviously still
+            // relevant), or resolved but only AFTER as_of - `status`/
+            // `resolvedAt` here are the ticket's CURRENT values, so a ticket
+            // resolved after as_of can still have been open at that earlier
+            // point; the event replay below determines its actual
+            // point-in-time state. A ticket resolved BEFORE as_of with an
+            // old createdAt correctly falls outside every branch - it was
+            // already resolved and irrelevant to backlog/open stats at
+            // as_of, and too old to count toward window volume.
+            OR: [
+              { createdAt: { gt: new Date(asOfMs - maxWindowDays * 86400000) } },
+              { resolvedAt: null },
+              { resolvedAt: { gt: new Date(asOfMs) } }
+            ]
+          },
+          select: CHURN_SIGNALS_SELECT,
+          orderBy: [{ id: 'asc' }]
+        });
+        const externalIds = tickets.map(t => t.externalId).filter(Boolean);
+        const events = externalIds.length
+          ? await prisma.ticketEvent.findMany({
+              where: { eventType: { in: CHURN_EVENT_TYPES }, ticket: { externalId: { in: externalIds } } },
+              select: { id: true, eventType: true, createdAt: true, oldValue: true, newValue: true, ticket: { select: { externalId: true } } },
+              orderBy: [{ createdAt: 'asc' }, { id: 'asc' }]
+            })
+          : [];
+        // Map<externalId, Map<eventType, event[]>> - buildFieldHistory reads
+        // eventsByTicket.get(id)?.[eventType], one replay per tracked field.
+        const eventsByTicket = new Map();
+        for (const ev of events) {
+          const key = ev.ticket.externalId;
+          if (!eventsByTicket.has(key)) eventsByTicket.set(key, {});
+          const byType = eventsByTicket.get(key);
+          if (!byType[ev.eventType]) byType[ev.eventType] = [];
+          byType[ev.eventType].push(ev);
+        }
+        return { ok: true, result: computeCompanySignals(companyName, tickets, eventsByTicket, asOfMs, windows) };
+      } catch (error) {
+        console.error(`Churn signals failed for company "${companyName}" [${requestId}]:`, error.message || error);
+        return { ok: false, result: { quinta_property_id: null, company_name: companyName, data_available: false, reason: 'SOURCE_ERROR' } };
+      }
+    }
+
+    // Bounded concurrency: enough to matter for a large portfolio request
+    // (spec asks for <30s end to end) without opening hundreds of
+    // simultaneous connections against the Postgres pool.
+    const CONCURRENCY = 10;
+    const results = new Array(companyNames.length);
+    let anyFailure = false;
+    let cursor = 0;
+    async function worker() {
+      while (cursor < companyNames.length) {
+        const i = cursor++;
+        const { ok, result } = await computeOneCompany(companyNames[i]);
+        if (!ok) anyFailure = true;
+        results[i] = result;
+      }
+    }
+    await Promise.all(Array.from({ length: Math.min(CONCURRENCY, companyNames.length) }, worker));
+
+    const responseBody = {
+      as_of: asOfDate,
+      generated_at: new Date().toISOString(),
+      results,
+      meta: {
+        requested: companyNames.length,
+        returned: results.length,
+        identity_note: 'quinta_property_id is not available in this app yet; results are keyed by company_name (exact match) instead.',
+        sla_definition: 'wall_clock_hours_vs_priority_target - not the dashboard\'s shift-time-aware SLA clock',
+        point_in_time_reconstruction: 'event_replay'
+      }
+    };
+    return res.status(anyFailure ? 207 : 200).json(responseBody);
+  } catch (error) {
+    console.error(`Churn signals request failed [${requestId}]:`, error.message || error);
+    return res.status(500).json({ error: { code: 'internal_error', message: 'Unexpected server error.', request_id: requestId } });
+  }
+}
+
+// Rate limit BEFORE auth: a missing/invalid/wrong-scope token would
+// otherwise never reach the limiter, leaving token-guessing traffic
+// unthrottled (each attempt still costs a DB round trip in
+// loadBearerApiToken). Impractical to actually brute-force given the
+// token's entropy, but this is free defense-in-depth.
+app.post('/api/churn-signals/bulk', churnSignalsLimiter, requireChurnApiAccess, runChurnSignalsQuery);
+app.get('/api/churn-signals/:companyName', churnSignalsLimiter, requireChurnApiAccess, runChurnSignalsQuery);
+
+/* One-off: restart the SLA clock of every ticket sitting in Waiting on Contact.
+
+   The clock is frozen in that column now, but these tickets went in with time
+   already on it - some of it from before the hold existed - and would come
+   out overdue the moment the client answered. Moving their restart point to
+   now gives each one a full SLA from here. Only that column: every other
+   ticket keeps its clock as it is.
+
+   Runs once per board: the marker file sits next to the board state, so a
+   restart does not reset them again. The state-file write is synchronous, so
+   no board save can land in between the read and the write. The database
+   copy (what the KPI dashboard reads) follows. */
+const SLA_WCT_RESET_MARKER = path.join(path.dirname(DATA_PATH), 'sla-reset-waiting-on-contact.json');
+async function resetWaitingOnContactSlaOnce() {
+  if (fs.existsSync(SLA_WCT_RESET_MARKER)) return;
+  const now = Date.now();
+  const state = safeReadState();
+  const stages = (state.ticketState && typeof state.ticketState === 'object') ? state.ticketState : {};
+  const ids = Object.keys(stages).filter(id => stages[id] === 'wct');
+  if (ids.length) {
+    state.ticketSlaResetAt = (state.ticketSlaResetAt && typeof state.ticketSlaResetAt === 'object') ? state.ticketSlaResetAt : {};
+    ids.forEach((id) => { state.ticketSlaResetAt[id] = now; });
+    fs.writeFileSync(DATA_PATH, JSON.stringify(state, null, 2), 'utf8');
+  }
+  // Recorded before the database is touched: the board state is what the
+  // badges and every later save come from, so that is the part that must not
+  // run twice.
+  fs.writeFileSync(SLA_WCT_RESET_MARKER, JSON.stringify({ at: new Date(now).toISOString(), tickets: ids }, null, 2), 'utf8');
+  if (ids.length) {
+    await prisma.ticket.updateMany({ where: { externalId: { in: ids } }, data: { slaResetAt: new Date(now) } });
+  }
+  console.log(`SLA reset for ${ids.length} ticket(s) in Waiting on Contact.`);
+}
+
 const server = app.listen(PORT, () => {
   console.log(`Support Kanban secure web app on http://localhost:${PORT}`);
+  resetWaitingOnContactSlaOnce().catch((error) => {
+    console.error('Waiting on Contact SLA reset failed:', error?.message || error);
+  });
   if (SESSION_SECRET === 'change-this-session-secret') {
     console.log('WARNING: Set SESSION_SECRET before production use.');
   }
