@@ -6321,7 +6321,7 @@ body > header::after {
 .spam-view-btn:hover,
 .jira-chip:hover {
   transform: none;
-  background: var(--primary-soft);
+  background-color: var(--primary-soft);
   border-color: color-mix(in srgb, var(--primary) 35%, var(--border));
   color: var(--primary-dark);
 }
@@ -6351,9 +6351,21 @@ body > header::after {
 .chip[data-pf="Low"]    { --prio: #10b981; }
 .chip.active[data-pf]::before { background: #fff; }
 
-/* Selects drop the platform arrow for one that matches the rest of the row. */
+/* Selects drop the platform arrow for one that matches the rest of the row.
+
+   The icons live in variables and every state is listed: the older hover rule
+   for these controls sets the background shorthand, which resets the image
+   and the repeat with it - on hover the arrow either vanished (light) or, once
+   the dark theme put the image back, tiled across the whole control. */
+:root { --select-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23737a9c' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E"); --search-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23737a9c' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='11' cy='11' r='7'/%3E%3Cpath d='m20 20-3.5-3.5'/%3E%3C/svg%3E"); }
+[data-theme="dark"] { --select-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%239da2c4' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E"); --search-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%239da2c4' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='11' cy='11' r='7'/%3E%3Cpath d='m20 20-3.5-3.5'/%3E%3C/svg%3E"); }
+
 select.filter-sel,
+select.filter-sel:hover,
+select.filter-sel:focus,
 select.cat-select,
+select.cat-select:hover,
+select.cat-select:focus,
 .modal select,
 select.form-input,
 .qt-detect-select,
@@ -6361,7 +6373,7 @@ select.form-input,
   -webkit-appearance: none;
   appearance: none;
   padding-right: 28px;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23737a9c' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  background-image: var(--select-chevron);
   background-repeat: no-repeat;
   background-position: right 9px center;
   background-size: 13px;
@@ -6374,7 +6386,12 @@ input.filter-sel { cursor: text; }
   width: 270px;
   max-width: 100%;
   padding-left: 32px;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23737a9c' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='11' cy='11' r='7'/%3E%3Cpath d='m20 20-3.5-3.5'/%3E%3C/svg%3E");
+}
+
+input.ticket-number-filter,
+input.ticket-number-filter:hover,
+input.ticket-number-filter:focus {
+  background-image: var(--search-icon);
   background-repeat: no-repeat;
   background-position: 11px center;
   background-size: 14px;
@@ -7388,12 +7405,6 @@ th {
 [data-theme="dark"] .card-tagged-badge { color: color-mix(in srgb, var(--agent-accent) 40%, #fff); background: color-mix(in srgb, var(--agent-accent) 20%, var(--surface)); }
 [data-theme="dark"] .modal { border-color: var(--border); }
 [data-theme="dark"] .sort-toggle .sort-btn.active { background: var(--surface-soft); box-shadow: 0 0 0 1px var(--border-strong); }
-[data-theme="dark"] select.filter-sel,
-[data-theme="dark"] select.cat-select,
-[data-theme="dark"] .modal select,
-[data-theme="dark"] select.form-input {
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%239da2c4' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
-}
 
 /* The header is dark in both themes, so its status badge cannot borrow theme
    tokens - in the dark theme those resolve to deep greens and the word LIVE
