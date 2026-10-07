@@ -11121,6 +11121,9 @@ function setAdminOnlyNavigationVisible(isAdmin){
   document.getElementById('insights-view-btn')?.classList.toggle('hidden', !isAdmin);
 }
 function syncRoleRestrictedControls(){
+  // The Velma sheet connection is set up once, by an admin, for everyone.
+  const googleBtn=document.getElementById('google-account-btn');
+  if(googleBtn)googleBtn.style.display=currentUserIsAdmin()?'':'none';
   const canViewAll=currentUserCanViewAllTickets();
   document.querySelectorAll('.agent-filter-control').forEach(el=>el.classList.toggle('hidden', !canViewAll));
   /* With the Team filter hidden, the filter is opened right up rather than
@@ -11480,12 +11483,9 @@ function openVelmaModal(id){
   const openBtn=document.getElementById('velma-open-link');
   openBtn.style.display=link?.url?'':'none';
   openBtn.onclick=()=>{if(link?.url)window.open(link.url,'_blank');};
-  // Only take room in the modal when there is something to do about access:
-  // when the sheet can already be read, the agent needs the ID field, not a
-  // reminder of whose account is reading it.
-  const googleEl=document.getElementById('velma-google');
-  googleEl.style.display='none';
-  fetchGoogleAccessStatus().then(st=>{if(velmaTicketId===id&&!googleCanReadSheet(st))renderGoogleAccessBlock(googleEl,{compact:true});});
+  // The sheet connection is the board's, not the agent's: the modal is the ID
+  // field and nothing else. Access problems only surface if a lookup fails.
+  document.getElementById('velma-google').style.display='none';
   document.getElementById('velma-modal').classList.add('open');
   setTimeout(()=>{input.focus();if(link)input.select();},100);
 }
@@ -11506,11 +11506,12 @@ document.getElementById('velma-save').addEventListener('click',async()=>{
     const error=String(out?.error||'unknown error');
     // Access problems are answered in the modal, with the way out next to
     // them; anything else (no such ID, the sheet API down) is a toast.
+    // Agents never sign in to Google here - the board holds one connection
+    // for everyone. If it cannot read the sheet, that is for an admin to fix.
     if(/^velma_sheet_(not_configured|not_shared)|^google_(refresh|auth)_failed/.test(error)){
-      await fetchGoogleAccessStatus();
-      // Not configured at all is what the block itself explains; repeating
-      // the raw message above it said the same thing twice.
-      renderGoogleAccessBlock(document.getElementById('velma-google'),{compact:true,error:/not_configured/.test(error)?'':error.replace(/^[a-z_]+:s*/,'')});
+      showToast(currentUserIsAdmin()
+        ?'The board cannot read the Velma bug sheet - reconnect it in Account > Google account'
+        :'The board cannot read the Velma bug sheet right now - let an admin know','warn');
       return;
     }
     showToast(`Velma bug link failed: ${error}`);
@@ -11581,11 +11582,6 @@ function startGoogleSignIn(){
 function rerenderGoogleBlocks(){
   const body=document.getElementById('google-account-body');
   if(document.getElementById('google-account-modal')?.classList.contains('open'))renderGoogleAccessBlock(body);
-  const velma=document.getElementById('velma-google');
-  if(document.getElementById('velma-modal')?.classList.contains('open')){
-    if(googleCanReadSheet(googleAccessStatus))velma.style.display='none';
-    else renderGoogleAccessBlock(velma,{compact:true});
-  }
 }
 let lastGoogleSignInAt=0;
 async function onGoogleSignInResult(msg){
@@ -11626,7 +11622,7 @@ function googleSetupFormHtml(st){
       <input class="form-input" id="google-client-secret" type="password" placeholder="Client secret" autocomplete="off" spellcheck="false">
       <button class="btn-primary" type="button" data-google-save-client>Save and turn on</button>
     </div>
-    <span class="google-access-hint">Stored encrypted on the board. After this, anyone can click "Sign in with Google" here.</span>
+    <span class="google-access-hint">Stored encrypted on the board. Then sign in once with an account that can open the sheet - every agent uses that connection.</span>
   </div>`;
 }
 document.addEventListener('click',async e=>{
