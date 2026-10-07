@@ -4356,8 +4356,8 @@ const GOOGLE_OAUTH_REDIRECT_URI = String(process.env.GOOGLE_OAUTH_REDIRECT_URI |
 const GOOGLE_PROVIDER_PREFIX = 'google:';
 const googleProviderKey = userId => `${GOOGLE_PROVIDER_PREFIX}${Number(userId)}`;
 
-function googleServiceAccount() {
-  const raw = String(process.env.GOOGLE_SERVICE_ACCOUNT_JSON || '').trim();
+function parseGoogleServiceAccountKey(raw) {
+  raw = String(raw || '').trim();
   if (!raw) return null;
   try {
     const json = raw.startsWith('{') ? raw : Buffer.from(raw, 'base64').toString('utf8');
@@ -4369,9 +4369,27 @@ function googleServiceAccount() {
   }
 }
 
+/* The service account the board reads the Velma sheet with - no one signs in.
+
+   Set in the environment (GOOGLE_SERVICE_ACCOUNT_JSON, which wins) or uploaded
+   once by an admin from Account > Google account, stored in OAuthToken as
+   "google-service-account" with the whole key file encrypted. */
+const GOOGLE_SERVICE_ACCOUNT_PROVIDER = 'google-service-account';
+let googleServiceAccountCache = { at: 0, value: null };
+async function googleServiceAccount() {
+  const fromEnv = parseGoogleServiceAccountKey(process.env.GOOGLE_SERVICE_ACCOUNT_JSON);
+  if (fromEnv) return { ...fromEnv, source: 'env' };
+  if (googleServiceAccountCache.at && Date.now() - googleServiceAccountCache.at < 60 * 1000) return googleServiceAccountCache.value;
+  const row = await getStoredOAuthTokens(GOOGLE_SERVICE_ACCOUNT_PROVIDER);
+  const parsed = parseGoogleServiceAccountKey(decryptClaudeCredential(row?.accessToken || ''));
+  const value = parsed ? { ...parsed, source: 'board', savedBy: row?.metadata?.savedBy || null } : null;
+  googleServiceAccountCache = { at: Date.now(), value };
+  return value;
+}
+
 let googleTokenCache = { token: '', expiresAt: 0 };
 async function googleServiceAccountToken(account) {
-  if (googleTokenCache.token && googleTokenCache.expiresAt > Date.now() + 60000) return googleTokenCache.token;
+  if (googleTokenCache.token && googleTokenCache.email === account.email && googleTokenCache.expiresAt > Date.now() + 60000) return googleTokenCache.token;
   const nowSec = Math.floor(Date.now() / 1000);
   const encode = obj => Buffer.from(JSON.stringify(obj)).toString('base64url');
   const unsigned = `${encode({ alg: 'RS256', typ: 'JWT' })}.${encode({
@@ -4389,7 +4407,7 @@ async function googleServiceAccountToken(account) {
   });
   const out = await res.json().catch(() => ({}));
   if (!res.ok || !out.access_token) throw new Error(`google_auth_failed: ${out.error_description || out.error || res.status}`);
-  googleTokenCache = { token: out.access_token, expiresAt: Date.now() + Number(out.expires_in || 3600) * 1000 };
+  googleTokenCache = { token: out.access_token, email: account.email, expiresAt: Date.now() + Number(out.expires_in || 3600) * 1000 };
   return googleTokenCache.token;
 }
 
@@ -4490,7 +4508,7 @@ async function googleConnectionToken(connection) {
 // account they just connected.
 async function googleSheetCredentials(preferUserId = null) {
   const out = [];
-  const account = googleServiceAccount();
+  const account = await googleServiceAccount();
   if (account) out.push({ kind: 'service_account', label: account.email, token: () => googleServiceAccountToken(account) });
   if (await googleOAuthClient()) {
     const connections = await listGoogleConnections();
@@ -4507,7 +4525,7 @@ async function googleSheetCredentials(preferUserId = null) {
 async function googleSheetsGet(pathAndQuery, { preferUserId = null } = {}) {
   const credentials = await googleSheetCredentials(preferUserId);
   if (!credentials.length) {
-    throw new Error('velma_sheet_not_configured: connect a Google account that can open the Velma bug sheet (Account > Google account), or set GOOGLE_SERVICE_ACCOUNT_JSON on the server');
+    throw new Error('velma_sheet_not_configured: upload a service account key that can open the Velma bug sheet (Account > Google account), or set GOOGLE_SERVICE_ACCOUNT_JSON on the server');
   }
   // Each credential in turn: a person who connected but was never given
   // access to the sheet must not stop the next one from being tried.
@@ -4993,7 +5011,7 @@ app.get('/auth/google/callback', requireAuth, async (req, res) => {
 app.get('/auth/google/status', requireAuth, async (req, res) => {
   const mine = await getStoredOAuthTokens(googleProviderKey(req.session.userId));
   const connections = await listGoogleConnections();
-  const account = googleServiceAccount();
+  const account = await googleServiceAccount();
   const meta = (mine?.metadata && typeof mine.metadata === 'object') ? mine.metadata : {};
   res.json({
     configured: !!(await googleOAuthClient()),
@@ -5003,6 +5021,7 @@ app.get('/auth/google/status', requireAuth, async (req, res) => {
     clientSource: (await googleOAuthClient())?.source || null,
     redirectUri: googleRedirectUri(req),
     serviceAccount: account ? account.email : null,
+    serviceAccountSource: account ? account.source : null,
     connected: !!mine?.refreshToken,
     email: meta.email || null,
     connectedAt: meta.connectedAt || null,
@@ -5028,6 +5047,48 @@ app.post('/auth/google/disconnect', requireAuth, async (req, res) => {
       body: new URLSearchParams({ token: refreshToken })
     }).catch(() => null);
   }
+  velmaSheetCache = { at: 0, rows: null, title: '' };
+  res.json({ ok: true });
+});
+
+// The no-sign-in way: an admin uploads the service account's JSON key once.
+// The key is checked against the sheet straight away, so the admin learns
+// there and then whether the sheet still has to be shared with its email.
+app.put('/api/google/service-account', requireAdmin, async (req, res) => {
+  try {
+    if (parseGoogleServiceAccountKey(process.env.GOOGLE_SERVICE_ACCOUNT_JSON)) return res.status(409).json({ error: 'set_in_environment' });
+    const raw = String(req.body?.key || '').trim();
+    let parsedJson = null;
+    try { parsedJson = JSON.parse(raw); } catch (_) {}
+    if (!parsedJson || parsedJson.type !== 'service_account') return res.status(400).json({ error: 'not_a_service_account_key' });
+    const parsed = parseGoogleServiceAccountKey(raw);
+    if (!parsed) return res.status(400).json({ error: 'not_a_service_account_key' });
+    // Prove the key works before keeping it.
+    try { await googleServiceAccountToken(parsed); } catch (error) { return res.status(400).json({ error: String(error.message || error) }); }
+    await setStoredOAuthTokens(GOOGLE_SERVICE_ACCOUNT_PROVIDER, {
+      accessToken: encryptClaudeCredential(raw),
+      metadata: { email: parsed.email, savedBy: String(req.session.username || '').toUpperCase() || null, savedAt: new Date().toISOString() }
+    });
+    googleServiceAccountCache = { at: 0, value: null };
+    velmaSheetCache = { at: 0, rows: null, title: '' };
+    let sheetAccess = 'ok';
+    let sheetError = null;
+    try {
+      await readVelmaBugSheet({ fresh: true });
+    } catch (error) {
+      sheetError = String(error.message || error);
+      sheetAccess = /not_shared|403|404|permission/i.test(sheetError) ? 'not_shared' : 'unverified';
+    }
+    return res.json({ ok: true, email: parsed.email, sheetAccess, sheetError });
+  } catch (error) {
+    return res.status(500).json({ error: String(error.message || error) });
+  }
+});
+app.delete('/api/google/service-account', requireAdmin, async (req, res) => {
+  if (parseGoogleServiceAccountKey(process.env.GOOGLE_SERVICE_ACCOUNT_JSON)) return res.status(409).json({ error: 'set_in_environment' });
+  await prisma.oAuthToken.delete({ where: { provider: GOOGLE_SERVICE_ACCOUNT_PROVIDER } }).catch(() => null);
+  googleServiceAccountCache = { at: 0, value: null };
+  googleTokenCache = { token: '', expiresAt: 0 };
   velmaSheetCache = { at: 0, rows: null, title: '' };
   res.json({ ok: true });
 });

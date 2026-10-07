@@ -773,7 +773,10 @@ everyone, who then simply sign in again.
 1. In Google Cloud, enable the **Google Sheets API**, create a service account
    and download a JSON key for it.
 2. Share the sheet with the service account's email (Viewer is enough).
-3. Set `GOOGLE_SERVICE_ACCOUNT_JSON` to the key file's contents, raw or base64.
+3. Either upload the key file from the board - **Account > Google account**
+   (admins only), stored encrypted in `OAuthToken` (`google-service-account`)
+   and checked against the sheet on save - or set `GOOGLE_SERVICE_ACCOUNT_JSON`
+   to the key file's contents, raw or base64 (the environment wins).
 
 **Status and the SLA.** The bug's **Status** column is read with the row (the
 value the dropdown shows). While it is anything other than DONE the ticket's SLA

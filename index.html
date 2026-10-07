@@ -11658,7 +11658,8 @@ function renderGoogleAccessBlock(el,{compact=false,error=''}={}){
   }else if(st.connected){
     html=`<div class="google-access-line ok"><span class="google-g" aria-hidden="true"></span><span>Reading the sheet as <strong>${esc(st.email||'your Google account')}</strong></span>${compact?'':'<button class="btn-out" type="button" data-google-disconnect>Disconnect</button>'}</div>`;
   }else if(st.serviceAccount){
-    html=`<div class="google-access-line ok"><span class="google-g" aria-hidden="true"></span><span>Reading the sheet with the board\'s service account <strong>${esc(st.serviceAccount)}</strong></span></div>`;
+    html=`<div class="google-access-line ok"><span class="google-g" aria-hidden="true"></span><span>Reading the sheet with the board\'s service account <strong>${esc(st.serviceAccount)}</strong> - nobody needs to sign in</span>${!compact&&st.canConfigure&&st.serviceAccountSource==='board'?'<button class="btn-out" type="button" data-google-sa-remove>Remove</button>':''}</div>`
+      +(compact?'':`<div class="google-access-hint">If a lookup says the sheet cannot be opened, share the Velma bug sheet with this email as Viewer.</div>`);
   }else if((st.others||[]).length){
     html=`<div class="google-access-line ok"><span class="google-g" aria-hidden="true"></span><span>Reading the sheet as <strong>${esc(st.others[0])}</strong>, who connected their account</span></div>`
       +(compact?'':`<div class="google-access-hint">You can connect your own account too - the board then reads as you when you link a bug.</div>${st.configured?signInBtn:''}`);
@@ -11671,13 +11672,60 @@ function renderGoogleAccessBlock(el,{compact=false,error=''}={}){
   }else{
     html='<div class="google-access-callout warn"><strong>Google sign-in is not turned on yet.</strong><span>An admin turns it on once under Account &gt; Google account. After that, "Sign in with Google" appears here.</span></div>';
   }
+  // No sign-in at all: an admin uploads a service account key once.
+  if(!compact&&st?.canConfigure&&!st.serviceAccount)html=googleServiceAccountFormHtml()+html;
   if(error)html=`<div class="google-access-error">${esc(error)}</div>`+html;
   if(!compact&&st?.lastSyncError)html+=`<div class="google-access-hint">Last check of linked bugs failed: ${esc(st.lastSyncError)}</div>`;
   else if(!compact&&st?.lastSyncAt)html+=`<div class="google-access-hint">Linked bugs last checked ${esc(fmtTime(new Date(st.lastSyncAt).toISOString()))}.</div>`;
   el.innerHTML=html;
   el.style.display=html?'':'none';
 }
+function googleServiceAccountFormHtml(){
+  return `<div class="google-access-callout google-setup">
+    <strong>Read the sheet without anyone signing in (recommended)</strong>
+    <ol class="google-setup-steps">
+      <li>In <a href="https://console.cloud.google.com/iam-admin/serviceaccounts" target="_blank" rel="noopener">Google Cloud &gt; Service accounts</a>, create a service account (no roles needed).</li>
+      <li>Open it &gt; <b>Keys</b> &gt; <b>Add key</b> &gt; <b>JSON</b>, and upload the file here.</li>
+      <li>Share the Velma bug sheet with the service account's email as <b>Viewer</b>.</li>
+    </ol>
+    <div class="google-setup-fields" style="grid-template-columns:1fr auto;">
+      <input class="form-input" id="google-sa-file" type="file" accept=".json,application/json">
+      <button class="btn-primary" type="button" data-google-sa-save>Upload key</button>
+    </div>
+    <span class="google-access-hint">Stored encrypted on the board, and used for every agent's lookups.</span>
+  </div>`;
+}
 document.addEventListener('click',async e=>{
+  const saSave=e.target.closest('[data-google-sa-save]');
+  if(saSave){
+    const file=document.getElementById('google-sa-file')?.files?.[0];
+    if(!file){showToast('Choose the JSON key file first','warn');return;}
+    saSave.disabled=true;
+    const key=await file.text().catch(()=>'');
+    const res=await fetch('/api/google/service-account',{method:'PUT',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({key})}).catch(()=>null);
+    const out=res?await res.json().catch(()=>({})):{};
+    saSave.disabled=false;
+    if(!res||!res.ok){
+      const why={not_a_service_account_key:'That is not a service account key - in Google Cloud, use Service accounts > Keys > Add key > JSON',set_in_environment:'A service account is already set in the server environment',admin_required:'Only admins can set this up'}[out?.error]||out?.error||'could not reach the server';
+      showToast(`Not saved: ${why}`,'warn');
+      return;
+    }
+    await fetchGoogleAccessStatus();
+    renderGoogleAccessBlock(document.getElementById('google-account-body'));
+    if(out.sheetAccess==='ok')showToast('Connected - the board reads the Velma bug sheet with '+out.email,'ok');
+    else if(out.sheetAccess==='not_shared')showToast('Key saved. Now share the Velma bug sheet with '+out.email+' as Viewer','warn');
+    else showToast('Key saved, but the sheet could not be checked yet: '+(out.sheetError||''),'warn');
+    return;
+  }
+  const saRemove=e.target.closest('[data-google-sa-remove]');
+  if(saRemove){
+    saRemove.disabled=true;
+    await fetch('/api/google/service-account',{method:'DELETE',credentials:'include'}).catch(()=>null);
+    await fetchGoogleAccessStatus();
+    renderGoogleAccessBlock(document.getElementById('google-account-body'));
+    showToast('Service account removed');
+    return;
+  }
   if(e.target.closest('[data-google-signin]')){e.preventDefault();startGoogleSignIn();return;}
   if(e.target.closest('[data-google-open-setup]')){
     document.getElementById('velma-modal').classList.remove('open');
