@@ -1,4 +1,10 @@
 require('dotenv').config();
+// The SLA clock runs 08:00-12:00 and 14:00-17:00 on weekdays, and those are
+// the team's hours, not the container's. The image ships with no timezone, so
+// without this the server counted in UTC: its "weekend" began an hour early
+// and its windows sat an hour off the board's. Set before anything reads a
+// date. SLA_TIMEZONE overrides; an explicit TZ is kept.
+process.env.TZ = String(process.env.SLA_TIMEZONE || process.env.TZ || 'Africa/Casablanca').trim();
 const prisma = require('./prismaClient');
 const { Prisma } = require('@prisma/client');
 const express = require('express');
@@ -1497,7 +1503,8 @@ function shiftSnapshotFor(code) {
     cooldownMs: SHIFT_BREAK_COOLDOWN_MS,
     cooldownRemainingMs: breakCooldownRemaining(rec, now),
     lastSeen: rec.lastSeen || 0,
-    sessions: rec.sessions
+    sessions: rec.sessions,
+    leaves: rec.leaves || []
   };
 }
 
@@ -1543,10 +1550,53 @@ async function loadAgentLeave() {
       next[code] = meta;
     }
     agentLeave = next;
+    syncLeavePeriods();
   } catch (error) {
     console.warn('Agent leave load failed:', error?.message || error);
   }
   return agentLeave;
+}
+/* The SLA clock is on hold while the assigned agent is off, so it needs to
+   know when they were off, not only whether they are now - and the leave
+   rows above are deleted when a leave ends. So every leave is also kept as a
+   period next to the agent's shift sessions: rec.leaves = [{ start, until,
+   end }], where end is null while it runs and until is the return date it was
+   given. Kept in the shift store because that is what the clock is computed
+   from, and the board receives it with the sessions.
+
+   Brought into line with agentLeave after every change and on startup, which
+   also opens a period for anyone already off when this first runs. */
+function leavePeriodEnd(period, now = Date.now()) {
+  if (period.end !== null && period.end !== undefined) return Number(period.end);
+  const until = Number(period.until || 0);
+  return until && until < now ? until : now;
+}
+function syncLeavePeriods(now = Date.now()) {
+  let changed = false;
+  const codes = new Set([...Object.keys(agentLeave), ...Object.keys(shiftStore.agents)]);
+  for (const code of codes) {
+    const leave = agentLeave[code];
+    const active = isLeaveActive(leave, now);
+    const existing = shiftStore.agents[code];
+    if (!active && !existing?.leaves?.length) continue;
+    const rec = shiftAgentRecord(code);
+    rec.leaves = Array.isArray(rec.leaves) ? rec.leaves : [];
+    const open = rec.leaves.find(p => p.end === null || p.end === undefined);
+    if (active) {
+      const until = leave.until ? Number(leave.until) : null;
+      if (!open) {
+        rec.leaves.push({ start: Number(leave.since) || now, until, end: null });
+        changed = true;
+      } else if (open.until !== until) {
+        open.until = until;
+        changed = true;
+      }
+    } else if (open) {
+      open.end = leavePeriodEnd(open, now);
+      changed = true;
+    }
+  }
+  if (changed) persistShiftStore();
 }
 async function setAgentLeave(code, leave) {
   const provider = `${AGENT_LEAVE_PREFIX}${code}`;
@@ -1561,6 +1611,7 @@ async function setAgentLeave(code, leave) {
     await prisma.oAuthToken.delete({ where: { provider } }).catch(() => null);
     delete agentLeave[code];
   }
+  syncLeavePeriods();
   // Every open board greys the agent out (or back in) straight away, rather
   // than on its next shift poll.
   sseBroadcast('agent_leave', { leave: activeAgentLeave() });
@@ -1656,6 +1707,31 @@ function businessMsInRange(from, to) {
   }
   return total;
 }
+// The inverse: the latest moment from which `amount` of working time has run
+// by `to`. Walks the windows backwards a day at a time, weekends skipped.
+function businessPointBefore(to, amount) {
+  let left = amount;
+  if (!(left > 0)) return to;
+  const cursor = new Date(to);
+  cursor.setHours(0, 0, 0, 0);
+  // Ten years of days: far past any SLA, and a stop if the windows are empty.
+  for (let day = 0; day < 3660; day++) {
+    if (!isWeekendDate(cursor)) {
+      for (let i = BUSINESS_WINDOWS.length - 1; i >= 0; i--) {
+        const [sh, sm, eh, em] = BUSINESS_WINDOWS[i];
+        const windowStart = new Date(cursor); windowStart.setHours(sh, sm, 0, 0);
+        const windowEnd = new Date(cursor); windowEnd.setHours(eh, em, 0, 0);
+        const end = Math.min(windowEnd.getTime(), to);
+        const start = windowStart.getTime();
+        if (!(end > start)) continue;
+        if (end - start >= left) return end - left;
+        left -= end - start;
+      }
+    }
+    cursor.setDate(cursor.getDate() - 1);
+  }
+  return to - amount;
+}
 // Superseded by businessMsInRange - kept because the shift report still counts
 // presence in whole weekdays, which is a different question from SLA time.
 function weekdayMsInRange(from, to) {
@@ -1680,22 +1756,29 @@ function weekdayMsInRange(from, to) {
 }
 
 // Worked milliseconds for one agent within [fromMs,toMs): their shift sessions,
-// clipped to weekdays, minus any overlapping break.
+// clipped to working hours, minus any overlapping break and any time they were
+// off. Breaks and leave are merged first, so a break taken on a day marked off
+// is not taken away twice.
 function shiftElapsedMs(fromMs, toMs, agentCode) {
   const rec = shiftStore.agents[String(agentCode || '').trim().toUpperCase()];
   if (!rec || !Array.isArray(rec.sessions)) return 0;
   const now = Date.now();
+  const leaves = (rec.leaves || []).map(p => [Number(p.start || 0), leavePeriodEnd(p, now)]);
   let total = 0;
   rec.sessions.forEach((s) => {
     const start = Math.max(Number(s.start || 0), fromMs);
     const end = Math.min(s.end === null || s.end === undefined ? now : Number(s.end), toMs);
     if (!(end > start)) return;
+    const excluded = [...(s.breaks || []).map(b => [Number(b.start || 0), breakEndMs(b, now)]), ...leaves]
+      .map(([a, b]) => [Math.max(a, start), Math.min(b, end)])
+      .filter(([a, b]) => b > a)
+      .sort((x, y) => x[0] - y[0]);
     let worked = businessMsInRange(start, end);
-    (s.breaks || []).forEach((b) => {
-      const bs = Math.max(Number(b.start || 0), start);
-      const be = Math.min(breakEndMs(b, now), end);
-      if (be > bs) worked -= businessMsInRange(bs, be);
-    });
+    let cursor = start;
+    for (const [a, b] of excluded) {
+      const from = Math.max(a, cursor);
+      if (b > from) { worked -= businessMsInRange(from, b); cursor = b; }
+    }
     total += Math.max(0, worked);
   });
   return total;
@@ -1719,6 +1802,9 @@ function shiftElapsedMs(fromMs, toMs, agentCode) {
 //                     leaves the column (setTicketStage in index.html), so
 //                     once it is back with us the count resumes from where it
 //                     stopped and the wait never reaches met/breached either.
+//   leave_hold      - open, and the assigned agent is marked off. The days
+//                     off are cut out of the clock (rec.leaves), so it
+//                     resumes where it stopped.
 //
 // The last one is a commitment we are no longer the ones able to keep. Once a
 // ticket is handed to engineering, the time it takes is theirs, and the
@@ -1739,13 +1825,18 @@ function ticketSlaSnapshot(ticket, now = Date.now()) {
   const targetMs = targetHours * 3600000;
   const resolved = normalizeDbStatusForBoard(ticket?.status) === 'res';
   const agent = String(ticket?.assignedAgent || '').trim().toUpperCase();
-  const base = { targetHours, resolved, state: 'no_clock', shiftMs: 0, wallMs: 0, overdueMs: 0 };
+  const base = { targetHours, resolved, state: 'no_clock', shiftMs: 0, wallMs: 0, ageMs: 0, overdueMs: 0 };
   if (!Number.isFinite(createdMs)) return base;
 
   const endMs = resolved
     ? (ticket?.resolvedAt ? new Date(ticket.resolvedAt).getTime() : now)
     : now;
   const wallMs = Math.max(0, (Number.isFinite(endMs) ? endMs : now) - createdMs);
+  // The ticket's age in the hours the SLA runs: no nights, lunch or weekends.
+  // What "oldest open" and "h open" report, so a Monday dashboard does not
+  // read the weekend as time the ticket sat waiting on us.
+  const ageMs = businessMsInRange(createdMs, Number.isFinite(endMs) ? endMs : now);
+  base.ageMs = ageMs;
   // Checked before the assignee, and before resolved/open is decided: a
   // Jira-linked ticket has no SLA position at all, so there is nothing for
   // either branch below to say about it.
@@ -1755,6 +1846,10 @@ function ticketSlaSnapshot(ticket, now = Date.now()) {
   if (String(ticket?.velmaBugId || '').trim() && !ticket?.velmaBugRow?.done) return { ...base, state: 'velma_hold', wallMs };
   if (!resolved && normalizeDbStatusForBoard(ticket?.status) === 'wct') return { ...base, state: 'contact_hold', wallMs };
   if (!agent) return { ...base, wallMs };
+  // The agent holding it is off. Their time off is taken out of the clock
+  // (shiftElapsedMs), so it carries on from where it stopped when they are
+  // back, or as soon as the ticket is given to someone who is in.
+  if (!resolved && isAgentOnLeave(agent, now)) return { ...base, state: 'leave_hold', wallMs };
 
   const shiftMs = shiftElapsedMs(createdMs, Number.isFinite(endMs) ? endMs : now, agent);
   const remaining = targetMs - shiftMs;
@@ -3543,6 +3638,25 @@ app.get('/favicon.ico', (req, res) => {
 
 app.get('/login', (req, res) => isAuthed(req) ? res.redirect('/') : res.type('html').sendFile(path.join(__dirname, 'public', 'login.html')));
 
+/* Public, no sign-in: Google requires a privacy policy URL before an OAuth app
+   can be published, and this is what the "Sign in with Google" app's
+   Branding page points at. It describes the one thing that sign-in is for. */
+app.get('/privacy', (req, res) => {
+  res.type('html').send(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Privacy - Support Kanban</title>
+<style>body{margin:0;font-family:Inter,'Segoe UI',Arial,sans-serif;background:#f6f7fb;color:#1c1f3a;line-height:1.6}main{max-width:720px;margin:0 auto;padding:40px 20px}h1{font-size:26px;margin:0 0 6px}h2{font-size:17px;margin:28px 0 6px}p,li{font-size:15px;color:#3b4063}</style></head>
+<body><main>
+<h1>Privacy policy</h1>
+<p>Support Kanban is Quinta's internal support board. Only Quinta staff with a board account can use it.</p>
+<h2>Google sign-in</h2>
+<p>An agent may connect a Google account so the board can read the Velma bug Google Sheet. The board asks for read-only access to Google Sheets and for the account's email address, and uses them only to look up rows of that sheet and check their status. It never writes to Google, and never reads any other file.</p>
+<p>The access token Google issues is stored encrypted on the board's server. Disconnecting the account on the board deletes it and revokes it at Google; it can also be removed at any time from myaccount.google.com &gt; Security &gt; Third-party access.</p>
+<h2>Sharing</h2>
+<p>Nothing obtained from Google is sold, shared with third parties, or used for advertising. The board's use of information received from Google APIs adheres to the Google API Services User Data Policy, including the Limited Use requirements.</p>
+<h2>Contact</h2>
+<p>Questions: your Quinta support lead.</p>
+</main></body></html>`);
+});
+
 function renderResetPasswordPage(token) {
   // Base64-encode (not JSON.stringify) before embedding in the inline
   // <script> block: JSON.stringify does not escape "</script>", so a raw
@@ -4356,8 +4470,8 @@ const GOOGLE_OAUTH_REDIRECT_URI = String(process.env.GOOGLE_OAUTH_REDIRECT_URI |
 const GOOGLE_PROVIDER_PREFIX = 'google:';
 const googleProviderKey = userId => `${GOOGLE_PROVIDER_PREFIX}${Number(userId)}`;
 
-function googleServiceAccount() {
-  const raw = String(process.env.GOOGLE_SERVICE_ACCOUNT_JSON || '').trim();
+function parseGoogleServiceAccountKey(raw) {
+  raw = String(raw || '').trim();
   if (!raw) return null;
   try {
     const json = raw.startsWith('{') ? raw : Buffer.from(raw, 'base64').toString('utf8');
@@ -4369,9 +4483,27 @@ function googleServiceAccount() {
   }
 }
 
+/* The service account the board reads the Velma sheet with - no one signs in.
+
+   Set in the environment (GOOGLE_SERVICE_ACCOUNT_JSON, which wins) or uploaded
+   once by an admin from Account > Google account, stored in OAuthToken as
+   "google-service-account" with the whole key file encrypted. */
+const GOOGLE_SERVICE_ACCOUNT_PROVIDER = 'google-service-account';
+let googleServiceAccountCache = { at: 0, value: null };
+async function googleServiceAccount() {
+  const fromEnv = parseGoogleServiceAccountKey(process.env.GOOGLE_SERVICE_ACCOUNT_JSON);
+  if (fromEnv) return { ...fromEnv, source: 'env' };
+  if (googleServiceAccountCache.at && Date.now() - googleServiceAccountCache.at < 60 * 1000) return googleServiceAccountCache.value;
+  const row = await getStoredOAuthTokens(GOOGLE_SERVICE_ACCOUNT_PROVIDER);
+  const parsed = parseGoogleServiceAccountKey(decryptClaudeCredential(row?.accessToken || ''));
+  const value = parsed ? { ...parsed, source: 'board', savedBy: row?.metadata?.savedBy || null } : null;
+  googleServiceAccountCache = { at: Date.now(), value };
+  return value;
+}
+
 let googleTokenCache = { token: '', expiresAt: 0 };
 async function googleServiceAccountToken(account) {
-  if (googleTokenCache.token && googleTokenCache.expiresAt > Date.now() + 60000) return googleTokenCache.token;
+  if (googleTokenCache.token && googleTokenCache.email === account.email && googleTokenCache.expiresAt > Date.now() + 60000) return googleTokenCache.token;
   const nowSec = Math.floor(Date.now() / 1000);
   const encode = obj => Buffer.from(JSON.stringify(obj)).toString('base64url');
   const unsigned = `${encode({ alg: 'RS256', typ: 'JWT' })}.${encode({
@@ -4389,7 +4521,7 @@ async function googleServiceAccountToken(account) {
   });
   const out = await res.json().catch(() => ({}));
   if (!res.ok || !out.access_token) throw new Error(`google_auth_failed: ${out.error_description || out.error || res.status}`);
-  googleTokenCache = { token: out.access_token, expiresAt: Date.now() + Number(out.expires_in || 3600) * 1000 };
+  googleTokenCache = { token: out.access_token, email: account.email, expiresAt: Date.now() + Number(out.expires_in || 3600) * 1000 };
   return googleTokenCache.token;
 }
 
@@ -4490,7 +4622,7 @@ async function googleConnectionToken(connection) {
 // account they just connected.
 async function googleSheetCredentials(preferUserId = null) {
   const out = [];
-  const account = googleServiceAccount();
+  const account = await googleServiceAccount();
   if (account) out.push({ kind: 'service_account', label: account.email, token: () => googleServiceAccountToken(account) });
   if (await googleOAuthClient()) {
     const connections = await listGoogleConnections();
@@ -4507,7 +4639,7 @@ async function googleSheetCredentials(preferUserId = null) {
 async function googleSheetsGet(pathAndQuery, { preferUserId = null } = {}) {
   const credentials = await googleSheetCredentials(preferUserId);
   if (!credentials.length) {
-    throw new Error('velma_sheet_not_configured: connect a Google account that can open the Velma bug sheet (Account > Google account), or set GOOGLE_SERVICE_ACCOUNT_JSON on the server');
+    throw new Error('velma_sheet_not_configured: sign in with a Google account that can open the Velma bug sheet (Account > Google account), upload a service account key there, or share the sheet as "Anyone with the link can view"');
   }
   // Each credential in turn: a person who connected but was never given
   // access to the sheet must not stop the next one from being tried.
@@ -4541,13 +4673,66 @@ async function googleSheetsGet(pathAndQuery, { preferUserId = null } = {}) {
 let velmaSheetCache = { at: 0, rows: null, title: '' };
 async function readVelmaBugSheet({ preferUserId = null, fresh = false } = {}) {
   if (!fresh && velmaSheetCache.rows && Date.now() - velmaSheetCache.at < VELMA_SHEET_CACHE_MS) return velmaSheetCache;
-  const meta = await googleSheetsGet('?fields=sheets.properties(sheetId,title)', { preferUserId });
-  const tab = (meta.sheets || []).map(s => s.properties || {}).find(p => String(p.sheetId) === VELMA_BUG_SHEET_GID);
-  if (!tab) throw new Error(`velma_sheet_tab_missing: no tab with gid ${VELMA_BUG_SHEET_GID}`);
-  const quoted = `'${String(tab.title).replace(/'/g, "''")}'`;
-  const values = await googleSheetsGet(`/values/${encodeURIComponent(quoted)}?majorDimension=ROWS`, { preferUserId });
-  velmaSheetCache = { at: Date.now(), rows: Array.isArray(values.values) ? values.values : [], title: tab.title };
-  return velmaSheetCache;
+  try {
+    const meta = await googleSheetsGet('?fields=sheets.properties(sheetId,title)', { preferUserId });
+    const tab = (meta.sheets || []).map(s => s.properties || {}).find(p => String(p.sheetId) === VELMA_BUG_SHEET_GID);
+    if (!tab) throw new Error(`velma_sheet_tab_missing: no tab with gid ${VELMA_BUG_SHEET_GID}`);
+    const quoted = `'${String(tab.title).replace(/'/g, "''")}'`;
+    const values = await googleSheetsGet(`/values/${encodeURIComponent(quoted)}?majorDimension=ROWS`, { preferUserId });
+    velmaSheetCache = { at: Date.now(), rows: Array.isArray(values.values) ? values.values : [], title: tab.title };
+    return velmaSheetCache;
+  } catch (error) {
+    // No account could read it: the sheet's link is the last way in, for a
+    // sheet shared as "Anyone with the link can view". If that fails too,
+    // the account's reason is the one worth showing - it says what to fix.
+    if (/velma_sheet_tab_missing/.test(String(error.message))) throw error;
+    try {
+      const sheet = await readSheetByLink();
+      velmaSheetCache = { at: Date.now(), ...sheet };
+      return velmaSheetCache;
+    } catch (_) {
+      throw error;
+    }
+  }
+}
+
+// RFC 4180 CSV: quoted fields may hold commas, newlines and "" for a quote.
+function parseCsv(text) {
+  const rows = [];
+  let row = [];
+  let field = '';
+  let quoted = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (quoted) {
+      if (c === '"' && text[i + 1] === '"') { field += '"'; i++; }
+      else if (c === '"') quoted = false;
+      else field += c;
+    } else if (c === '"') quoted = true;
+    else if (c === ',') { row.push(field); field = ''; }
+    else if (c === '\n' || c === '\r') {
+      if (c === '\r' && text[i + 1] === '\n') i++;
+      row.push(field); rows.push(row); row = []; field = '';
+    } else field += c;
+  }
+  if (field || row.length) { row.push(field); rows.push(row); }
+  return rows;
+}
+
+/* The sheet as anyone with its link sees it: the tab's CSV export, displayed
+   values ("DONE", as the dropdown shows it). A sheet not shared by link
+   answers with a sign-in page or a 401 rather than CSV. */
+async function readSheetByLink() {
+  const url = `https://docs.google.com/spreadsheets/d/${encodeURIComponent(VELMA_BUG_SHEET_ID)}/export?format=csv&gid=${encodeURIComponent(VELMA_BUG_SHEET_GID)}`;
+  // Redirects followed: a shared sheet's export is served from
+  // googleusercontent.com.
+  const res = await fetch(url);
+  const type = String(res.headers.get('content-type') || '');
+  if (res.status === 401 || res.status === 403 || (res.ok && !/csv|text\/plain/i.test(type))) {
+    throw new Error('velma_sheet_not_shared: the Velma bug sheet is not shared by link');
+  }
+  if (!res.ok) throw new Error(`velma_sheet_read_failed: ${res.status}`);
+  return { rows: parseCsv(await res.text()), title: 'Velma bug sheet' };
 }
 
 const normalizeVelmaBugId = value => String(value || '').trim().replace(/^#/, '').toUpperCase();
@@ -4649,8 +4834,8 @@ function velmaLinkWithStatus(previous, found, now = Date.now()) {
 // The ticket ids whose link this changes from held to released.
 const velmaHoldEnded = (previous, next) => !!previous && !previous.done && !!next?.done;
 
-// Move one ticket's SLA restart point forward by the length of a hold that has
-// just ended, the server's copy of resumeSlaAfterHold in index.html. Skipped
+// Move one ticket's SLA restart point forward past a hold that has just ended,
+// the server's copy of resumeSlaAfterHold in index.html. Skipped
 // while a Jira link or Waiting on Contact still holds the ticket - those settle
 // the clock themselves when they end, and resuming here as well would count
 // the overlap twice. Returns the new restart point, or null for no change.
@@ -4662,7 +4847,11 @@ function slaResumePointAfterHold(state, externalId, since, now) {
   const created = new Date(state.ticketCreatedAt?.[externalId] || 0).getTime() || 0;
   const base = Math.max(created, Number(state.ticketSlaResetAt?.[externalId] || 0));
   if (!base || base >= since) return null;
-  return base + (now - since);
+  // Carried over in working time, not wall time: the clock resumes with
+  // exactly the working hours it had when the hold began. Shifting by the
+  // wall-clock length of the hold moved the start across nights and weekends
+  // the hold had nothing to do with, and took real time off or put it back.
+  return businessPointBefore(now, businessMsInRange(base, since));
 }
 
 // Write several server-owned values into the board state in one synchronous
@@ -4787,7 +4976,6 @@ async function syncVelmaBugStatuses() {
     const links = safeReadState().ticketVelmaBug || {};
     const ids = Object.keys(links).filter(id => links[id]?.id);
     if (!ids.length) return { checked: 0 };
-    if (!(await googleSheetCredentials()).length) return { skipped: 'not_configured' };
     const sheet = await readVelmaBugSheet({ fresh: true });
     velmaSyncLastError = '';
     velmaSyncLastRunAt = Date.now();
@@ -4993,7 +5181,7 @@ app.get('/auth/google/callback', requireAuth, async (req, res) => {
 app.get('/auth/google/status', requireAuth, async (req, res) => {
   const mine = await getStoredOAuthTokens(googleProviderKey(req.session.userId));
   const connections = await listGoogleConnections();
-  const account = googleServiceAccount();
+  const account = await googleServiceAccount();
   const meta = (mine?.metadata && typeof mine.metadata === 'object') ? mine.metadata : {};
   res.json({
     configured: !!(await googleOAuthClient()),
@@ -5003,6 +5191,7 @@ app.get('/auth/google/status', requireAuth, async (req, res) => {
     clientSource: (await googleOAuthClient())?.source || null,
     redirectUri: googleRedirectUri(req),
     serviceAccount: account ? account.email : null,
+    serviceAccountSource: account ? account.source : null,
     connected: !!mine?.refreshToken,
     email: meta.email || null,
     connectedAt: meta.connectedAt || null,
@@ -5028,6 +5217,48 @@ app.post('/auth/google/disconnect', requireAuth, async (req, res) => {
       body: new URLSearchParams({ token: refreshToken })
     }).catch(() => null);
   }
+  velmaSheetCache = { at: 0, rows: null, title: '' };
+  res.json({ ok: true });
+});
+
+// The no-sign-in way: an admin uploads the service account's JSON key once.
+// The key is checked against the sheet straight away, so the admin learns
+// there and then whether the sheet still has to be shared with its email.
+app.put('/api/google/service-account', requireAdmin, async (req, res) => {
+  try {
+    if (parseGoogleServiceAccountKey(process.env.GOOGLE_SERVICE_ACCOUNT_JSON)) return res.status(409).json({ error: 'set_in_environment' });
+    const raw = String(req.body?.key || '').trim();
+    let parsedJson = null;
+    try { parsedJson = JSON.parse(raw); } catch (_) {}
+    if (!parsedJson || parsedJson.type !== 'service_account') return res.status(400).json({ error: 'not_a_service_account_key' });
+    const parsed = parseGoogleServiceAccountKey(raw);
+    if (!parsed) return res.status(400).json({ error: 'not_a_service_account_key' });
+    // Prove the key works before keeping it.
+    try { await googleServiceAccountToken(parsed); } catch (error) { return res.status(400).json({ error: String(error.message || error) }); }
+    await setStoredOAuthTokens(GOOGLE_SERVICE_ACCOUNT_PROVIDER, {
+      accessToken: encryptClaudeCredential(raw),
+      metadata: { email: parsed.email, savedBy: String(req.session.username || '').toUpperCase() || null, savedAt: new Date().toISOString() }
+    });
+    googleServiceAccountCache = { at: 0, value: null };
+    velmaSheetCache = { at: 0, rows: null, title: '' };
+    let sheetAccess = 'ok';
+    let sheetError = null;
+    try {
+      await readVelmaBugSheet({ fresh: true });
+    } catch (error) {
+      sheetError = String(error.message || error);
+      sheetAccess = /not_shared|403|404|permission/i.test(sheetError) ? 'not_shared' : 'unverified';
+    }
+    return res.json({ ok: true, email: parsed.email, sheetAccess, sheetError });
+  } catch (error) {
+    return res.status(500).json({ error: String(error.message || error) });
+  }
+});
+app.delete('/api/google/service-account', requireAdmin, async (req, res) => {
+  if (parseGoogleServiceAccountKey(process.env.GOOGLE_SERVICE_ACCOUNT_JSON)) return res.status(409).json({ error: 'set_in_environment' });
+  await prisma.oAuthToken.delete({ where: { provider: GOOGLE_SERVICE_ACCOUNT_PROVIDER } }).catch(() => null);
+  googleServiceAccountCache = { at: 0, value: null };
+  googleTokenCache = { token: '', expiresAt: 0 };
   velmaSheetCache = { at: 0, rows: null, title: '' };
   res.json({ ok: true });
 });
@@ -5559,9 +5790,10 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
        the headline card disagree with the table under it. */
     const BACKLOG_KEY_BY_STATE = {
       overdue: 'overdue', at_risk: 'atRisk', on_track: 'onTrack',
-      no_clock: 'noClock', jira_hold: 'jiraHold', velma_hold: 'velmaHold', contact_hold: 'contactHold'
+      no_clock: 'noClock', jira_hold: 'jiraHold', velma_hold: 'velmaHold', contact_hold: 'contactHold',
+      leave_hold: 'leaveHold'
     };
-    const backlog = { overdue: 0, atRisk: 0, onTrack: 0, noClock: 0, jiraHold: 0, velmaHold: 0, contactHold: 0 };
+    const backlog = { overdue: 0, atRisk: 0, onTrack: 0, noClock: 0, jiraHold: 0, velmaHold: 0, contactHold: 0, leaveHold: 0 };
     const overdueRows = [];
     let oldestOpenMs = 0;
 
@@ -5569,7 +5801,7 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
       const snapshot = ticketSlaSnapshot(ticket, now);
       const backlogKey = BACKLOG_KEY_BY_STATE[snapshot.state];
       if (backlogKey) backlog[backlogKey]++;
-      oldestOpenMs = Math.max(oldestOpenMs, snapshot.wallMs);
+      oldestOpenMs = Math.max(oldestOpenMs, snapshot.ageMs);
       if (snapshot.state === 'overdue' || snapshot.state === 'at_risk') {
         for (const key of rowKeysForTicket(ticket)) {
           const row = ensureAgentRow(key);
@@ -5588,7 +5820,7 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
           status: normalizeDbStatusForBoard(ticket.status),
           targetHours: snapshot.targetHours,
           overdueHours: hoursFromMs(snapshot.overdueMs),
-          ageHours: hoursFromMs(snapshot.wallMs),
+          ageHours: hoursFromMs(snapshot.ageMs),
           jira: ticket.jiraTicketKey || null
         });
       }
@@ -5721,6 +5953,8 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
         velmaHold: backlog.velmaHold,
         // Open tickets whose clock is frozen while they wait on the client.
         contactHold: backlog.contactHold,
+        // Open tickets whose assigned agent is off.
+        leaveHold: backlog.leaveHold,
         oldestOpenHours: hoursFromMs(oldestOpenMs),
         resolvedInRange: resolvedInRange.length,
         met: slaMet,
@@ -5820,10 +6054,10 @@ app.get('/api/tickets/kpis/drilldown', requireAuth, async (req, res) => {
       } else if (category === 'atRisk') {
         rows = openSnapshots.filter(x => x.snapshot.state === 'at_risk')
           .sort((a, b) => b.snapshot.shiftMs - a.snapshot.shiftMs)
-          .map(({ t, snapshot }) => kpiDrilldownRow(t, hoursFromMs(snapshot.wallMs) + 'h open'));
+          .map(({ t, snapshot }) => kpiDrilldownRow(t, hoursFromMs(snapshot.ageMs) + 'h open'));
       } else {
-        rows = openSnapshots.sort((a, b) => b.snapshot.wallMs - a.snapshot.wallMs)
-          .map(({ t, snapshot }) => kpiDrilldownRow(t, hoursFromMs(snapshot.wallMs) + 'h open'));
+        rows = openSnapshots.sort((a, b) => b.snapshot.ageMs - a.snapshot.ageMs)
+          .map(({ t, snapshot }) => kpiDrilldownRow(t, hoursFromMs(snapshot.ageMs) + 'h open'));
       }
     } else if (category === 'slaMet' || category === 'slaBreached' || category === 'slaMeasured') {
       // 'slaMeasured' is both cards that describe the met+breached set from a
@@ -6682,7 +6916,12 @@ app.get('/api/insights/suggest-assignee', requireAuth, async (req, res) => {
 // ---------------------------------------------------------------------------
 // Projects
 //
-// The team's Claude projects, runnable from the board.
+// The team's Claude projects, runnable from the board - with no Anthropic API
+// key on this deployment. The board never calls a model. Run puts a job in a
+// queue; a Claude that has the support connector (claude.ai, or Claude Code on
+// a machine running scripts/project-runner.ps1) claims it with
+// claim_project_run, does the work with its own tools, and hands the answer
+// back with post_project_run. The panel watches the job until it lands.
 //
 // The board keeps a local registry because ordinary Claude API keys cannot list
 // claude.ai Projects. Enterprise/eligible orgs can sync them through the
@@ -6697,6 +6936,13 @@ app.get('/api/insights/suggest-assignee', requireAuth, async (req, res) => {
 const PROJECT_SCOPES = new Set(['mine', 'org', 'shared']);
 const PROJECT_FIELD_TYPES = new Set(['text', 'textarea', 'number', 'select', 'url']);
 const PROJECT_MODEL = String(process.env.PROJECT_MODEL || 'claude-opus-5').trim();
+// A run Claude claimed but never posted back - the chat was closed, the runner
+// PC went to sleep - is reported as failed after this long, so the panel stops
+// waiting on it.
+const PROJECT_RUN_STALE_MS = Math.max(10, Number(process.env.PROJECT_RUN_STALE_MINUTES || 120)) * 60 * 1000;
+// A run nobody has picked up is dropped after this long. Days rather than
+// minutes: with no runner switched on, a queued run waits for a person.
+const PROJECT_QUEUE_EXPIRE_MS = Math.max(1, Number(process.env.PROJECT_QUEUE_EXPIRE_HOURS || 72)) * 60 * 60 * 1000;
 const CLAUDE_COMPLIANCE_API_BASE = String(process.env.CLAUDE_COMPLIANCE_API_BASE || 'https://api.anthropic.com').replace(/\/+$/, '');
 const CLAUDE_PROJECT_SYNC_LIMIT = Math.min(500, Math.max(1, Number(process.env.CLAUDE_PROJECT_SYNC_LIMIT || 100)));
 // Runs cost money and are started by a button, so they get their own ceiling
@@ -6773,6 +7019,17 @@ async function ensureProjectRunTable() {
     )
   `;
   await prisma.$executeRaw`CREATE INDEX IF NOT EXISTS "ClaudeProjectRun_projectId_idx" ON "ClaudeProjectRun"("projectId","createdAt" DESC)`;
+  // A run from the board is a queue entry first: 'queued' until a Claude claims
+  // it, 'running' while that Claude works, then 'done' or 'error'. 'done' is the
+  // default because every row written before the queue existed was finished.
+  // "request" is what the claiming Claude is handed - the brief built from the
+  // form, and any follow-up turns - so the job carries everything it needs.
+  await prisma.$executeRaw`ALTER TABLE "ClaudeProjectRun" ADD COLUMN IF NOT EXISTS "status" TEXT NOT NULL DEFAULT 'done'`;
+  await prisma.$executeRaw`ALTER TABLE "ClaudeProjectRun" ADD COLUMN IF NOT EXISTS "error" TEXT`;
+  await prisma.$executeRaw`ALTER TABLE "ClaudeProjectRun" ADD COLUMN IF NOT EXISTS "request" JSONB`;
+  await prisma.$executeRaw`ALTER TABLE "ClaudeProjectRun" ADD COLUMN IF NOT EXISTS "claimedBy" TEXT`;
+  await prisma.$executeRaw`ALTER TABLE "ClaudeProjectRun" ADD COLUMN IF NOT EXISTS "claimedAt" TIMESTAMP(3)`;
+  await prisma.$executeRaw`CREATE INDEX IF NOT EXISTS "ClaudeProjectRun_status_idx" ON "ClaudeProjectRun"("status","createdAt")`;
 }
 
 // The inputs a run was given, flattened to label/value pairs so the panel can
@@ -6804,19 +7061,59 @@ async function saveProjectRun(entry) {
             ${entry.outputTokens == null ? null : Number(entry.outputTokens)}, ${String(entry.createdBy || '').slice(0, 120)})
     RETURNING "id"
   `;
-  // Only the last few runs of a project are worth keeping; the panel shows a
-  // history, not an archive, and the output column is large.
+  await pruneProjectRuns(entry.projectId);
+  return Array.isArray(rows) ? rows[0]?.id ?? null : null;
+}
+
+// Only the last few runs of a project are worth keeping; the panel shows a
+// history, not an archive, and the output column is large. A run still waiting
+// or in progress is never pruned out from under the Claude working on it.
+async function pruneProjectRuns(projectId) {
   await prisma.$executeRaw`
     DELETE FROM "ClaudeProjectRun"
-    WHERE "projectId" = ${Number(entry.projectId)}
+    WHERE "projectId" = ${Number(projectId)}
+      AND "status" NOT IN ('queued', 'running')
       AND "id" NOT IN (
         SELECT "id" FROM "ClaudeProjectRun"
-        WHERE "projectId" = ${Number(entry.projectId)}
+        WHERE "projectId" = ${Number(projectId)}
         ORDER BY "createdAt" DESC, "id" DESC
         LIMIT ${PROJECT_RUN_KEEP}
       )
   `;
+}
+
+async function queueProjectRunRow(entry) {
+  await ensureProjectRunTable();
+  const rows = await prisma.$queryRaw`
+    INSERT INTO "ClaudeProjectRun" ("projectId","source","title","inputs","output","model","status","request","createdBy")
+    VALUES (${Number(entry.projectId)}, 'board', ${String(entry.title || '').slice(0, 200)},
+            ${JSON.stringify(entry.inputs || [])}::jsonb, '', '', 'queued',
+            ${JSON.stringify(entry.request || {})}::jsonb, ${String(entry.createdBy || '').slice(0, 120)})
+    RETURNING "id"
+  `;
+  await pruneProjectRuns(entry.projectId);
   return Array.isArray(rows) ? rows[0]?.id ?? null : null;
+}
+
+async function expireStaleProjectRuns() {
+  const claimCutoff = new Date(Date.now() - PROJECT_RUN_STALE_MS);
+  const queueCutoff = new Date(Date.now() - PROJECT_QUEUE_EXPIRE_MS);
+  await prisma.$executeRaw`
+    UPDATE "ClaudeProjectRun" SET "status" = 'error',
+      "error" = 'Claude picked this run up but never posted an answer back. Run it again.'
+    WHERE "status" = 'running' AND COALESCE("claimedAt", "createdAt") < ${claimCutoff}
+  `;
+  await prisma.$executeRaw`
+    UPDATE "ClaudeProjectRun" SET "status" = 'error',
+      "error" = 'Nobody picked this run up, so it was dropped. Run it again, then hand it to Claude.'
+    WHERE "status" = 'queued' AND "createdAt" < ${queueCutoff}
+  `;
+}
+
+// The words that hand a queued run to Claude. Shown on the board for someone to
+// paste into claude.ai, and used verbatim by the runner script.
+function projectRunHandoffPrompt(runId) {
+  return `Use the support board connector: call claim_project_run with runId ${runId}, do the work it describes with the tools you have, then call post_project_run with runId ${runId} and the finished answer.`;
 }
 
 function projectRunRow(row) {
@@ -6826,6 +7123,10 @@ function projectRunRow(row) {
     title: row.title || '',
     inputs: Array.isArray(row.inputs) ? row.inputs : [],
     output: row.output || '',
+    status: ['queued', 'running', 'error'].includes(row.status) ? row.status : 'done',
+    error: row.error || '',
+    claimedBy: row.claimedBy || '',
+    handoff: row.status === 'queued' ? projectRunHandoffPrompt(row.id) : '',
     model: row.model || '',
     ms: row.ms == null ? null : Number(row.ms),
     usage: { inputTokens: row.inputTokens ?? null, outputTokens: row.outputTokens ?? null },
@@ -7117,7 +7418,10 @@ function projectRow(row, { includeInstructions = false } = {}) {
     // API, or pushed in by register_project, which writes createdBy 'mcp:'.
     // The panel shows only these.
     fromClaude: row.source === 'claude' || String(row.createdBy || '').startsWith('mcp:'),
+    // Added on the board by name and link, waiting for Claude to push the rest.
+    placeholder: row.source === 'placeholder',
     sourceUserEmail: row.sourceUserEmail || '',
+    claudeProjectId: row.claudeProjectId || '',
     syncedAt: row.syncedAt || null,
     runCount: Number(row.runCount || 0),
     lastRunAt: row.lastRunAt || null,
@@ -7140,7 +7444,7 @@ app.get('/api/projects', requireAuth, async (req, res) => {
       FROM "ClaudeProject" p
       LEFT JOIN (
         SELECT "projectId", count(*)::int AS "n", max("createdAt") AS "last"
-        FROM "ClaudeProjectRun" GROUP BY "projectId"
+        FROM "ClaudeProjectRun" WHERE "status" = 'done' GROUP BY "projectId"
       ) r ON r."projectId" = p."id"
       ORDER BY p."pinned" DESC, p."updatedAt" DESC`;
     const isAdmin = isAdminRole(req.session.role);
@@ -7150,7 +7454,6 @@ app.get('/api/projects', requireAuth, async (req, res) => {
       ok: true,
       canEdit: isAdmin,
       model: PROJECT_MODEL,
-      configured: !!String(process.env.ANTHROPIC_API_KEY || '').trim(),
       claude: claudeConnectionStatusFromTokens(claudeTokens),
       rows: list
     });
@@ -7265,6 +7568,42 @@ app.post('/api/projects', requireAdmin, async (req, res) => {
   }
 });
 
+/* A project the board knows of but does not have yet.
+
+   Nothing free can list a person's claude.ai projects, so the board cannot
+   discover them by itself. An admin adds one by name and its claude.ai link;
+   the card shows grayed out with a Push from Claude button, which opens that
+   project and hands Claude the line that makes it register itself under this
+   exact slug. register_project then fills the same row in - instructions,
+   inputs, description - and the card comes alive. */
+const CLAUDE_PROJECT_URL_ID = /claude\.ai\/project\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i;
+app.post('/api/projects/placeholder', requireAdmin, async (req, res) => {
+  try {
+    await ensureProjectTable();
+    const name = String(req.body?.name || '').trim().slice(0, 120);
+    if (!name) return res.status(400).json({ error: 'name_required', message: 'Give the project the name it has in Claude.' });
+    const link = String(req.body?.url || '').trim();
+    const match = link.match(CLAUDE_PROJECT_URL_ID);
+    if (link && !match) return res.status(400).json({ error: 'invalid_url', message: 'That is not a claude.ai project link - it should look like https://claude.ai/project/…' });
+    const claudeProjectId = match ? match[1].toLowerCase() : null;
+    if (claudeProjectId) {
+      const taken = await prisma.$queryRaw`SELECT "name" FROM "ClaudeProject" WHERE "claudeProjectId" = ${claudeProjectId} LIMIT 1`;
+      if (Array.isArray(taken) && taken[0]) return res.status(409).json({ error: 'already_added', message: `That project is already on the board as "${taken[0].name}".` });
+    }
+    const existing = await prisma.$queryRaw`SELECT "name" FROM "ClaudeProject" WHERE "slug" = ${projectSlugFromName(name)} OR lower("name") = ${name.toLowerCase()} LIMIT 1`;
+    if (Array.isArray(existing) && existing[0]) return res.status(409).json({ error: 'already_added', message: `"${existing[0].name}" is already on the board.` });
+    const slug = await uniqueProjectSlug(name);
+    await prisma.$executeRaw`
+      INSERT INTO "ClaudeProject" ("slug","name","scope","instructions","inputs","accent","createdBy","updatedAt","source","claudeProjectId")
+      VALUES (${slug}, ${name}, 'org', '', '[]'::jsonb, 'slate', ${String(req.session.username || '')}, CURRENT_TIMESTAMP, 'placeholder', ${claudeProjectId})
+    `;
+    return res.json({ ok: true, slug });
+  } catch (error) {
+    console.error('Project placeholder failed:', error?.message || error);
+    return res.status(500).json({ error: 'project_save_failed' });
+  }
+});
+
 app.delete('/api/projects/:id', requireAdmin, async (req, res) => {
   try {
     const id = Number(req.params.id);
@@ -7349,70 +7688,16 @@ async function loadRunnableProject(id) {
   return { project };
 }
 
-async function callProjectModel(project, messages) {
-  const client = new Anthropic({ apiKey: String(process.env.ANTHROPIC_API_KEY || '').trim(), maxRetries: 2 });
-  // Streamed and awaited whole: these answers are long, and a non-streaming
-  // request of that size is what trips an HTTP timeout.
-  const stream = client.messages.stream({
-    model: String(project.model || PROJECT_MODEL),
-    max_tokens: 32_000,
-    system: [{ type: 'text', text: String(project.instructions || '').trim(), cache_control: { type: 'ephemeral' } }],
-    thinking: { type: 'adaptive' },
-    output_config: { effort: 'high' },
-    messages: messages.map(m => ({ role: m.role, content: [{ type: 'text', text: m.content }] }))
-  });
-  return stream.finalMessage();
-}
-
-function projectRunResponse(message, project, started) {
-  // A policy decline arrives as a normal 200 with this stop reason, so it has
-  // to be checked before the content is read or the panel shows an empty box.
-  if (message.stop_reason === 'refusal') {
-    return {
-      status: 200,
-      body: {
-        ok: false, refused: true,
-        message: 'Claude declined to run this one. Rephrase the inputs, or check the project instructions.',
-        category: message.stop_details?.category || null
-      }
-    };
-  }
-  const text = (message.content || []).filter(b => b.type === 'text').map(b => b.text).join('\n').trim();
-  return {
-    status: 200,
-    body: {
-      ok: true,
-      project: { id: project.id, name: project.name },
-      text,
-      usage: {
-        inputTokens: message.usage?.input_tokens ?? null,
-        outputTokens: message.usage?.output_tokens ?? null,
-        cacheRead: message.usage?.cache_read_input_tokens ?? null
-      },
-      ms: Date.now() - started
-    }
-  };
-}
-
-function projectRunError(error, res) {
-  const detail = String(error?.message || error);
-  console.error('Project run failed:', detail);
-  if (error instanceof Anthropic.AuthenticationError) return res.status(502).json({ error: 'auth_failed', message: "The server's Anthropic API key was rejected." });
-  if (error instanceof Anthropic.RateLimitError) return res.status(429).json({ error: 'rate_limited', message: 'Anthropic is rate limiting this key right now. Try again shortly.' });
-  if (error instanceof Anthropic.APIConnectionError) return res.status(504).json({ error: 'unreachable', message: 'Could not reach the Anthropic API.' });
-  return res.status(502).json({ error: 'project_run_failed', message: detail.slice(0, 300) });
-}
-
 // Shared by /run and /chat: the only difference between them is whether any
 // turns follow the form brief.
+//
+// Neither calls a model. They queue the job - brief, follow-up turns and all -
+// and return its id; a Claude with the connector claims and answers it, and
+// the panel polls the row until it lands. No API key is involved anywhere.
 async function handleProjectRun(req, res, { withHistory }) {
-  const started = Date.now();
   try {
     const id = Number(req.params.id);
     if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: 'invalid_id' });
-    if (!String(process.env.ANTHROPIC_API_KEY || '').trim()) {
-      return res.status(503).json({ error: 'not_configured', message: 'ANTHROPIC_API_KEY is not set on this deployment, so the board cannot run a project.' });
-    }
 
     const loaded = await loadRunnableProject(id);
     if (!loaded.project) return res.status(loaded.status).json({ error: loaded.error, ...(loaded.message ? { message: loaded.message } : {}) });
@@ -7425,35 +7710,18 @@ async function handleProjectRun(req, res, { withHistory }) {
     if (history.error) return res.status(400).json({ error: 'invalid_history', message: history.error });
     if (withHistory && !history.turns.length) return res.status(400).json({ error: 'invalid_history', message: 'There is no question to answer yet.' });
 
-    const message = await callProjectModel(project, [
-      { role: 'user', content: brief || 'Run this project.' },
-      ...history.turns
-    ]);
-    const result = projectRunResponse(message, project, started);
-    // Persisted after the response is built but before it is sent, so a stored
-    // run and the one on screen cannot disagree. A failure to store is logged
-    // and swallowed: losing the history entry is not worth losing the answer.
-    if (result.body?.ok && result.body.text) {
-      try {
-        await saveProjectRun({
-          projectId: project.id,
-          source: 'board',
-          title: withHistory ? 'Follow-up' : 'Run',
-          inputs: projectRunInputPairs(project, req.body?.values),
-          output: result.body.text,
-          model: String(project.model || PROJECT_MODEL),
-          ms: result.body.ms,
-          inputTokens: result.body.usage?.inputTokens,
-          outputTokens: result.body.usage?.outputTokens,
-          createdBy: req.session?.username || ''
-        });
-      } catch (storeError) {
-        console.error('Project run not stored:', storeError?.message || storeError);
-      }
-    }
-    return res.status(result.status).json(result.body);
+    const runId = await queueProjectRunRow({
+      projectId: project.id,
+      title: withHistory ? 'Follow-up' : 'Run',
+      inputs: projectRunInputPairs(project, req.body?.values),
+      request: { brief: brief || '', turns: history.turns },
+      createdBy: req.session?.username || ''
+    });
+    if (!runId) return res.status(500).json({ error: 'project_run_failed', message: 'Could not queue the run.' });
+    return res.status(202).json({ ok: true, runId, status: 'queued', handoff: projectRunHandoffPrompt(runId) });
   } catch (error) {
-    return projectRunError(error, res);
+    console.error('Project run could not be queued:', String(error?.message || error));
+    return res.status(500).json({ error: 'project_run_failed', message: 'Could not queue the run.' });
   }
 }
 
@@ -7462,6 +7730,7 @@ app.get('/api/projects/:id/runs', requireAuth, async (req, res) => {
   if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: 'invalid_id' });
   try {
     await ensureProjectRunTable();
+    await expireStaleProjectRuns();
     const limit = Math.min(Math.max(Number(req.query.limit) || 10, 1), PROJECT_RUN_KEEP);
     const rows = await prisma.$queryRaw`
       SELECT * FROM "ClaudeProjectRun" WHERE "projectId" = ${id}
@@ -7470,6 +7739,25 @@ app.get('/api/projects/:id/runs', requireAuth, async (req, res) => {
   } catch (error) {
     console.error('Project run history failed:', error?.message || error);
     return res.status(500).json({ error: 'project_runs_failed' });
+  }
+});
+
+// What the panel polls while a run is in progress.
+app.get('/api/projects/:id/runs/:runId', requireAuth, async (req, res) => {
+  const id = Number(req.params.id);
+  const runId = Number(req.params.runId);
+  if (!Number.isInteger(id) || id <= 0 || !Number.isInteger(runId) || runId <= 0) return res.status(400).json({ error: 'invalid_id' });
+  try {
+    await ensureProjectRunTable();
+    await expireStaleProjectRuns();
+    const rows = await prisma.$queryRaw`
+      SELECT * FROM "ClaudeProjectRun" WHERE "id" = ${runId} AND "projectId" = ${id} LIMIT 1`;
+    const row = Array.isArray(rows) ? rows[0] : null;
+    if (!row) return res.status(404).json({ error: 'run_not_found' });
+    return res.json({ ok: true, run: projectRunRow(row) });
+  } catch (error) {
+    console.error('Project run lookup failed:', error?.message || error);
+    return res.status(500).json({ error: 'project_run_lookup_failed' });
   }
 });
 
@@ -8303,17 +8591,88 @@ async function mcpListBoardProjects() {
   }));
 }
 
-// Claude ran the project on its own side and hands the answer over. This is
-// what makes the panel useful on a deployment with no ANTHROPIC_API_KEY: the
-// board never calls a model, it stores and renders what came back.
+/* Claude takes a queued run. Returns everything the job needs - the project's
+   instructions, the brief from the form, any follow-up turns - so it can be
+   done from any conversation, not only one opened inside that project.
+   The claim is a conditional update, so two runners polling the same queue
+   cannot both take one job. */
+async function mcpClaimProjectRun(apiUser, args) {
+  await ensureProjectTable();
+  await ensureProjectRunTable();
+  await expireStaleProjectRuns();
+  const wanted = Number(args?.runId) || 0;
+  const who = 'mcp:' + (apiUser?.username || '');
+  const rows = wanted
+    ? await prisma.$queryRaw`
+        UPDATE "ClaudeProjectRun" SET "status" = 'running', "claimedBy" = ${who}, "claimedAt" = CURRENT_TIMESTAMP
+        WHERE "id" = ${wanted} AND "status" = 'queued'
+        RETURNING *`
+    : await prisma.$queryRaw`
+        UPDATE "ClaudeProjectRun" SET "status" = 'running', "claimedBy" = ${who}, "claimedAt" = CURRENT_TIMESTAMP
+        WHERE "id" = (SELECT "id" FROM "ClaudeProjectRun" WHERE "status" = 'queued' ORDER BY "createdAt" ASC, "id" ASC LIMIT 1 FOR UPDATE SKIP LOCKED)
+          AND "status" = 'queued'
+        RETURNING *`;
+  const run = Array.isArray(rows) ? rows[0] : null;
+  if (!run) {
+    if (!wanted) return { ok: true, claimed: false, status: 'Nothing is waiting in the board queue.' };
+    const existing = await prisma.$queryRaw`SELECT "status","claimedBy" FROM "ClaudeProjectRun" WHERE "id" = ${wanted} LIMIT 1`;
+    const row = Array.isArray(existing) ? existing[0] : null;
+    if (!row) throw Object.assign(new Error(`run_not_found: there is no run ${wanted} on the board.`), { status: 404 });
+    throw Object.assign(new Error(`run_not_available: run ${wanted} is ${row.status}${row.claimedBy ? ` (taken by ${row.claimedBy})` : ''}, so there is nothing to claim.`), { status: 409 });
+  }
+  const projects = await prisma.$queryRaw`SELECT "name","instructions" FROM "ClaudeProject" WHERE "id" = ${run.projectId} LIMIT 1`;
+  const project = Array.isArray(projects) ? projects[0] : null;
+  const request = run.request && typeof run.request === 'object' ? run.request : {};
+  return {
+    ok: true,
+    claimed: true,
+    runId: run.id,
+    project: project?.name || '',
+    requestedBy: run.createdBy || '',
+    instructions: String(project?.instructions || ''),
+    brief: String(request.brief || ''),
+    followUp: Array.isArray(request.turns) ? request.turns : [],
+    howToFinish: [
+      'Follow "instructions" as your project instructions, with "brief" as what the person asked for.',
+      Array.isArray(request.turns) && request.turns.length
+        ? '"followUp" is the conversation so far: your earlier answer, then the question to answer now. Answer the last question.'
+        : '',
+      'Nobody is watching the board while you work, so do not stop to ask questions: make reasonable assumptions and list them at the end.',
+      'Anything that would be a file, put in the answer as a fenced code block headed by its file name.',
+      `When finished, call post_project_run with runId ${run.id} and the full answer as output (Markdown). If you cannot do it, call post_project_run with runId ${run.id} and error set to the reason, so the board stops waiting.`
+    ].filter(Boolean).join('\n')
+  };
+}
+
+async function mcpListQueuedProjectRuns() {
+  await ensureProjectTable();
+  await ensureProjectRunTable();
+  await expireStaleProjectRuns();
+  const rows = await prisma.$queryRaw`
+    SELECT r."id", r."status", r."title", r."createdBy", r."createdAt", r."claimedBy", p."name" AS "project"
+    FROM "ClaudeProjectRun" r JOIN "ClaudeProject" p ON p."id" = r."projectId"
+    WHERE r."status" IN ('queued', 'running') ORDER BY r."createdAt" ASC, r."id" ASC LIMIT 50`;
+  return (Array.isArray(rows) ? rows : []).map(r => ({
+    runId: r.id, project: r.project, status: r.status, title: r.title || '', requestedBy: r.createdBy || '',
+    queuedAt: r.createdAt, claimedBy: r.claimedBy || ''
+  }));
+}
+
+// Claude ran the project on its own side and hands the answer over. The board
+// never calls a model; it stores and renders what came back. With runId it
+// settles a run that was queued from the board - the one the panel is
+// watching. Without it, it adds a fresh result, for runs started in Claude.
 //
 // Not admin-gated, unlike register_project. Registering changes what the board
 // offers; posting a result adds one, and every token here belongs to a member
 // of the team. The row records which token wrote it either way.
 async function mcpPostProjectRun(apiUser, args) {
-  const wanted = String(args?.project || '').trim();
-  if (!wanted) throw Object.assign(new Error('project_required'), { status: 400 });
   const output = String(args?.output || '').trim();
+  const failure = String(args?.error || '').trim();
+  const runId = Number(args?.runId) || 0;
+  if (runId) return mcpSettleQueuedRun(apiUser, runId, { output, failure, model: args?.model });
+  const wanted = String(args?.project || '').trim();
+  if (!wanted) throw Object.assign(new Error('project_required: pass runId for a run queued from the board, or the project name for a new result'), { status: 400 });
   if (!output) throw Object.assign(new Error('output_required: pass the result text as output'), { status: 400 });
 
   await ensureProjectTable();
@@ -8358,6 +8717,40 @@ async function mcpPostProjectRun(apiUser, args) {
     project: project.name,
     stored: output.length,
     status: `Result stored against "${project.name}". The team can read it in QT-Tools -> Projects, on that project's card under Results.`
+  };
+}
+
+async function mcpSettleQueuedRun(apiUser, runId, { output, failure, model }) {
+  if (!output && !failure) throw Object.assign(new Error('output_required: pass the answer as output, or error with the reason it could not be done'), { status: 400 });
+  await ensureProjectRunTable();
+  const ok = !!output;
+  const rows = await prisma.$queryRaw`
+    UPDATE "ClaudeProjectRun" SET
+      "status" = ${ok ? 'done' : 'error'},
+      "output" = ${ok ? output.slice(0, PROJECT_RUN_MAX_CHARS) : ''},
+      "error" = ${ok ? null : failure.slice(0, 1000)},
+      "source" = 'claude',
+      "model" = ${String(model || '').trim().slice(0, 80)},
+      "claimedBy" = COALESCE("claimedBy", ${'mcp:' + (apiUser?.username || '')}),
+      "ms" = (EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - "createdAt")) * 1000)::int
+    WHERE "id" = ${runId} AND "status" IN ('queued', 'running')
+    RETURNING "id", "projectId"`;
+  const row = Array.isArray(rows) ? rows[0] : null;
+  if (!row) {
+    const existing = await prisma.$queryRaw`SELECT "status" FROM "ClaudeProjectRun" WHERE "id" = ${runId} LIMIT 1`;
+    const found = Array.isArray(existing) ? existing[0] : null;
+    if (!found) throw Object.assign(new Error(`run_not_found: there is no run ${runId} on the board.`), { status: 404 });
+    throw Object.assign(new Error(`run_already_settled: run ${runId} is already ${found.status}. Post without runId to add it as a new result instead.`), { status: 409 });
+  }
+  const projects = await prisma.$queryRaw`SELECT "name" FROM "ClaudeProject" WHERE "id" = ${row.projectId} LIMIT 1`;
+  const name = (Array.isArray(projects) ? projects[0]?.name : '') || 'the project';
+  return {
+    ok: true,
+    runId,
+    project: name,
+    status: ok
+      ? `Run ${runId} is done. The answer is on "${name}" in QT-Tools -> Projects, under Results.`
+      : `Run ${runId} is marked as failed on the board, with your reason.`
   };
 }
 
@@ -8440,6 +8833,27 @@ async function mcpShiftHandover(hours) {
     unassigned
   };
 }
+// For scripts/project-runner.ps1: is there anything to do? Answered with a
+// connector token, so the runner can check the queue every few seconds without
+// starting Claude - and without spending anyone's usage - when it is empty.
+app.get('/api/mcp/project-runs/queued', requireApiToken, mcpApiLimiter, async (req, res) => {
+  try {
+    await ensureProjectRunTable();
+    await expireStaleProjectRuns();
+    const rows = await prisma.$queryRaw`
+      SELECT r."id", p."name" AS "project", r."createdBy", r."createdAt"
+      FROM "ClaudeProjectRun" r JOIN "ClaudeProject" p ON p."id" = r."projectId"
+      WHERE r."status" = 'queued' ORDER BY r."createdAt" ASC, r."id" ASC LIMIT 20`;
+    const runs = (Array.isArray(rows) ? rows : []).map(r => ({
+      runId: r.id, project: r.project, requestedBy: r.createdBy || '', queuedAt: r.createdAt, prompt: projectRunHandoffPrompt(r.id)
+    }));
+    return res.json({ ok: true, count: runs.length, runs });
+  } catch (error) {
+    console.error('Project queue lookup failed:', error?.message || error);
+    return res.status(500).json({ error: 'project_queue_failed' });
+  }
+});
+
 app.get('/api/mcp/tickets', requireApiToken, mcpApiLimiter, async (req, res) => {
   const tickets = await mcpListTickets(req.query);
   res.json({ tickets });
@@ -8838,13 +9252,41 @@ function buildKanbanMcpServer(apiUser, { McpServer, z }) {
   );
 
   server.registerTool(
+    'claim_project_run',
+    {
+      title: 'Take a project run queued on the support board',
+      description: "Someone pressed Run on a project in QT-Tools and the job is waiting for you. This claims it and returns everything needed to do it: the project's instructions, the brief from the form, and any follow-up conversation. Do the work with the tools you have, then call post_project_run with the same runId. Pass runId when you were given one; leave it out to take the oldest waiting run.",
+      inputSchema: {
+        runId: z.number().int().positive().optional().describe('The run to take, e.g. from a "claim_project_run with runId N" request. Omit to take the oldest queued run.')
+      }
+    },
+    async (args) => {
+      try { return mcpTextResult(await mcpClaimProjectRun(apiUser, args)); } catch (error) { return mcpErrorResult(error); }
+    }
+  );
+
+  server.registerTool(
+    'list_queued_project_runs',
+    {
+      title: 'See project runs waiting on the board',
+      description: 'Runs queued from QT-Tools that no Claude has finished yet - waiting, or claimed and in progress. Use claim_project_run to take one.',
+      inputSchema: {}
+    },
+    async () => {
+      try { return mcpTextResult(await mcpListQueuedProjectRuns()); } catch (error) { return mcpErrorResult(error); }
+    }
+  );
+
+  server.registerTool(
     'post_project_run',
     {
       title: 'Put a result on the support board',
-      description: "Hand the board the result of running a project, so the team can read it in QT-Tools without opening Claude. Use this after you have run a registered project's work for someone: pass the project name and the finished answer as output. This is the route that works when the board has no ANTHROPIC_API_KEY of its own - you do the run, the board keeps and renders the answer. Markdown in output is rendered (headings, lists, tables, code). Register the project first with register_project if it is not on the board yet.",
+      description: "Hand the board the result of running a project, so the team can read it in QT-Tools without opening Claude. For a run you took with claim_project_run, pass its runId - that completes the run the board is waiting on. If you could not do it, pass runId with error instead of output, so the board stops waiting. For a run nobody queued, pass the project name instead of runId and it is added as a new result. Markdown in output is rendered (headings, lists, tables, code).",
       inputSchema: {
-        project: z.string().min(1).describe('The project name or slug as it appears on the board. Check with list_board_projects.'),
-        output: z.string().min(1).describe('The finished result, verbatim. Markdown is rendered on the board.'),
+        runId: z.number().int().positive().optional().describe('The run from claim_project_run. Completes that queued run.'),
+        project: z.string().optional().describe('The project name or slug, when there is no runId. Check with list_board_projects.'),
+        output: z.string().optional().describe('The finished result, verbatim. Markdown is rendered on the board.'),
+        error: z.string().optional().describe('With runId and no output: why the run could not be done.'),
         title: z.string().optional().describe('A short label for this run, e.g. the hotel or URL it was about. Shown in the history list.'),
         model: z.string().optional().describe('Which model produced it, if worth recording.'),
         inputs: z.array(z.object({
@@ -12690,10 +13132,10 @@ app.get('/', (req, res) => {
 //   is board-only state kept in a local JSON file, not the database, so
 //   it is not used here. `vendor` has no data source at all and is always
 //   null.
-// - SLA figures use wall-clock hours against SLA_HOURS_BY_PRIORITY, not
-//   the dashboard's shift-time-aware SLA clock (which excludes the
-//   assigned agent's off-hours/weekends) - a materially different, looser
-//   definition. Flagged via `meta.sla_definition` on every response.
+// - SLA figures use working hours (08:00-12:00 and 14:00-17:00, weekdays)
+//   against SLA_HOURS_BY_PRIORITY, not the dashboard's shift-time-aware SLA
+//   clock, which also leaves out the time the assigned agent was logged off
+//   or on a break. Flagged via `meta.sla_definition` on every response.
 const CHURN_POLICY_SUBJECT_PATTERNS = [
   /acceso\s+quick\s?text/i,
   /quinta\s+access/i,
@@ -12892,14 +13334,14 @@ function computeCompanySignals(companyName, tickets, eventsByTicket, asOfMs, win
   const escalations90d = window90.filter(x => x.categoryAsOf === 'IT Escalation').length;
   const policyTickets90d = window90.filter(x => isChurnPolicyTicket(x.t)).length;
 
-  // SLA: wall-clock hours vs SLA_HOURS_BY_PRIORITY - see the deviation note
-  // at the top of this section for how this differs from the dashboard's
-  // own shift-time-aware SLA clock.
+  // SLA: working hours vs SLA_HOURS_BY_PRIORITY - see the deviation note at
+  // the top of this section for how this differs from the dashboard's own
+  // shift-time-aware SLA clock.
   const resolvedInWindow90 = window90.filter(x => x.resolvedAtMsAsOf);
   let slaBreaches90d = 0;
   for (const x of resolvedInWindow90) {
     const targetHours = slaTargetHoursFor(x.priorityAsOf);
-    const hoursToResolve = (x.resolvedAtMsAsOf - x.createdAtMs) / 3600000;
+    const hoursToResolve = businessMsInRange(x.createdAtMs, x.resolvedAtMsAsOf) / 3600000;
     if (hoursToResolve > targetHours) slaBreaches90d++;
   }
   const slaBreachRate90d = resolvedInWindow90.length ? Math.round((slaBreaches90d / resolvedInWindow90.length) * 100) / 100 : 0;
@@ -12947,7 +13389,7 @@ function computeCompanySignals(companyName, tickets, eventsByTicket, asOfMs, win
         severity: 'critical',
         revenue_impacting: x.categoryAsOf === 'Integration' || x.categoryAsOf === 'IT Escalation',
         component: x.categoryAsOf || null,
-        sla_breached: ageHours > targetHours
+        sla_breached: businessMsInRange(x.createdAtMs, asOfMs) / 3600000 > targetHours
       };
     });
 
@@ -13115,7 +13557,7 @@ async function runChurnSignalsQuery(req, res) {
         requested: companyNames.length,
         returned: results.length,
         identity_note: 'quinta_property_id is not available in this app yet; results are keyed by company_name (exact match) instead.',
-        sla_definition: 'wall_clock_hours_vs_priority_target - not the dashboard\'s shift-time-aware SLA clock',
+        sla_definition: 'working_hours_vs_priority_target (08:00-12:00 and 14:00-17:00, weekdays) - not the dashboard\'s shift-time-aware SLA clock',
         point_in_time_reconstruction: 'event_replay'
       }
     };

@@ -568,10 +568,36 @@ card per project that expands into **a form built from that project's own
 inputs** — Q-SEO Implementation asks for a URL, account ID, license key and a
 server-language dropdown; Q-Share Mapping asks for a URL and a teamId.
 
-Pressing Run sends the project's instructions as the system prompt and the form
-values as the message, and shows the answer in place with timing and token
-usage. The answer opens a thread: **Ask a follow-up** keeps going against the
-same project without going back to the form.
+**The board never calls a model and needs no Anthropic API key.** Claude does
+the work, on a Claude account the team already has:
+
+1. **Run** queues the job (form values, and the project's instructions) and
+   the card shows *Waiting for Claude*.
+2. A Claude with the support board connector takes it with `claim_project_run`.
+   Either a runner PC does this by itself (`scripts/project-runner.ps1`, below),
+   or someone clicks **Copy for Claude** on the card and pastes the one line
+   into a claude.ai chat with the connector switched on.
+3. Claude does the work with its own tools — web, browser, any other MCP
+   servers it has — and calls `post_project_run` with the run's id.
+4. The card shows *Claude working*, then the answer under **Results**. Closing
+   the tab does not matter; the answer lands either way.
+
+**Ask a follow-up** queues another run carrying the conversation so far.
+
+Projects reach the board the same way: an admin opens the project in Claude and
+asks it to register itself (**Add from Claude** copies the line to paste). There
+is no free API that lists claude.ai Projects, so Claude pushes them rather than
+the board pulling them.
+
+### The runner PC (optional)
+
+`scripts/project-runner.ps1` turns Run into a hands-off button. Leave it running
+on an always-on Windows PC with Claude Code signed in and the board connector
+added (`claude mcp add --scope user ...`; setup steps are at the top of the
+script). It checks the queue over plain HTTP every 20 seconds, so an empty queue
+costs nothing, and starts `claude -p` only when a run is waiting. Runs count
+against the Claude account signed in on that PC. Without a runner, runs wait
+for someone to paste the hand-off line.
 
 ### Why the catalogue lives here and not in Claude
 
@@ -593,12 +619,11 @@ prompt would be worse than an honest gap. Until one is filled in the card reads
 
 | Variable | Default | Effect |
 | --- | --- | --- |
-| `ANTHROPIC_API_KEY` | unset | Required. Without it the panel lists projects but nothing can be run, and says so. |
-| `PROJECT_MODEL` | `claude-opus-5` | Model used for a run, unless a project overrides it. |
+| `PROJECT_RUN_STALE_MINUTES` | `120` | A run Claude claimed but never answered is reported as failed after this long. |
+| `PROJECT_QUEUE_EXPIRE_HOURS` | `72` | A run nobody picked up is dropped after this long. |
 | `CLAUDE_CREDENTIAL_SECRET` | falls back to `SESSION_SECRET` | Wraps each agent's Compliance Access Key before it is stored. See below. |
 
-`ANTHROPIC_API_KEY` is read from the environment on every run and is never sent
-to the browser — the panel is told only whether one is set.
+No `ANTHROPIC_API_KEY` is needed for projects.
 
 ### The Compliance Access Key is encrypted at rest
 
@@ -677,6 +702,21 @@ The same rule is implemented twice on purpose - `businessMsInRange` in
 `server.js` for the KPI dashboard, and its twin in `index.html` for the badges -
 so both sides of the app agree. Change one and change the other.
 
+Those hours are the team's local time. The board reads them in the browser's
+timezone; the server sets its own at startup from `SLA_TIMEZONE` (an IANA name,
+default `Africa/Casablanca`, or `TZ` if that is set). Without it the container
+counted in UTC, an hour off the board.
+
+A hold (Waiting on Contact, a Jira link, an open Velma bug) carries the clock
+over in working time: when it ends, the ticket resumes with exactly the working
+hours it had when the hold began (`businessPointBefore`).
+
+An agent marked **Off** puts every open ticket they hold on hold. Each leave is
+also kept as a period in `data/shifts.json` (`agents.<CODE>.leaves`), because
+the leave row itself is deleted when it ends, and those periods are cut out of
+the clock - so it resumes where it stopped when they are back, or as soon as
+the ticket is given to someone who is in.
+
 ### Breaks
 
 | | | |
@@ -747,8 +787,14 @@ close the tab. If several people connect, the most recent one is tried first and
 an account without access to the sheet is skipped for the next.
 
 1. In Google Cloud, enable the **Google Sheets API**.
-2. Configure the OAuth consent screen (Internal, for the quinta.im workspace) with
-   the scopes `openid`, `email` and `.../auth/spreadsheets.readonly`.
+2. Configure the OAuth consent screen with the scopes `openid`, `email` and
+   `.../auth/spreadsheets.readonly`. Audience: **External, published** (not
+   Testing, whose tokens expire after 7 days). **Internal** only works when the
+   Cloud project belongs to quinta.im's own Google organisation - the current
+   project ("Dash Spreadsheet Connection") is under `sfa-org`, where Internal
+   refuses every quinta.im account with `403 org_internal`. An unverified
+   External app shows a "Google hasn't verified this app" warning on first
+   sign-in: Advanced > Go to the app.
 3. Create an **OAuth client ID** of type *Web application* with the authorised
    redirect URI `https://<board host>/auth/google/callback` - one per environment
    (pre-prod and prod each need their own URI listed).
@@ -768,12 +814,19 @@ The stored tokens are encrypted with `CLAUDE_CREDENTIAL_SECRET` (falling back to
 `SESSION_SECRET`), the same key as the Claude connector - changing it disconnects
 everyone, who then simply sign in again.
 
+If no signed-in account or service account can read the sheet, the server falls back to the sheet's
+link: a sheet shared as "Anyone with the link can view" is read from its CSV
+export with no credential.
+
 **Option B - a service account (nobody has to stay signed in).**
 
 1. In Google Cloud, enable the **Google Sheets API**, create a service account
    and download a JSON key for it.
 2. Share the sheet with the service account's email (Viewer is enough).
-3. Set `GOOGLE_SERVICE_ACCOUNT_JSON` to the key file's contents, raw or base64.
+3. Either upload the key file from the board - **Account > Google account**
+   (admins only), stored encrypted in `OAuthToken` (`google-service-account`)
+   and checked against the sheet on save - or set `GOOGLE_SERVICE_ACCOUNT_JSON`
+   to the key file's contents, raw or base64 (the environment wins).
 
 **Status and the SLA.** The bug's **Status** column is read with the row (the
 value the dropdown shows). While it is anything other than DONE the ticket's SLA
