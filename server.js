@@ -1381,6 +1381,126 @@ function persistShiftStore() {
   } catch (error) {
     console.warn('Shift store write failed:', error.message || error);
   }
+  scheduleShiftStoreDbSave();
+}
+
+/* The shift store is also kept in Postgres (OAuthToken "shift-store", the same
+   key-value use the leave rows make of it).
+
+   data/ is not a persistent volume: every deploy starts the container on an
+   empty one. The board state is rebuilt from the database at boot, but the
+   shift history was not, so each deploy wiped every agent's logged-in time -
+   and with it every resolved ticket's SLA measure, which then read "met in 0h".
+
+   The file stays the fast local copy. The database is written a few seconds
+   after a change (a heartbeat a minute per agent does not need a row write
+   each), and once more on shutdown. At boot the two are merged, so a
+   heartbeat that lands before the database answers is not lost either.
+
+   `since` is when the history became complete: a ticket whose clock started
+   before it cannot be measured, and is reported as such rather than as met. */
+const SHIFT_STORE_DB_KEY = 'shift-store';
+const SHIFT_STORE_DB_SAVE_DELAY_MS = 10 * 1000;
+let shiftStoreDbReady = false;
+let shiftStoreDbTimer = null;
+
+function scheduleShiftStoreDbSave() {
+  // Not before the database copy has been merged in: writing the bare file
+  // over it would be the very wipe this exists to prevent.
+  if (!shiftStoreDbReady || shiftStoreDbTimer) return;
+  shiftStoreDbTimer = setTimeout(() => { shiftStoreDbTimer = null; void saveShiftStoreToDb(); }, SHIFT_STORE_DB_SAVE_DELAY_MS);
+  shiftStoreDbTimer.unref?.();
+}
+async function saveShiftStoreToDb() {
+  try {
+    const metadata = JSON.parse(JSON.stringify(shiftStore));
+    await prisma.oAuthToken.upsert({
+      where: { provider: SHIFT_STORE_DB_KEY },
+      create: { provider: SHIFT_STORE_DB_KEY, metadata },
+      update: { metadata }
+    });
+  } catch (error) {
+    console.warn('Shift store database write failed:', error.message || error);
+  }
+}
+
+// One interval list from two copies of it, keyed by start. Where both have the
+// same interval, a closed end beats an open one (the copy that saw it close is
+// the newer), and two closed ends keep the later.
+function mergeIntervals(a = [], b = [], mergeExtra = (x) => x) {
+  const byStart = new Map();
+  for (const item of [...a, ...b]) {
+    const key = Number(item?.start || 0);
+    if (!key) continue;
+    const seen = byStart.get(key);
+    if (!seen) { byStart.set(key, { ...item }); continue; }
+    const openA = seen.end === null || seen.end === undefined;
+    const openB = item.end === null || item.end === undefined;
+    const end = openA && openB ? null : openA ? item.end : openB ? seen.end : Math.max(Number(seen.end), Number(item.end));
+    byStart.set(key, mergeExtra({ ...seen, ...item, end }, seen, item));
+  }
+  return [...byStart.values()].sort((x, y) => x.start - y.start);
+}
+function mergeShiftStores(a, b, now = Date.now()) {
+  const out = { agents: {} };
+  const sinces = [a?.since, b?.since].map(Number).filter(v => v > 0);
+  if (sinces.length) out.since = Math.min(...sinces);
+  const codes = new Set([...Object.keys(a?.agents || {}), ...Object.keys(b?.agents || {})]);
+  for (const code of codes) {
+    const ra = a?.agents?.[code] || {};
+    const rb = b?.agents?.[code] || {};
+    // An open session remembers the last heartbeat its copy saw, in case it
+    // turns out to be one the container stopped in the middle of.
+    const withSeen = rec => (rec.sessions || []).map(s => (s.end === null || s.end === undefined) ? { ...s, seen: Number(rec.lastSeen || 0) } : s);
+    const sessions = mergeIntervals(withSeen(ra), withSeen(rb), (merged, x, y) => ({
+      ...merged,
+      breaks: mergeIntervals(x.breaks, y.breaks)
+    })).map(s => ({ ...s, breaks: s.breaks || [] }));
+    // Only the last session can still be running. One left open in the older
+    // copy ends at that copy's last heartbeat - not when the next one began,
+    // which would count the time the board was down as worked.
+    for (let i = 0; i < sessions.length - 1; i++) {
+      const s = sessions[i];
+      if (s.end === null || s.end === undefined) s.end = Math.max(s.start, Math.min(sessions[i + 1].start, s.seen || sessions[i + 1].start));
+    }
+    sessions.forEach(s => { delete s.seen; });
+    const rec = { lastSeen: Math.max(Number(ra.lastSeen || 0), Number(rb.lastSeen || 0)), sessions };
+    const leaves = mergeIntervals(ra.leaves, rb.leaves);
+    if (leaves.length) rec.leaves = leaves;
+    out.agents[code] = rec;
+  }
+  if (!out.since) {
+    const starts = Object.values(out.agents).flatMap(r => r.sessions.map(s => Number(s.start))).filter(v => v > 0);
+    out.since = starts.length ? Math.min(...starts) : now;
+  }
+  return out;
+}
+async function loadShiftStoreFromDb() {
+  try {
+    const row = await prisma.oAuthToken.findUnique({ where: { provider: SHIFT_STORE_DB_KEY } });
+    const stored = row?.metadata && typeof row.metadata === 'object' && row.metadata.agents ? row.metadata : null;
+    shiftStore = mergeShiftStores(stored, shiftStore);
+    shiftStoreDbReady = true;
+    persistShiftStore();
+    void saveShiftStoreToDb();
+    console.log(`Shift history loaded (${Object.keys(shiftStore.agents).length} agent(s), complete since ${new Date(shiftStore.since).toISOString()}).`);
+  } catch (error) {
+    // Try again rather than start saving over a copy we could not read.
+    console.warn('Shift store database read failed, retrying:', error.message || error);
+    setTimeout(() => { void loadShiftStoreFromDb(); }, 30 * 1000).unref?.();
+  }
+}
+// Kubernetes stops a pod with SIGTERM: save the last few seconds first.
+let shiftStoreFlushedOnExit = false;
+for (const signal of ['SIGTERM', 'SIGINT']) {
+  process.once(signal, async () => {
+    if (!shiftStoreFlushedOnExit && shiftStoreDbReady) {
+      shiftStoreFlushedOnExit = true;
+      clearTimeout(shiftStoreDbTimer);
+      await Promise.race([saveShiftStoreToDb(), new Promise(resolve => setTimeout(resolve, 3000))]);
+    }
+    process.exit(0);
+  });
 }
 
 function shiftAgentRecord(code) {
@@ -1509,6 +1629,7 @@ function shiftSnapshotFor(code) {
 }
 
 shiftStore = loadShiftStore();
+void loadShiftStoreFromDb();
 setInterval(sweepIdleShifts, SHIFT_SWEEP_MS).unref?.();
 
 /* Leave: a support agent who is off (holiday, sick, off for the day).
@@ -1802,6 +1923,9 @@ function shiftElapsedMs(fromMs, toMs, agentCode) {
 //                     leaves the column (setTicketStage in index.html), so
 //                     once it is back with us the count resumes from where it
 //                     stopped and the wait never reaches met/breached either.
+//   no_history      - resolved, but its clock started before the shift history
+//                     was complete (shiftStore.since), so its worked time is
+//                     unknown. Unmeasured, like no_clock.
 //   leave_hold      - open, and the assigned agent is marked off. The days
 //                     off are cut out of the clock (rec.leaves), so it
 //                     resumes where it stopped.
@@ -1850,6 +1974,13 @@ function ticketSlaSnapshot(ticket, now = Date.now()) {
   // (shiftElapsedMs), so it carries on from where it stopped when they are
   // back, or as soon as the ticket is given to someone who is in.
   if (!resolved && isAgentOnLeave(agent, now)) return { ...base, state: 'leave_hold', wallMs };
+
+  // Its clock started before the shift history was complete, so the time
+  // worked on it is not known - not zero. Reporting it as met in 0h is what
+  // made the dashboard read 100% after every deploy wiped the history.
+  if (resolved && Number(shiftStore.since) > 0 && createdMs < Number(shiftStore.since)) {
+    return { ...base, state: 'no_history', wallMs };
+  }
 
   const shiftMs = shiftElapsedMs(createdMs, Number.isFinite(endMs) ? endMs : now, agent);
   const remaining = targetMs - shiftMs;
@@ -5834,8 +5965,10 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
     let slaMet = 0;
     let slaBreached = 0;
     let slaUnmeasured = 0;
+    let slaNoHistory = 0;
     for (const ticket of resolvedInRange) {
       const snapshot = ticketSlaSnapshot(ticket, now);
+      if (snapshot.state === 'no_history') slaNoHistory++;
       const rows = rowKeysForTicket(ticket).map(ensureAgentRow);
       if (snapshot.state === 'met') { slaMet++; rows.forEach(row => row.slaMet++); }
       else if (snapshot.state === 'breached') {
@@ -5963,6 +6096,10 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
         // clock ever ran, or linked to Jira, so the clock was off. Excluded
         // from the percentage rather than silently counted as met.
         unmeasured: slaUnmeasured,
+        // The part of `unmeasured` resolved from before the shift history
+        // was complete, so the dashboard can say why they are missing.
+        noHistory: slaNoHistory,
+        historySince: shiftStore.since ? new Date(Number(shiftStore.since)).toISOString() : null,
         compliancePct: slaMeasured ? Math.round((slaMet / slaMeasured) * 1000) / 10 : null,
         avgResolveShiftHours: avgOf(resolveShiftHours),
         medianResolveShiftHours: Math.round(medianOf(resolveShiftHours) * 10) / 10,

@@ -14390,12 +14390,17 @@ function stopKpiAutoRefresh(){
 // bursts, so overlapping pulls are collapsed rather than queued: the guard in
 // renderKpiView drops a request while one is already in flight.
 let kpiFetchInFlight=false;
+// Every figure this formats is SLA time - working hours, seven to a day
+// (08:00-12:00 and 14:00-17:00) - so a "day" here is seven of them, not
+// twenty-four. Dividing by 24 made 475 working hours read as 19.8 days when it
+// is 68 working days. Hours up to 99, so SLA targets (4h, 24h, 48h) read as set.
+const SLA_HOURS_PER_WORKDAY=7;
 function fmtHours(h){
   const n=Number(h||0);
   if(!Number.isFinite(n)||n<=0)return'0h';
   if(n<1)return`${Math.round(n*60)}m`;
-  if(n<48)return`${Math.round(n*10)/10}h`;
-  return`${Math.round(n/24*10)/10}d`;
+  if(n<100)return`${Math.round(n*10)/10}h`;
+  return`${Math.round(n/SLA_HOURS_PER_WORKDAY*10)/10} working days`;
 }
 // Every card carries the tickets behind its number so clicking one opens
 // them, rather than leaving the agent to go hunt through a filter to find
@@ -14583,7 +14588,7 @@ async function renderKpiView(){
       kpiCard('At risk',sla.atRisk||0,{tone:(sla.atRisk||0)>0?'warn':'',hint:'Under 25% of target left',category:'atRisk'}),
       kpiCard('SLA met',compliance===null||compliance===undefined?'-':`${compliance}%`,{
         tone:compliance===null||compliance===undefined?'':(compliance>=90?'good':compliance>=75?'warn':'bad'),
-        hint:`${sla.met||0} of ${(sla.met||0)+(sla.breached||0)} resolved in range`,category:'slaMeasured'}),
+        hint:`${sla.met||0} of ${(sla.met||0)+(sla.breached||0)} resolved in range`+(sla.noHistory?` - ${sla.noHistory} not measured (from before shift history was kept)`:''),category:'slaMeasured'}),
       kpiCard('Avg resolve',fmtHours(sla.avgResolveShiftHours),{hint:`Median ${fmtHours(sla.medianResolveShiftHours)} - shift time`,category:'slaMeasured'}),
       kpiCard('Oldest open',fmtHours(sla.oldestOpenHours),{hint:'Working hours since arrival (no nights or weekends)',category:'oldestOpen'}),
       kpiCard('Created',flow.created||0,{hint:'In this range',category:'created'}),
