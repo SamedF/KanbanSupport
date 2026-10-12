@@ -702,6 +702,21 @@ The same rule is implemented twice on purpose - `businessMsInRange` in
 `server.js` for the KPI dashboard, and its twin in `index.html` for the badges -
 so both sides of the app agree. Change one and change the other.
 
+Those hours are the team's local time. The board reads them in the browser's
+timezone; the server sets its own at startup from `SLA_TIMEZONE` (an IANA name,
+default `Africa/Casablanca`, or `TZ` if that is set). Without it the container
+counted in UTC, an hour off the board.
+
+A hold (Waiting on Contact, a Jira link, an open Velma bug) carries the clock
+over in working time: when it ends, the ticket resumes with exactly the working
+hours it had when the hold began (`businessPointBefore`).
+
+An agent marked **Off** puts every open ticket they hold on hold. Each leave is
+also kept as a period in `data/shifts.json` (`agents.<CODE>.leaves`), because
+the leave row itself is deleted when it ends, and those periods are cut out of
+the clock - so it resumes where it stopped when they are back, or as soon as
+the ticket is given to someone who is in.
+
 ### Breaks
 
 | | | |

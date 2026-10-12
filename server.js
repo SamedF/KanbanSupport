@@ -1,4 +1,10 @@
 require('dotenv').config();
+// The SLA clock runs 08:00-12:00 and 14:00-17:00 on weekdays, and those are
+// the team's hours, not the container's. The image ships with no timezone, so
+// without this the server counted in UTC: its "weekend" began an hour early
+// and its windows sat an hour off the board's. Set before anything reads a
+// date. SLA_TIMEZONE overrides; an explicit TZ is kept.
+process.env.TZ = String(process.env.SLA_TIMEZONE || process.env.TZ || 'Africa/Casablanca').trim();
 const prisma = require('./prismaClient');
 const { Prisma } = require('@prisma/client');
 const express = require('express');
@@ -1497,7 +1503,8 @@ function shiftSnapshotFor(code) {
     cooldownMs: SHIFT_BREAK_COOLDOWN_MS,
     cooldownRemainingMs: breakCooldownRemaining(rec, now),
     lastSeen: rec.lastSeen || 0,
-    sessions: rec.sessions
+    sessions: rec.sessions,
+    leaves: rec.leaves || []
   };
 }
 
@@ -1543,10 +1550,53 @@ async function loadAgentLeave() {
       next[code] = meta;
     }
     agentLeave = next;
+    syncLeavePeriods();
   } catch (error) {
     console.warn('Agent leave load failed:', error?.message || error);
   }
   return agentLeave;
+}
+/* The SLA clock is on hold while the assigned agent is off, so it needs to
+   know when they were off, not only whether they are now - and the leave
+   rows above are deleted when a leave ends. So every leave is also kept as a
+   period next to the agent's shift sessions: rec.leaves = [{ start, until,
+   end }], where end is null while it runs and until is the return date it was
+   given. Kept in the shift store because that is what the clock is computed
+   from, and the board receives it with the sessions.
+
+   Brought into line with agentLeave after every change and on startup, which
+   also opens a period for anyone already off when this first runs. */
+function leavePeriodEnd(period, now = Date.now()) {
+  if (period.end !== null && period.end !== undefined) return Number(period.end);
+  const until = Number(period.until || 0);
+  return until && until < now ? until : now;
+}
+function syncLeavePeriods(now = Date.now()) {
+  let changed = false;
+  const codes = new Set([...Object.keys(agentLeave), ...Object.keys(shiftStore.agents)]);
+  for (const code of codes) {
+    const leave = agentLeave[code];
+    const active = isLeaveActive(leave, now);
+    const existing = shiftStore.agents[code];
+    if (!active && !existing?.leaves?.length) continue;
+    const rec = shiftAgentRecord(code);
+    rec.leaves = Array.isArray(rec.leaves) ? rec.leaves : [];
+    const open = rec.leaves.find(p => p.end === null || p.end === undefined);
+    if (active) {
+      const until = leave.until ? Number(leave.until) : null;
+      if (!open) {
+        rec.leaves.push({ start: Number(leave.since) || now, until, end: null });
+        changed = true;
+      } else if (open.until !== until) {
+        open.until = until;
+        changed = true;
+      }
+    } else if (open) {
+      open.end = leavePeriodEnd(open, now);
+      changed = true;
+    }
+  }
+  if (changed) persistShiftStore();
 }
 async function setAgentLeave(code, leave) {
   const provider = `${AGENT_LEAVE_PREFIX}${code}`;
@@ -1561,6 +1611,7 @@ async function setAgentLeave(code, leave) {
     await prisma.oAuthToken.delete({ where: { provider } }).catch(() => null);
     delete agentLeave[code];
   }
+  syncLeavePeriods();
   // Every open board greys the agent out (or back in) straight away, rather
   // than on its next shift poll.
   sseBroadcast('agent_leave', { leave: activeAgentLeave() });
@@ -1656,6 +1707,31 @@ function businessMsInRange(from, to) {
   }
   return total;
 }
+// The inverse: the latest moment from which `amount` of working time has run
+// by `to`. Walks the windows backwards a day at a time, weekends skipped.
+function businessPointBefore(to, amount) {
+  let left = amount;
+  if (!(left > 0)) return to;
+  const cursor = new Date(to);
+  cursor.setHours(0, 0, 0, 0);
+  // Ten years of days: far past any SLA, and a stop if the windows are empty.
+  for (let day = 0; day < 3660; day++) {
+    if (!isWeekendDate(cursor)) {
+      for (let i = BUSINESS_WINDOWS.length - 1; i >= 0; i--) {
+        const [sh, sm, eh, em] = BUSINESS_WINDOWS[i];
+        const windowStart = new Date(cursor); windowStart.setHours(sh, sm, 0, 0);
+        const windowEnd = new Date(cursor); windowEnd.setHours(eh, em, 0, 0);
+        const end = Math.min(windowEnd.getTime(), to);
+        const start = windowStart.getTime();
+        if (!(end > start)) continue;
+        if (end - start >= left) return end - left;
+        left -= end - start;
+      }
+    }
+    cursor.setDate(cursor.getDate() - 1);
+  }
+  return to - amount;
+}
 // Superseded by businessMsInRange - kept because the shift report still counts
 // presence in whole weekdays, which is a different question from SLA time.
 function weekdayMsInRange(from, to) {
@@ -1680,22 +1756,29 @@ function weekdayMsInRange(from, to) {
 }
 
 // Worked milliseconds for one agent within [fromMs,toMs): their shift sessions,
-// clipped to weekdays, minus any overlapping break.
+// clipped to working hours, minus any overlapping break and any time they were
+// off. Breaks and leave are merged first, so a break taken on a day marked off
+// is not taken away twice.
 function shiftElapsedMs(fromMs, toMs, agentCode) {
   const rec = shiftStore.agents[String(agentCode || '').trim().toUpperCase()];
   if (!rec || !Array.isArray(rec.sessions)) return 0;
   const now = Date.now();
+  const leaves = (rec.leaves || []).map(p => [Number(p.start || 0), leavePeriodEnd(p, now)]);
   let total = 0;
   rec.sessions.forEach((s) => {
     const start = Math.max(Number(s.start || 0), fromMs);
     const end = Math.min(s.end === null || s.end === undefined ? now : Number(s.end), toMs);
     if (!(end > start)) return;
+    const excluded = [...(s.breaks || []).map(b => [Number(b.start || 0), breakEndMs(b, now)]), ...leaves]
+      .map(([a, b]) => [Math.max(a, start), Math.min(b, end)])
+      .filter(([a, b]) => b > a)
+      .sort((x, y) => x[0] - y[0]);
     let worked = businessMsInRange(start, end);
-    (s.breaks || []).forEach((b) => {
-      const bs = Math.max(Number(b.start || 0), start);
-      const be = Math.min(breakEndMs(b, now), end);
-      if (be > bs) worked -= businessMsInRange(bs, be);
-    });
+    let cursor = start;
+    for (const [a, b] of excluded) {
+      const from = Math.max(a, cursor);
+      if (b > from) { worked -= businessMsInRange(from, b); cursor = b; }
+    }
     total += Math.max(0, worked);
   });
   return total;
@@ -1719,6 +1802,9 @@ function shiftElapsedMs(fromMs, toMs, agentCode) {
 //                     leaves the column (setTicketStage in index.html), so
 //                     once it is back with us the count resumes from where it
 //                     stopped and the wait never reaches met/breached either.
+//   leave_hold      - open, and the assigned agent is marked off. The days
+//                     off are cut out of the clock (rec.leaves), so it
+//                     resumes where it stopped.
 //
 // The last one is a commitment we are no longer the ones able to keep. Once a
 // ticket is handed to engineering, the time it takes is theirs, and the
@@ -1739,13 +1825,18 @@ function ticketSlaSnapshot(ticket, now = Date.now()) {
   const targetMs = targetHours * 3600000;
   const resolved = normalizeDbStatusForBoard(ticket?.status) === 'res';
   const agent = String(ticket?.assignedAgent || '').trim().toUpperCase();
-  const base = { targetHours, resolved, state: 'no_clock', shiftMs: 0, wallMs: 0, overdueMs: 0 };
+  const base = { targetHours, resolved, state: 'no_clock', shiftMs: 0, wallMs: 0, ageMs: 0, overdueMs: 0 };
   if (!Number.isFinite(createdMs)) return base;
 
   const endMs = resolved
     ? (ticket?.resolvedAt ? new Date(ticket.resolvedAt).getTime() : now)
     : now;
   const wallMs = Math.max(0, (Number.isFinite(endMs) ? endMs : now) - createdMs);
+  // The ticket's age in the hours the SLA runs: no nights, lunch or weekends.
+  // What "oldest open" and "h open" report, so a Monday dashboard does not
+  // read the weekend as time the ticket sat waiting on us.
+  const ageMs = businessMsInRange(createdMs, Number.isFinite(endMs) ? endMs : now);
+  base.ageMs = ageMs;
   // Checked before the assignee, and before resolved/open is decided: a
   // Jira-linked ticket has no SLA position at all, so there is nothing for
   // either branch below to say about it.
@@ -1755,6 +1846,10 @@ function ticketSlaSnapshot(ticket, now = Date.now()) {
   if (String(ticket?.velmaBugId || '').trim() && !ticket?.velmaBugRow?.done) return { ...base, state: 'velma_hold', wallMs };
   if (!resolved && normalizeDbStatusForBoard(ticket?.status) === 'wct') return { ...base, state: 'contact_hold', wallMs };
   if (!agent) return { ...base, wallMs };
+  // The agent holding it is off. Their time off is taken out of the clock
+  // (shiftElapsedMs), so it carries on from where it stopped when they are
+  // back, or as soon as the ticket is given to someone who is in.
+  if (!resolved && isAgentOnLeave(agent, now)) return { ...base, state: 'leave_hold', wallMs };
 
   const shiftMs = shiftElapsedMs(createdMs, Number.isFinite(endMs) ? endMs : now, agent);
   const remaining = targetMs - shiftMs;
@@ -4667,8 +4762,8 @@ function velmaLinkWithStatus(previous, found, now = Date.now()) {
 // The ticket ids whose link this changes from held to released.
 const velmaHoldEnded = (previous, next) => !!previous && !previous.done && !!next?.done;
 
-// Move one ticket's SLA restart point forward by the length of a hold that has
-// just ended, the server's copy of resumeSlaAfterHold in index.html. Skipped
+// Move one ticket's SLA restart point forward past a hold that has just ended,
+// the server's copy of resumeSlaAfterHold in index.html. Skipped
 // while a Jira link or Waiting on Contact still holds the ticket - those settle
 // the clock themselves when they end, and resuming here as well would count
 // the overlap twice. Returns the new restart point, or null for no change.
@@ -4680,7 +4775,11 @@ function slaResumePointAfterHold(state, externalId, since, now) {
   const created = new Date(state.ticketCreatedAt?.[externalId] || 0).getTime() || 0;
   const base = Math.max(created, Number(state.ticketSlaResetAt?.[externalId] || 0));
   if (!base || base >= since) return null;
-  return base + (now - since);
+  // Carried over in working time, not wall time: the clock resumes with
+  // exactly the working hours it had when the hold began. Shifting by the
+  // wall-clock length of the hold moved the start across nights and weekends
+  // the hold had nothing to do with, and took real time off or put it back.
+  return businessPointBefore(now, businessMsInRange(base, since));
 }
 
 // Write several server-owned values into the board state in one synchronous
@@ -5620,9 +5719,10 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
        the headline card disagree with the table under it. */
     const BACKLOG_KEY_BY_STATE = {
       overdue: 'overdue', at_risk: 'atRisk', on_track: 'onTrack',
-      no_clock: 'noClock', jira_hold: 'jiraHold', velma_hold: 'velmaHold', contact_hold: 'contactHold'
+      no_clock: 'noClock', jira_hold: 'jiraHold', velma_hold: 'velmaHold', contact_hold: 'contactHold',
+      leave_hold: 'leaveHold'
     };
-    const backlog = { overdue: 0, atRisk: 0, onTrack: 0, noClock: 0, jiraHold: 0, velmaHold: 0, contactHold: 0 };
+    const backlog = { overdue: 0, atRisk: 0, onTrack: 0, noClock: 0, jiraHold: 0, velmaHold: 0, contactHold: 0, leaveHold: 0 };
     const overdueRows = [];
     let oldestOpenMs = 0;
 
@@ -5630,7 +5730,7 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
       const snapshot = ticketSlaSnapshot(ticket, now);
       const backlogKey = BACKLOG_KEY_BY_STATE[snapshot.state];
       if (backlogKey) backlog[backlogKey]++;
-      oldestOpenMs = Math.max(oldestOpenMs, snapshot.wallMs);
+      oldestOpenMs = Math.max(oldestOpenMs, snapshot.ageMs);
       if (snapshot.state === 'overdue' || snapshot.state === 'at_risk') {
         for (const key of rowKeysForTicket(ticket)) {
           const row = ensureAgentRow(key);
@@ -5649,7 +5749,7 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
           status: normalizeDbStatusForBoard(ticket.status),
           targetHours: snapshot.targetHours,
           overdueHours: hoursFromMs(snapshot.overdueMs),
-          ageHours: hoursFromMs(snapshot.wallMs),
+          ageHours: hoursFromMs(snapshot.ageMs),
           jira: ticket.jiraTicketKey || null
         });
       }
@@ -5782,6 +5882,8 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
         velmaHold: backlog.velmaHold,
         // Open tickets whose clock is frozen while they wait on the client.
         contactHold: backlog.contactHold,
+        // Open tickets whose assigned agent is off.
+        leaveHold: backlog.leaveHold,
         oldestOpenHours: hoursFromMs(oldestOpenMs),
         resolvedInRange: resolvedInRange.length,
         met: slaMet,
@@ -5881,10 +5983,10 @@ app.get('/api/tickets/kpis/drilldown', requireAuth, async (req, res) => {
       } else if (category === 'atRisk') {
         rows = openSnapshots.filter(x => x.snapshot.state === 'at_risk')
           .sort((a, b) => b.snapshot.shiftMs - a.snapshot.shiftMs)
-          .map(({ t, snapshot }) => kpiDrilldownRow(t, hoursFromMs(snapshot.wallMs) + 'h open'));
+          .map(({ t, snapshot }) => kpiDrilldownRow(t, hoursFromMs(snapshot.ageMs) + 'h open'));
       } else {
-        rows = openSnapshots.sort((a, b) => b.snapshot.wallMs - a.snapshot.wallMs)
-          .map(({ t, snapshot }) => kpiDrilldownRow(t, hoursFromMs(snapshot.wallMs) + 'h open'));
+        rows = openSnapshots.sort((a, b) => b.snapshot.ageMs - a.snapshot.ageMs)
+          .map(({ t, snapshot }) => kpiDrilldownRow(t, hoursFromMs(snapshot.ageMs) + 'h open'));
       }
     } else if (category === 'slaMet' || category === 'slaBreached' || category === 'slaMeasured') {
       // 'slaMeasured' is both cards that describe the met+breached set from a
@@ -12959,10 +13061,10 @@ app.get('/', (req, res) => {
 //   is board-only state kept in a local JSON file, not the database, so
 //   it is not used here. `vendor` has no data source at all and is always
 //   null.
-// - SLA figures use wall-clock hours against SLA_HOURS_BY_PRIORITY, not
-//   the dashboard's shift-time-aware SLA clock (which excludes the
-//   assigned agent's off-hours/weekends) - a materially different, looser
-//   definition. Flagged via `meta.sla_definition` on every response.
+// - SLA figures use working hours (08:00-12:00 and 14:00-17:00, weekdays)
+//   against SLA_HOURS_BY_PRIORITY, not the dashboard's shift-time-aware SLA
+//   clock, which also leaves out the time the assigned agent was logged off
+//   or on a break. Flagged via `meta.sla_definition` on every response.
 const CHURN_POLICY_SUBJECT_PATTERNS = [
   /acceso\s+quick\s?text/i,
   /quinta\s+access/i,
@@ -13161,14 +13263,14 @@ function computeCompanySignals(companyName, tickets, eventsByTicket, asOfMs, win
   const escalations90d = window90.filter(x => x.categoryAsOf === 'IT Escalation').length;
   const policyTickets90d = window90.filter(x => isChurnPolicyTicket(x.t)).length;
 
-  // SLA: wall-clock hours vs SLA_HOURS_BY_PRIORITY - see the deviation note
-  // at the top of this section for how this differs from the dashboard's
-  // own shift-time-aware SLA clock.
+  // SLA: working hours vs SLA_HOURS_BY_PRIORITY - see the deviation note at
+  // the top of this section for how this differs from the dashboard's own
+  // shift-time-aware SLA clock.
   const resolvedInWindow90 = window90.filter(x => x.resolvedAtMsAsOf);
   let slaBreaches90d = 0;
   for (const x of resolvedInWindow90) {
     const targetHours = slaTargetHoursFor(x.priorityAsOf);
-    const hoursToResolve = (x.resolvedAtMsAsOf - x.createdAtMs) / 3600000;
+    const hoursToResolve = businessMsInRange(x.createdAtMs, x.resolvedAtMsAsOf) / 3600000;
     if (hoursToResolve > targetHours) slaBreaches90d++;
   }
   const slaBreachRate90d = resolvedInWindow90.length ? Math.round((slaBreaches90d / resolvedInWindow90.length) * 100) / 100 : 0;
@@ -13216,7 +13318,7 @@ function computeCompanySignals(companyName, tickets, eventsByTicket, asOfMs, win
         severity: 'critical',
         revenue_impacting: x.categoryAsOf === 'Integration' || x.categoryAsOf === 'IT Escalation',
         component: x.categoryAsOf || null,
-        sla_breached: ageHours > targetHours
+        sla_breached: businessMsInRange(x.createdAtMs, asOfMs) / 3600000 > targetHours
       };
     });
 
@@ -13384,7 +13486,7 @@ async function runChurnSignalsQuery(req, res) {
         requested: companyNames.length,
         returned: results.length,
         identity_note: 'quinta_property_id is not available in this app yet; results are keyed by company_name (exact match) instead.',
-        sla_definition: 'wall_clock_hours_vs_priority_target - not the dashboard\'s shift-time-aware SLA clock',
+        sla_definition: 'working_hours_vs_priority_target (08:00-12:00 and 14:00-17:00, weekdays) - not the dashboard\'s shift-time-aware SLA clock',
         point_in_time_reconstruction: 'event_replay'
       }
     };
