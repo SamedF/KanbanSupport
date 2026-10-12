@@ -3638,6 +3638,25 @@ app.get('/favicon.ico', (req, res) => {
 
 app.get('/login', (req, res) => isAuthed(req) ? res.redirect('/') : res.type('html').sendFile(path.join(__dirname, 'public', 'login.html')));
 
+/* Public, no sign-in: Google requires a privacy policy URL before an OAuth app
+   can be published, and this is what the "Sign in with Google" app's
+   Branding page points at. It describes the one thing that sign-in is for. */
+app.get('/privacy', (req, res) => {
+  res.type('html').send(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Privacy - Support Kanban</title>
+<style>body{margin:0;font-family:Inter,'Segoe UI',Arial,sans-serif;background:#f6f7fb;color:#1c1f3a;line-height:1.6}main{max-width:720px;margin:0 auto;padding:40px 20px}h1{font-size:26px;margin:0 0 6px}h2{font-size:17px;margin:28px 0 6px}p,li{font-size:15px;color:#3b4063}</style></head>
+<body><main>
+<h1>Privacy policy</h1>
+<p>Support Kanban is Quinta's internal support board. Only Quinta staff with a board account can use it.</p>
+<h2>Google sign-in</h2>
+<p>An agent may connect a Google account so the board can read the Velma bug Google Sheet. The board asks for read-only access to Google Sheets and for the account's email address, and uses them only to look up rows of that sheet and check their status. It never writes to Google, and never reads any other file.</p>
+<p>The access token Google issues is stored encrypted on the board's server. Disconnecting the account on the board deletes it and revokes it at Google; it can also be removed at any time from myaccount.google.com &gt; Security &gt; Third-party access.</p>
+<h2>Sharing</h2>
+<p>Nothing obtained from Google is sold, shared with third parties, or used for advertising. The board's use of information received from Google APIs adheres to the Google API Services User Data Policy, including the Limited Use requirements.</p>
+<h2>Contact</h2>
+<p>Questions: your Quinta support lead.</p>
+</main></body></html>`);
+});
+
 function renderResetPasswordPage(token) {
   // Base64-encode (not JSON.stringify) before embedding in the inline
   // <script> block: JSON.stringify does not escape "</script>", so a raw
@@ -4415,18 +4434,21 @@ app.delete('/api/jira/link/:kanbanTicketId', requireAuth, async (req, res) => {
 // keeps a copy of it on the ticket, so the card can show what the bug is
 // without anyone opening the sheet.
 //
-// Nobody signs in to Google for this. The server reads the sheet by itself,
-// the first of these that works:
+// The sheet is private, so the server needs a Google identity that can read
+// it. Two ways to give it one, and the first that works is used:
 //
-//   1. A service account, if one is configured: its key uploaded by an admin
-//      (Account > Velma bug sheet) or set in GOOGLE_SERVICE_ACCOUNT_JSON, and
-//      the sheet shared with its email as Viewer.
-//   2. The sheet's link: with the sheet shared as "Anyone with the link can
-//      view", its CSV export is downloaded with no credential at all.
+//   1. A service account: create a key, share the sheet with its email
+//      (Viewer is enough), set GOOGLE_SERVICE_ACCOUNT_JSON to the key file's
+//      contents (raw or base64). Nobody has to stay signed in.
+//   2. A person's Google account, connected from the board (Account > Google
+//      account). Needs GOOGLE_OAUTH_CLIENT_ID / GOOGLE_OAUTH_CLIENT_SECRET for
+//      a Web OAuth client whose redirect URI is <board>/auth/google/callback.
+//      Whoever already has access to the sheet signs in once; their refresh
+//      token is stored encrypted and reads are made as them.
 //
-// Per-person Google sign-in used to be a third way and is gone: it depended
-// on an OAuth client inside the right Google organisation, and one created
-// anywhere else refuses every quinta.im account (403 org_internal).
+// The second exists because a service account needs someone with Google Cloud
+// admin rights to create, while an agent who can already open the sheet can
+// connect their own account in two clicks.
 // ---------------------------------------------------------------------------
 const VELMA_BUG_SHEET_ID = String(process.env.VELMA_BUG_SHEET_ID || '1do2eeXmIog5af-HX_VtrVHpLGyY5GxMkn2JX96pL3NI').trim();
 const VELMA_BUG_SHEET_GID = String(process.env.VELMA_BUG_SHEET_GID || '601357266').trim();
@@ -4442,6 +4464,11 @@ const VELMA_DONE_STATUSES = String(process.env.VELMA_DONE_STATUSES || 'DONE')
   .filter(Boolean);
 const VELMA_SHEET_CACHE_MS = 60 * 1000;
 const GOOGLE_SHEETS_SCOPE = 'https://www.googleapis.com/auth/spreadsheets.readonly';
+const GOOGLE_OAUTH_CLIENT_ID = String(process.env.GOOGLE_OAUTH_CLIENT_ID || '').trim();
+const GOOGLE_OAUTH_CLIENT_SECRET = String(process.env.GOOGLE_OAUTH_CLIENT_SECRET || '').trim();
+const GOOGLE_OAUTH_REDIRECT_URI = String(process.env.GOOGLE_OAUTH_REDIRECT_URI || '').trim();
+const GOOGLE_PROVIDER_PREFIX = 'google:';
+const googleProviderKey = userId => `${GOOGLE_PROVIDER_PREFIX}${Number(userId)}`;
 
 function parseGoogleServiceAccountKey(raw) {
   raw = String(raw || '').trim();
@@ -4459,7 +4486,7 @@ function parseGoogleServiceAccountKey(raw) {
 /* The service account the board reads the Velma sheet with - no one signs in.
 
    Set in the environment (GOOGLE_SERVICE_ACCOUNT_JSON, which wins) or uploaded
-   once by an admin from Account > Velma bug sheet, stored in OAuthToken as
+   once by an admin from Account > Google account, stored in OAuthToken as
    "google-service-account" with the whole key file encrypted. */
 const GOOGLE_SERVICE_ACCOUNT_PROVIDER = 'google-service-account';
 let googleServiceAccountCache = { at: 0, value: null };
@@ -4498,26 +4525,175 @@ async function googleServiceAccountToken(account) {
   return googleTokenCache.token;
 }
 
-// ---- Reading the sheet -----------------------------------------------------
+// ---- Google accounts connected from the board ------------------------------
 
-async function readSheetWithServiceAccount(account) {
-  const token = await googleServiceAccountToken(account);
-  const get = async (pathAndQuery) => {
+// Every connected account, newest first. The sheet is the same for everyone,
+// so any account that can read it will do; the most recently connected one is
+// tried first because it is the one most likely to still be valid.
+async function listGoogleConnections() {
+  try {
+    const rows = await prisma.oAuthToken.findMany({
+      where: { provider: { startsWith: GOOGLE_PROVIDER_PREFIX } },
+      orderBy: { updatedAt: 'desc' }
+    });
+    return rows
+      .map(row => ({
+        provider: row.provider,
+        userId: Number(row.provider.slice(GOOGLE_PROVIDER_PREFIX.length)) || null,
+        refreshToken: decryptClaudeCredential(row.refreshToken || ''),
+        accessToken: decryptClaudeCredential(row.accessToken || ''),
+        expiresAt: row.expiresAt ? new Date(row.expiresAt).getTime() : 0,
+        metadata: (row.metadata && typeof row.metadata === 'object' && !Array.isArray(row.metadata)) ? row.metadata : {}
+      }))
+      .filter(row => row.refreshToken);
+  } catch (_) {
+    return [];
+  }
+}
+
+async function saveGoogleConnection(userId, { accessToken, refreshToken, expiresAt, metadata }) {
+  await setStoredOAuthTokens(googleProviderKey(userId), {
+    accessToken: encryptClaudeCredential(accessToken || ''),
+    refreshToken: encryptClaudeCredential(refreshToken || ''),
+    expiresAt,
+    metadata
+  });
+}
+
+/* The Google OAuth client the sign-in uses.
+
+   Set either in the environment (GOOGLE_OAUTH_CLIENT_ID / _SECRET, which win)
+   or by an admin from the board itself (Account > Google account), stored in
+   OAuthToken as "google-oauth-client" with the secret encrypted. The second
+   exists so that turning Google sign-in on is pasting two values into the
+   board, not a server config change and a redeploy. */
+const GOOGLE_OAUTH_CLIENT_PROVIDER = 'google-oauth-client';
+let googleOAuthClientCache = { at: 0, value: null };
+async function googleOAuthClient() {
+  if (GOOGLE_OAUTH_CLIENT_ID && GOOGLE_OAUTH_CLIENT_SECRET) {
+    return { clientId: GOOGLE_OAUTH_CLIENT_ID, clientSecret: GOOGLE_OAUTH_CLIENT_SECRET, source: 'env' };
+  }
+  if (googleOAuthClientCache.at && Date.now() - googleOAuthClientCache.at < 60 * 1000) return googleOAuthClientCache.value;
+  const row = await getStoredOAuthTokens(GOOGLE_OAUTH_CLIENT_PROVIDER);
+  const clientId = String(row?.metadata?.clientId || '').trim();
+  const clientSecret = decryptClaudeCredential(row?.accessToken || '');
+  const value = clientId && clientSecret ? { clientId, clientSecret, source: 'board', savedBy: row?.metadata?.savedBy || null } : null;
+  googleOAuthClientCache = { at: Date.now(), value };
+  return value;
+}
+
+// A fresh access token for one connection, refreshing it when it is about to
+// expire. A refresh Google refuses (the person revoked access, or the token
+// went unused for six months) removes the connection, so the board stops
+// reporting an account as connected when it cannot read anything.
+async function googleConnectionToken(connection) {
+  if (connection.accessToken && connection.expiresAt > Date.now() + 60000) return connection.accessToken;
+  const client = await googleOAuthClient();
+  if (!client) throw new Error('google_auth_failed: Google sign-in is not set up');
+  const res = await fetch('https://oauth2.googleapis.com/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      grant_type: 'refresh_token',
+      refresh_token: connection.refreshToken,
+      client_id: client.clientId,
+      client_secret: client.clientSecret
+    })
+  });
+  const out = await res.json().catch(() => ({}));
+  if (!res.ok || !out.access_token) {
+    if (out.error === 'invalid_grant') {
+      await prisma.oAuthToken.delete({ where: { provider: connection.provider } }).catch(() => null);
+    }
+    throw new Error(`google_refresh_failed: ${out.error_description || out.error || res.status}`);
+  }
+  const expiresAt = Date.now() + Number(out.expires_in || 3600) * 1000;
+  await saveGoogleConnection(connection.userId, {
+    accessToken: out.access_token,
+    refreshToken: connection.refreshToken,
+    expiresAt,
+    metadata: connection.metadata
+  });
+  return out.access_token;
+}
+
+// The credentials to try for a sheet read, in order. preferUserId puts the
+// caller's own account first, so the person linking a bug reads with the
+// account they just connected.
+async function googleSheetCredentials(preferUserId = null) {
+  const out = [];
+  const account = await googleServiceAccount();
+  if (account) out.push({ kind: 'service_account', label: account.email, token: () => googleServiceAccountToken(account) });
+  if (await googleOAuthClient()) {
+    const connections = await listGoogleConnections();
+    connections.sort((x, y) => (y.userId === preferUserId) - (x.userId === preferUserId));
+    connections.forEach(connection => out.push({
+      kind: 'google_user',
+      label: String(connection.metadata.email || `user ${connection.userId}`),
+      token: () => googleConnectionToken(connection)
+    }));
+  }
+  return out;
+}
+
+async function googleSheetsGet(pathAndQuery, { preferUserId = null } = {}) {
+  const credentials = await googleSheetCredentials(preferUserId);
+  if (!credentials.length) {
+    throw new Error('velma_sheet_not_configured: sign in with a Google account that can open the Velma bug sheet (Account > Google account), upload a service account key there, or share the sheet as "Anyone with the link can view"');
+  }
+  // Each credential in turn: a person who connected but was never given
+  // access to the sheet must not stop the next one from being tried.
+  const denied = [];
+  let lastError = null;
+  for (const credential of credentials) {
+    let token;
+    try {
+      token = await credential.token();
+    } catch (error) {
+      lastError = error;
+      continue;
+    }
     const res = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(VELMA_BUG_SHEET_ID)}${pathAndQuery}`, {
       headers: { Authorization: `Bearer ${token}` }
     });
     const out = await res.json().catch(() => ({}));
     if (res.ok) return out;
-    // 403/404 almost always means the sheet is not shared with this account.
-    if (res.status === 403 || res.status === 404) throw new Error(`velma_sheet_not_shared: ${account.email} cannot open the Velma bug sheet - share it with that email (Viewer is enough)`);
-    throw new Error(`velma_sheet_read_failed: ${out?.error?.message || res.status}`);
-  };
-  const meta = await get('?fields=sheets.properties(sheetId,title)');
-  const tab = (meta.sheets || []).map(s => s.properties || {}).find(p => String(p.sheetId) === VELMA_BUG_SHEET_GID);
-  if (!tab) throw new Error(`velma_sheet_tab_missing: no tab with gid ${VELMA_BUG_SHEET_GID}`);
-  const quoted = `'${String(tab.title).replace(/'/g, "''")}'`;
-  const values = await get(`/values/${encodeURIComponent(quoted)}?majorDimension=ROWS`);
-  return { rows: Array.isArray(values.values) ? values.values : [], title: tab.title };
+    // 403/404 almost always means this identity cannot see the sheet.
+    if (res.status === 403 || res.status === 404) { denied.push(credential.label); continue; }
+    lastError = new Error(`velma_sheet_read_failed: ${out?.error?.message || res.status}`);
+  }
+  if (denied.length) throw new Error(`velma_sheet_not_shared: ${denied.join(', ')} cannot open the Velma bug sheet - share it with that account (Viewer is enough)`);
+  throw lastError || new Error('velma_sheet_read_failed');
+}
+
+// The whole tab, cached briefly: a link is a handful of lookups a minute at
+// most, and re-reading the sheet for each one buys nothing. Read as displayed
+// values (the API default), which is what a dropdown cell shows - "DONE", not
+// an internal option id.
+let velmaSheetCache = { at: 0, rows: null, title: '' };
+async function readVelmaBugSheet({ preferUserId = null, fresh = false } = {}) {
+  if (!fresh && velmaSheetCache.rows && Date.now() - velmaSheetCache.at < VELMA_SHEET_CACHE_MS) return velmaSheetCache;
+  try {
+    const meta = await googleSheetsGet('?fields=sheets.properties(sheetId,title)', { preferUserId });
+    const tab = (meta.sheets || []).map(s => s.properties || {}).find(p => String(p.sheetId) === VELMA_BUG_SHEET_GID);
+    if (!tab) throw new Error(`velma_sheet_tab_missing: no tab with gid ${VELMA_BUG_SHEET_GID}`);
+    const quoted = `'${String(tab.title).replace(/'/g, "''")}'`;
+    const values = await googleSheetsGet(`/values/${encodeURIComponent(quoted)}?majorDimension=ROWS`, { preferUserId });
+    velmaSheetCache = { at: Date.now(), rows: Array.isArray(values.values) ? values.values : [], title: tab.title };
+    return velmaSheetCache;
+  } catch (error) {
+    // No account could read it: the sheet's link is the last way in, for a
+    // sheet shared as "Anyone with the link can view". If that fails too,
+    // the account's reason is the one worth showing - it says what to fix.
+    if (/velma_sheet_tab_missing/.test(String(error.message))) throw error;
+    try {
+      const sheet = await readSheetByLink();
+      velmaSheetCache = { at: Date.now(), ...sheet };
+      return velmaSheetCache;
+    } catch (_) {
+      throw error;
+    }
+  }
 }
 
 // RFC 4180 CSV: quoted fields may hold commas, newlines and "" for a quote.
@@ -4543,47 +4719,20 @@ function parseCsv(text) {
   return rows;
 }
 
-/* The sheet as anyone with its link sees it. The export gives the displayed
-   values - "DONE", as the dropdown shows it - which is what the row lookup and
-   the status check read. A sheet that is not shared by link answers with a
-   sign-in page or a 401 rather than CSV, which is reported as not shared. */
+/* The sheet as anyone with its link sees it: the tab's CSV export, displayed
+   values ("DONE", as the dropdown shows it). A sheet not shared by link
+   answers with a sign-in page or a 401 rather than CSV. */
 async function readSheetByLink() {
   const url = `https://docs.google.com/spreadsheets/d/${encodeURIComponent(VELMA_BUG_SHEET_ID)}/export?format=csv&gid=${encodeURIComponent(VELMA_BUG_SHEET_GID)}`;
   // Redirects followed: a shared sheet's export is served from
-  // googleusercontent.com, a private one ends at a sign-in page or a 401.
+  // googleusercontent.com.
   const res = await fetch(url);
   const type = String(res.headers.get('content-type') || '');
   if (res.status === 401 || res.status === 403 || (res.ok && !/csv|text\/plain/i.test(type))) {
-    throw new Error('velma_sheet_not_shared: the Velma bug sheet is not shared by link - set it to "Anyone with the link can view", or upload a service account key');
+    throw new Error('velma_sheet_not_shared: the Velma bug sheet is not shared by link');
   }
-  if (res.status === 404) throw new Error(`velma_sheet_tab_missing: no sheet ${VELMA_BUG_SHEET_ID} with tab gid ${VELMA_BUG_SHEET_GID}`);
   if (!res.ok) throw new Error(`velma_sheet_read_failed: ${res.status}`);
   return { rows: parseCsv(await res.text()), title: 'Velma bug sheet' };
-}
-
-// The whole tab, cached briefly: a link is a handful of lookups a minute at
-// most, and re-reading the sheet for each one buys nothing. `via` says which
-// way it was read, for the admin's status line.
-let velmaSheetCache = { at: 0, rows: null, title: '', via: null };
-async function readVelmaBugSheet({ fresh = false } = {}) {
-  if (!fresh && velmaSheetCache.rows && Date.now() - velmaSheetCache.at < VELMA_SHEET_CACHE_MS) return velmaSheetCache;
-  // Each way in turn; when none works, the most useful reason is the service
-  // account's (it names the email to share with), else the link's.
-  const errors = [];
-  const account = await googleServiceAccount();
-  if (account) {
-    try {
-      const sheet = await readSheetWithServiceAccount(account);
-      velmaSheetCache = { at: Date.now(), ...sheet, via: account.email };
-      return velmaSheetCache;
-    } catch (error) { errors.push(error); }
-  }
-  try {
-    const sheet = await readSheetByLink();
-    velmaSheetCache = { at: Date.now(), ...sheet, via: 'link' };
-    return velmaSheetCache;
-  } catch (error) { errors.push(error); }
-  throw errors[0];
 }
 
 const normalizeVelmaBugId = value => String(value || '').trim().replace(/^#/, '').toUpperCase();
@@ -4766,7 +4915,7 @@ app.post('/api/velma-bug/link', requireAuth, async (req, res) => {
     if (!kanbanTicketId || !bugId) return res.status(400).json({ error: 'missing_ticket_or_bug_id' });
     let sheet;
     try {
-      sheet = await readVelmaBugSheet({ fresh: true });
+      sheet = await readVelmaBugSheet({ preferUserId: Number(req.session.userId) || null, fresh: true });
     } catch (error) {
       return res.status(502).json({ error: String(error.message || error) });
     }
@@ -4814,8 +4963,8 @@ app.delete('/api/velma-bug/link/:kanbanTicketId', requireAuth, async (req, res) 
    new hold. Nobody has to open the ticket for either to happen - the agent
    finds the clock running again on their board.
 
-   Skipped quietly when nothing is linked. A failed read is logged once per
-   distinct error rather than every cycle. */
+   Skipped quietly when there is no Google credential or nothing is linked. A
+   failed read is logged once per distinct error rather than every cycle. */
 const VELMA_SYNC_MS = Math.max(60 * 1000, Number(process.env.VELMA_SYNC_MS || 3 * 60 * 1000));
 let velmaSyncRunning = false;
 let velmaSyncLastError = '';
@@ -4903,32 +5052,173 @@ app.post('/api/velma-bug/sync', requireAuth, async (req, res) => {
   res.status(out?.error ? 502 : 200).json({ ok: !out?.error, ...out });
 });
 
-/* How the board reads the sheet right now, for the admin's Account > Velma bug
-   sheet panel. Reads the sheet (cached for a minute) so the answer is whether
-   it actually works, not whether something is configured. */
-app.get('/api/velma-bug/sheet-status', requireAuth, async (req, res) => {
-  const account = await googleServiceAccount();
-  let readable = false;
-  let via = null;
-  let error = null;
+/* ---- Google sign-in, for reading the sheet ---------------------------------
+
+   An ordinary OAuth web flow. The state value is kept in the session and the
+   redirect URI with it, so the callback sends Google exactly the URI the start
+   used even behind a proxy that rewrites the host. Only the Sheets read-only
+   scope and the email are asked for: the board reads one sheet, and the email
+   is what the Account menu shows so people know whose access is being used. */
+function googleRedirectUri(req) {
+  return GOOGLE_OAUTH_REDIRECT_URI || `${publicBaseUrlForRequest(req)}/auth/google/callback`;
+}
+
+/* The end of a sign-in started in a new tab (the board opens
+   /auth/google/start?tab=1). It cannot hand the result back through
+   window.opener: helmet's Cross-Origin-Opener-Policy cuts that link the moment
+   the tab visits accounts.google.com. A BroadcastChannel (and a localStorage
+   write, for browsers without one) reaches the board tab instead, since both
+   are on this origin; the tab then closes itself, or says it can be closed. */
+const GOOGLE_RESULT_TEXT = {
+  connected: 'Google account connected - the board can read the Velma bug sheet.',
+  connected_unverified: 'Google account connected. The sheet could not be checked yet.',
+  no_sheet_access: 'Connected, but this Google account cannot open the Velma bug sheet. Ask for it to be shared with you.',
+  sheets_scope_missing: 'Google sign-in needs the "See your Google Sheets" permission. Tick it on the consent screen and try again.',
+  no_refresh_token: 'Google did not grant offline access. Remove the board under myaccount.google.com > Security > Third-party access, then sign in again.',
+  access_denied: 'Google sign-in was cancelled.',
+  not_configured: 'Google sign-in is not set up on this board yet. An admin can set it up under Account > Google account.',
+  invalid_state: 'This sign-in expired. Start it again from the board.'
+};
+function finishGoogleSignIn(req, res, pending, outcome, detail = '') {
+  if (!pending?.tab) return res.redirect(`/?google=${encodeURIComponent(outcome)}`);
+  const ok = outcome === 'connected';
+  const text = GOOGLE_RESULT_TEXT[outcome] || `Google sign-in failed: ${detail || outcome}`;
+  const payload = JSON.stringify({ type: 'google-signin', outcome, detail: String(detail || '').slice(0, 300), at: Date.now() }).replace(/</g, '\\u003c');
+  res.set('Cache-Control', 'no-store');
+  return res.send(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Google sign-in</title>
+<style>body{margin:0;min-height:100vh;display:grid;place-items:center;font-family:Inter,'Segoe UI',Arial,sans-serif;background:linear-gradient(180deg,#1a1d38,#0d0f20);color:#fff}
+.box{max-width:420px;margin:24px;padding:26px 26px 22px;border-radius:18px;background:#fff;color:#13152c;box-shadow:0 30px 80px rgba(0,0,0,.45);text-align:center}
+.mark{width:44px;height:44px;margin:0 auto 12px;border-radius:50%;display:grid;place-items:center;font-size:22px;color:#fff;background:${ok ? '#10b981' : '#f59e0b'}}
+h1{font-size:18px;margin:0 0 8px}p{margin:0;color:#565c80;font-size:14px;line-height:1.55}</style></head>
+<body><div class="box"><div class="mark">${ok ? '&#10003;' : '!'}</div><h1>${ok ? 'You are connected' : 'Not connected'}</h1><p>${escapeHtml(text)}</p><p style="margin-top:12px;font-size:12.5px;" id="closing">This tab will close by itself - you can also close it and go back to the board.</p></div>
+<script>(function(){var m=${payload};try{var c=new BroadcastChannel('kanban-google-signin');c.postMessage(m);c.close();}catch(e){}try{localStorage.setItem('kanban-google-signin',JSON.stringify(m));}catch(e){}setTimeout(function(){window.close();},${ok ? 1200 : 4000});})();</script>
+</body></html>`);
+}
+
+app.get('/auth/google/start', requireAuth, async (req, res) => {
+  const tab = String(req.query.tab || '') === '1';
+  const client = await googleOAuthClient();
+  if (!client) return finishGoogleSignIn(req, res, { tab }, 'not_configured');
+  const state = crypto.randomBytes(16).toString('hex');
+  const redirectUri = googleRedirectUri(req);
+  req.session.googleOAuth = { state, redirectUri, tab };
+  const params = new URLSearchParams({
+    client_id: client.clientId,
+    redirect_uri: redirectUri,
+    response_type: 'code',
+    scope: `openid email ${GOOGLE_SHEETS_SCOPE}`,
+    // offline + consent: the refresh token is what lets the board keep
+    // reading the sheet after this browser tab is gone, and Google only
+    // returns one on a consent screen.
+    access_type: 'offline',
+    prompt: 'consent',
+    include_granted_scopes: 'true',
+    state
+  });
+  res.redirect(`https://accounts.google.com/o/oauth2/v2/auth?${params}`);
+});
+
+app.get('/auth/google/callback', requireAuth, async (req, res) => {
+  const pending = req.session.googleOAuth || null;
+  delete req.session.googleOAuth;
   try {
-    const sheet = await readVelmaBugSheet();
-    readable = true;
-    via = sheet.via;
-  } catch (e) {
-    error = String(e.message || e);
+    if (req.query.error) return finishGoogleSignIn(req, res, pending, String(req.query.error));
+    const { code, state } = req.query;
+    if (!code || !state || !pending || state !== pending.state) return finishGoogleSignIn(req, res, pending, 'invalid_state');
+    const client = await googleOAuthClient();
+    if (!client) return finishGoogleSignIn(req, res, pending, 'not_configured');
+    const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        grant_type: 'authorization_code',
+        code: String(code),
+        client_id: client.clientId,
+        client_secret: client.clientSecret,
+        redirect_uri: pending.redirectUri
+      })
+    });
+    const tokenJson = await tokenRes.json().catch(() => ({}));
+    if (!tokenRes.ok || !tokenJson.access_token) {
+      return finishGoogleSignIn(req, res, pending, 'token_exchange_failed', tokenJson.error_description || tokenJson.error || String(tokenRes.status));
+    }
+    const granted = String(tokenJson.scope || '').split(/\s+/);
+    if (!granted.includes(GOOGLE_SHEETS_SCOPE)) return finishGoogleSignIn(req, res, pending, 'sheets_scope_missing');
+    // The id_token came straight from Google's token endpoint over TLS, so its
+    // payload can be read without verifying the signature.
+    let email = '';
+    try {
+      const payload = JSON.parse(Buffer.from(String(tokenJson.id_token || '').split('.')[1] || '', 'base64url').toString('utf8'));
+      email = String(payload.email || '').toLowerCase();
+    } catch (_) {}
+    const existing = await getStoredOAuthTokens(googleProviderKey(req.session.userId));
+    // Google omits the refresh token when this account already granted one to
+    // this client; keep the stored one rather than losing offline access.
+    const refreshToken = tokenJson.refresh_token || decryptClaudeCredential(existing?.refreshToken || '');
+    if (!refreshToken) return finishGoogleSignIn(req, res, pending, 'no_refresh_token');
+    await saveGoogleConnection(req.session.userId, {
+      accessToken: tokenJson.access_token,
+      refreshToken,
+      expiresAt: Date.now() + Number(tokenJson.expires_in || 3600) * 1000,
+      metadata: { email, username: String(req.session.username || ''), connectedAt: new Date().toISOString() }
+    });
+    velmaSheetCache = { at: 0, rows: null, title: '' };
+    // Read the sheet straight away, so the person who just connected learns
+    // now - not at their next link - whether this account can actually open it.
+    let result = 'connected';
+    try {
+      await readVelmaBugSheet({ preferUserId: Number(req.session.userId) || null, fresh: true });
+    } catch (error) {
+      result = /not_shared/.test(String(error.message)) ? 'no_sheet_access' : 'connected_unverified';
+    }
+    void syncVelmaBugStatuses();
+    return finishGoogleSignIn(req, res, pending, result);
+  } catch (error) {
+    return finishGoogleSignIn(req, res, pending, 'failed', String(error.message || error));
   }
+});
+
+app.get('/auth/google/status', requireAuth, async (req, res) => {
+  const mine = await getStoredOAuthTokens(googleProviderKey(req.session.userId));
+  const connections = await listGoogleConnections();
+  const account = await googleServiceAccount();
+  const meta = (mine?.metadata && typeof mine.metadata === 'object') ? mine.metadata : {};
   res.json({
-    readable,
-    via,
-    error,
-    sheetUrl: `https://docs.google.com/spreadsheets/d/${VELMA_BUG_SHEET_ID}/edit#gid=${VELMA_BUG_SHEET_GID}`,
+    configured: !!(await googleOAuthClient()),
+    // Admins get the setup form when it is not configured, and need the exact
+    // redirect URI to paste into Google Cloud.
     canConfigure: isAdminRole(req.session.role),
+    clientSource: (await googleOAuthClient())?.source || null,
+    redirectUri: googleRedirectUri(req),
     serviceAccount: account ? account.email : null,
     serviceAccountSource: account ? account.source : null,
+    connected: !!mine?.refreshToken,
+    email: meta.email || null,
+    connectedAt: meta.connectedAt || null,
+    // Who else has connected, so a person can tell the board can already read
+    // the sheet without connecting themselves.
+    others: connections.filter(c => c.userId !== Number(req.session.userId)).map(c => c.metadata.email || null).filter(Boolean),
     lastSyncAt: velmaSyncLastRunAt || null,
     lastSyncError: velmaSyncLastError || null
   });
+});
+
+app.post('/auth/google/disconnect', requireAuth, async (req, res) => {
+  const key = googleProviderKey(req.session.userId);
+  const stored = await getStoredOAuthTokens(key);
+  const refreshToken = decryptClaudeCredential(stored?.refreshToken || '');
+  await prisma.oAuthToken.delete({ where: { provider: key } }).catch(() => null);
+  // Revoke at Google as well, so the grant does not linger on their account
+  // page. Best effort: the local copy is already gone either way.
+  if (refreshToken) {
+    fetch('https://oauth2.googleapis.com/revoke', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ token: refreshToken })
+    }).catch(() => null);
+  }
+  velmaSheetCache = { at: 0, rows: null, title: '' };
+  res.json({ ok: true });
 });
 
 // The no-sign-in way: an admin uploads the service account's JSON key once.
@@ -4954,9 +5244,7 @@ app.put('/api/google/service-account', requireAdmin, async (req, res) => {
     let sheetAccess = 'ok';
     let sheetError = null;
     try {
-      // Asked of the key itself: the general read would fall back to the
-      // link and report success for a key the sheet was never shared with.
-      await readSheetWithServiceAccount(parsed);
+      await readVelmaBugSheet({ fresh: true });
     } catch (error) {
       sheetError = String(error.message || error);
       sheetAccess = /not_shared|403|404|permission/i.test(sheetError) ? 'not_shared' : 'unverified';
@@ -4975,6 +5263,45 @@ app.delete('/api/google/service-account', requireAdmin, async (req, res) => {
   res.json({ ok: true });
 });
 
+// Turning Google sign-in on from the board: an admin pastes the OAuth client
+// they created in Google Cloud. The secret is never sent back - only whether
+// one is stored. An environment-configured client cannot be changed here.
+app.get('/api/google/oauth-client', requireAdmin, async (req, res) => {
+  const client = await googleOAuthClient();
+  res.json({
+    source: client?.source || null,
+    clientId: client?.clientId || null,
+    hasSecret: !!client?.clientSecret,
+    redirectUri: googleRedirectUri(req),
+    javascriptOrigin: publicBaseUrlForRequest(req)
+  });
+});
+app.put('/api/google/oauth-client', requireAdmin, async (req, res) => {
+  try {
+    if (GOOGLE_OAUTH_CLIENT_ID && GOOGLE_OAUTH_CLIENT_SECRET) return res.status(409).json({ error: 'set_in_environment' });
+    const clientId = String(req.body?.clientId || '').trim();
+    let clientSecret = String(req.body?.clientSecret || '').trim();
+    if (!/^[\w.-]+\.apps\.googleusercontent\.com$/.test(clientId)) return res.status(400).json({ error: 'client_id_should_end_with_apps.googleusercontent.com' });
+    // A blank secret on an update keeps the one already stored, so changing
+    // only the ID does not mean finding the secret again.
+    if (!clientSecret) clientSecret = (await googleOAuthClient())?.clientSecret || '';
+    if (!clientSecret) return res.status(400).json({ error: 'client_secret_required' });
+    await setStoredOAuthTokens(GOOGLE_OAUTH_CLIENT_PROVIDER, {
+      accessToken: encryptClaudeCredential(clientSecret),
+      metadata: { clientId, savedBy: String(req.session.username || '').toUpperCase() || null, savedAt: new Date().toISOString() }
+    });
+    googleOAuthClientCache = { at: 0, value: null };
+    return res.json({ ok: true, clientId, hasSecret: true, source: 'board' });
+  } catch (error) {
+    return res.status(500).json({ error: String(error.message || error) });
+  }
+});
+app.delete('/api/google/oauth-client', requireAdmin, async (req, res) => {
+  if (GOOGLE_OAUTH_CLIENT_ID && GOOGLE_OAUTH_CLIENT_SECRET) return res.status(409).json({ error: 'set_in_environment' });
+  await prisma.oAuthToken.delete({ where: { provider: GOOGLE_OAUTH_CLIENT_PROVIDER } }).catch(() => null);
+  googleOAuthClientCache = { at: 0, value: null };
+  res.json({ ok: true });
+});
 app.get('/api/jira/issues', requireAuth, async (req, res) => {
   try {
     const jira = await getJiraConfig();

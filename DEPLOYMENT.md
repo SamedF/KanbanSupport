@@ -775,36 +775,65 @@ linked, the SLA is on hold, the same as a Jira link.
 **This needs `prisma migrate deploy`** (`Ticket.velmaBugId`, `Ticket.velmaBugRow`)
 for the same reason as `slaResetAt` above.
 
-Nobody signs in to Google: the server reads the sheet by itself, with the first
-of these that works. **Account > Velma bug sheet** (admins) says which one is in
-use, or what to fix.
+The sheet is private, so the server needs a Google identity that can read it.
+Either of these works; with both, the service account is tried first.
 
-**Option A - share the sheet by link (no setup).** In the sheet, **Share >
-General access > Anyone with the link > Viewer**. The server downloads the tab's
-CSV export (`VELMA_BUG_SHEET_ID`, `VELMA_BUG_SHEET_GID`) with no credential.
+**Option A - sign in with Google from the board (no admin needed per person).**
+Set this up once, then any agent who can already open the sheet connects their
+account from **Account > Google account** (or from the Velma modal when it says
+nothing can read the sheet). Their refresh token is stored encrypted in
+`OAuthToken` (`google:<userId>`) and the board keeps reading as them after they
+close the tab. If several people connect, the most recent one is tried first and
+an account without access to the sheet is skipped for the next.
 
-**Option B - a service account (the sheet stays private).**
+1. In Google Cloud, enable the **Google Sheets API**.
+2. Configure the OAuth consent screen with the scopes `openid`, `email` and
+   `.../auth/spreadsheets.readonly`. Audience: **External, published** (not
+   Testing, whose tokens expire after 7 days). **Internal** only works when the
+   Cloud project belongs to quinta.im's own Google organisation - the current
+   project ("Dash Spreadsheet Connection") is under `sfa-org`, where Internal
+   refuses every quinta.im account with `403 org_internal`. An unverified
+   External app shows a "Google hasn't verified this app" warning on first
+   sign-in: Advanced > Go to the app.
+3. Create an **OAuth client ID** of type *Web application* with the authorised
+   redirect URI `https://<board host>/auth/google/callback` - one per environment
+   (pre-prod and prod each need their own URI listed).
+4. Paste the client ID and secret into the board: **Account > Google account**
+   (admins only) shows these steps with the exact origin and redirect URI to copy,
+   and a form to save the two values - stored in `OAuthToken`
+   (`google-oauth-client`), the secret encrypted. No env change or redeploy.
+   Alternatively set `GOOGLE_OAUTH_CLIENT_ID` and `GOOGLE_OAUTH_CLIENT_SECRET`,
+   which take precedence and lock the board form. The redirect URI is derived
+   from `APP_BASE_URL`; set `GOOGLE_OAUTH_REDIRECT_URI` only if it has to differ.
+
+"Sign in with Google" then opens Google in a new tab; when it finishes, the tab
+tells the board (over a BroadcastChannel, since Cross-Origin-Opener-Policy cuts
+`window.opener`) and closes itself.
+
+The stored tokens are encrypted with `CLAUDE_CREDENTIAL_SECRET` (falling back to
+`SESSION_SECRET`), the same key as the Claude connector - changing it disconnects
+everyone, who then simply sign in again.
+
+If no signed-in account or service account can read the sheet, the server falls back to the sheet's
+link: a sheet shared as "Anyone with the link can view" is read from its CSV
+export with no credential.
+
+**Option B - a service account (nobody has to stay signed in).**
 
 1. In Google Cloud, enable the **Google Sheets API**, create a service account
    and download a JSON key for it.
 2. Share the sheet with the service account's email (Viewer is enough).
-3. Either upload the key file from the board - **Account > Velma bug sheet**
+3. Either upload the key file from the board - **Account > Google account**
    (admins only), stored encrypted in `OAuthToken` (`google-service-account`)
    and checked against the sheet on save - or set `GOOGLE_SERVICE_ACCOUNT_JSON`
    to the key file's contents, raw or base64 (the environment wins).
-
-Per-person "Sign in with Google" was removed: an OAuth client set to Internal in
-a Google organisation other than quinta.im refuses every quinta.im account
-(`403 org_internal`). `GOOGLE_OAUTH_CLIENT_ID`/`_SECRET`/`_REDIRECT_URI` are no
-longer read; any leftover `google:<userId>` and `google-oauth-client` rows in
-`OAuthToken` are ignored.
 
 **Status and the SLA.** The bug's **Status** column is read with the row (the
 value the dropdown shows). While it is anything other than DONE the ticket's SLA
 is on hold. Every few minutes (`VELMA_SYNC_MS`, default 3 minutes) the server
 re-reads the sheet for every linked ticket: when a bug turns DONE the hold ends
 and the SLA resumes from where the link stopped it (the restart point moves
-forward past the hold in working time, so the wait is not counted against support);
+forward by the length of the hold, so the wait is not counted against support);
 if DONE is taken off again a new hold starts. A Jira link or Waiting on Contact
 still holds the ticket on its own. **Account > Google account > Check linked bugs
 now** runs the same check immediately.
