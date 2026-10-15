@@ -993,6 +993,31 @@ function kpiResolvedDate(ticket) {
   at = Math.min(at, Date.now());
   return Number.isFinite(at) ? new Date(at) : null;
 }
+/* SLA met % started over for these agents. A ticket they resolved before the
+   moment still counts as resolved, and in the resolve times, but not as on
+   time or late for them. */
+const SLA_COUNTED_FROM_BY_AGENT = { SFA: new Date('2026-10-15T16:55:00+01:00').getTime() };
+// True when every agent the figure is about has had their SLA reset since this
+// ticket was resolved, so it drops out of that figure's met/late count.
+function kpiSlaResetFor(ticket, agentKeys) {
+  const keys = (agentKeys || []).map(k => String(k || '').trim().toUpperCase()).filter(Boolean);
+  if (!keys.length) return false;
+  const resolvedMs = kpiResolvedDate(ticket)?.getTime();
+  if (!Number.isFinite(resolvedMs)) return false;
+  return keys.every(k => resolvedMs < Number(SLA_COUNTED_FROM_BY_AGENT[k] || 0));
+}
+// Whose figures a KPI ticket counts towards: the agent the dashboard is pinned
+// to, or else the rows of the breakdown table it fans out to.
+function kpiSlaAgentKeys(ticket, team, slaAgent) {
+  if (slaAgent) return [slaAgent];
+  const assignee = String(ticket.assignedAgent || '').trim().toUpperCase();
+  const csOwner = String(ticket.csAgent || '').trim().toUpperCase();
+  if (team === 'cs') return [csOwner || 'Unassigned'];
+  if (team === 'support') return [assignee || 'Unassigned'];
+  const keys = [assignee || 'Unassigned'];
+  if (csOwner && csOwner !== assignee) keys.push(csOwner);
+  return keys;
+}
 function safeDateForDb(value) {
   if (!value) return null;
   const date = new Date(value);
@@ -4907,6 +4932,17 @@ app.delete('/api/jira/link/:kanbanTicketId', requireAuth, async (req, res) => {
 // ---------------------------------------------------------------------------
 const VELMA_BUG_SHEET_ID = String(process.env.VELMA_BUG_SHEET_ID || '1do2eeXmIog5af-HX_VtrVHpLGyY5GxMkn2JX96pL3NI').trim();
 const VELMA_BUG_SHEET_GID = String(process.env.VELMA_BUG_SHEET_GID || '601357266').trim();
+/* Every sheet a Velma bug can be looked up in, in the order they are searched:
+   the one above, then VELMA_BUG_EXTRA_SHEETS ("<spreadsheet id>:<gid>",
+   comma separated). A bug ID found in an earlier sheet wins; a link keeps the
+   sheet it was found in, and its status is read from there. */
+const VELMA_BUG_SHEETS = [
+  `${VELMA_BUG_SHEET_ID}:${VELMA_BUG_SHEET_GID}`,
+  ...String(process.env.VELMA_BUG_EXTRA_SHEETS ?? '1NEMGFrVtEPJUqdfUX53lfKxAD3J87E_YikYj0y41_JA:1291300537').split(',')
+]
+  .map(v => v.trim()).filter(Boolean)
+  .map(v => { const [id, gid = '0'] = v.split(':'); return { id: id.trim(), gid: gid.trim() }; })
+  .filter((sheet, i, all) => sheet.id && all.findIndex(o => o.id === sheet.id && o.gid === sheet.gid) === i);
 // Header of the column holding the bug ID. Optional: without it the column is
 // guessed from the headers, and failing that any cell in the row may match.
 const VELMA_BUG_ID_COLUMN = String(process.env.VELMA_BUG_ID_COLUMN || '').trim();
@@ -5091,7 +5127,7 @@ async function googleSheetCredentials(preferUserId = null) {
   return out;
 }
 
-async function googleSheetsGet(pathAndQuery, { preferUserId = null } = {}) {
+async function googleSheetsGet(pathAndQuery, { preferUserId = null, spreadsheetId = VELMA_BUG_SHEET_ID } = {}) {
   const credentials = await googleSheetCredentials(preferUserId);
   if (!credentials.length) {
     throw new Error('velma_sheet_not_configured: sign in with a Google account that can open the Velma bug sheet (Account > Google account), upload a service account key there, or share the sheet as "Anyone with the link can view"');
@@ -5108,7 +5144,7 @@ async function googleSheetsGet(pathAndQuery, { preferUserId = null } = {}) {
       lastError = error;
       continue;
     }
-    const res = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(VELMA_BUG_SHEET_ID)}${pathAndQuery}`, {
+    const res = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(spreadsheetId)}${pathAndQuery}`, {
       headers: { Authorization: `Bearer ${token}` }
     });
     const out = await res.json().catch(() => ({}));
@@ -5125,26 +5161,34 @@ async function googleSheetsGet(pathAndQuery, { preferUserId = null } = {}) {
 // most, and re-reading the sheet for each one buys nothing. Read as displayed
 // values (the API default), which is what a dropdown cell shows - "DONE", not
 // an internal option id.
-let velmaSheetCache = { at: 0, rows: null, title: '' };
+let velmaSheetCache = { at: 0, sheets: null };
+// Every Velma bug sheet. One that cannot be read is left out (and logged) as
+// long as another one could be; only when none can is that an error.
 async function readVelmaBugSheet({ preferUserId = null, fresh = false } = {}) {
-  if (!fresh && velmaSheetCache.rows && Date.now() - velmaSheetCache.at < VELMA_SHEET_CACHE_MS) return velmaSheetCache;
+  if (!fresh && velmaSheetCache.sheets && Date.now() - velmaSheetCache.at < VELMA_SHEET_CACHE_MS) return velmaSheetCache;
+  const results = await Promise.allSettled(VELMA_BUG_SHEETS.map(sheet => readOneVelmaBugSheet(sheet, preferUserId)));
+  const sheets = results.filter(r => r.status === 'fulfilled').map(r => r.value);
+  const failed = results.map((r, i) => r.status === 'rejected' ? { ...VELMA_BUG_SHEETS[i], error: String(r.reason?.message || r.reason) } : null).filter(Boolean);
+  if (!sheets.length) throw new Error(failed[0]?.error || 'velma_sheet_read_failed');
+  failed.forEach(f => console.warn(`Velma bug sheet ${f.id} (gid ${f.gid}) skipped: ${f.error}`));
+  velmaSheetCache = { at: Date.now(), sheets, failed, title: sheets.map(s => s.title).join(', ') };
+  return velmaSheetCache;
+}
+async function readOneVelmaBugSheet({ id, gid }, preferUserId) {
   try {
-    const meta = await googleSheetsGet('?fields=sheets.properties(sheetId,title)', { preferUserId });
-    const tab = (meta.sheets || []).map(s => s.properties || {}).find(p => String(p.sheetId) === VELMA_BUG_SHEET_GID);
-    if (!tab) throw new Error(`velma_sheet_tab_missing: no tab with gid ${VELMA_BUG_SHEET_GID}`);
+    const meta = await googleSheetsGet('?fields=sheets.properties(sheetId,title)', { preferUserId, spreadsheetId: id });
+    const tab = (meta.sheets || []).map(s => s.properties || {}).find(p => String(p.sheetId) === gid);
+    if (!tab) throw new Error(`velma_sheet_tab_missing: no tab with gid ${gid}`);
     const quoted = `'${String(tab.title).replace(/'/g, "''")}'`;
-    const values = await googleSheetsGet(`/values/${encodeURIComponent(quoted)}?majorDimension=ROWS`, { preferUserId });
-    velmaSheetCache = { at: Date.now(), rows: Array.isArray(values.values) ? values.values : [], title: tab.title };
-    return velmaSheetCache;
+    const values = await googleSheetsGet(`/values/${encodeURIComponent(quoted)}?majorDimension=ROWS`, { preferUserId, spreadsheetId: id });
+    return { id, gid, rows: Array.isArray(values.values) ? values.values : [], title: tab.title };
   } catch (error) {
     // No account could read it: the sheet's link is the last way in, for a
     // sheet shared as "Anyone with the link can view". If that fails too,
     // the account's reason is the one worth showing - it says what to fix.
     if (/velma_sheet_tab_missing/.test(String(error.message))) throw error;
     try {
-      const sheet = await readSheetByLink();
-      velmaSheetCache = { at: Date.now(), ...sheet };
-      return velmaSheetCache;
+      return { id, gid, ...(await readSheetByLink({ id, gid })) };
     } catch (_) {
       throw error;
     }
@@ -5177,8 +5221,8 @@ function parseCsv(text) {
 /* The sheet as anyone with its link sees it: the tab's CSV export, displayed
    values ("DONE", as the dropdown shows it). A sheet not shared by link
    answers with a sign-in page or a 401 rather than CSV. */
-async function readSheetByLink() {
-  const url = `https://docs.google.com/spreadsheets/d/${encodeURIComponent(VELMA_BUG_SHEET_ID)}/export?format=csv&gid=${encodeURIComponent(VELMA_BUG_SHEET_GID)}`;
+async function readSheetByLink({ id, gid }) {
+  const url = `https://docs.google.com/spreadsheets/d/${encodeURIComponent(id)}/export?format=csv&gid=${encodeURIComponent(gid)}`;
   // Redirects followed: a shared sheet's export is served from
   // googleusercontent.com.
   const res = await fetch(url);
@@ -5216,7 +5260,7 @@ const isVelmaStatusDone = status => !!status && VELMA_DONE_STATUSES.some(done =>
    The status is the cell under a "Status" header (or VELMA_BUG_STATUS_COLUMN)
    in that row. A sheet with no such column simply has no status, and its
    links behave as before: on hold until removed. */
-function findVelmaBugRow(rows, bugId) {
+function findVelmaBugRow(rows, bugId, sheet = { id: VELMA_BUG_SHEET_ID, gid: VELMA_BUG_SHEET_GID }) {
   const wanted = normalizeVelmaBugId(bugId);
   if (!wanted || !Array.isArray(rows)) return null;
   const isIdHeader = (h) => {
@@ -5255,8 +5299,27 @@ function findVelmaBugRow(rows, bugId) {
       row: rowNumber,
       fields,
       status: status || null,
-      url: `https://docs.google.com/spreadsheets/d/${VELMA_BUG_SHEET_ID}/edit#gid=${VELMA_BUG_SHEET_GID}&range=A${rowNumber}:${lastColumn}${rowNumber}`
+      sheetId: sheet.id,
+      sheetGid: sheet.gid,
+      sheetTitle: sheet.title || null,
+      url: `https://docs.google.com/spreadsheets/d/${sheet.id}/edit#gid=${sheet.gid}&range=A${rowNumber}:${lastColumn}${rowNumber}`
     };
+  }
+  return null;
+}
+// A bug in any of the sheets. A linked bug is only looked for in the sheet it
+// was found in, so the same ID in another sheet never takes it over; a link
+// made before there was more than one sheet has no sheetId and is from the
+// first sheet.
+function findVelmaBugInSheets(cache, bugId, previous = null) {
+  const sheets = cache?.sheets || [];
+  if (previous) {
+    const home = sheets.find(s => s.id === (previous.sheetId || VELMA_BUG_SHEET_ID) && s.gid === (previous.sheetGid || VELMA_BUG_SHEET_GID));
+    return home ? findVelmaBugRow(home.rows, bugId, home) : null;
+  }
+  for (const sheet of sheets) {
+    const found = findVelmaBugRow(sheet.rows, bugId, sheet);
+    if (found) return found;
   }
   return null;
 }
@@ -5374,8 +5437,8 @@ app.post('/api/velma-bug/link', requireAuth, async (req, res) => {
     } catch (error) {
       return res.status(502).json({ error: String(error.message || error) });
     }
-    const found = findVelmaBugRow(sheet.rows, bugId);
-    if (!found) return res.status(404).json({ error: `No row with ID ${bugId} in the Velma bug sheet (${sheet.title}).` });
+    const found = findVelmaBugInSheets(sheet, bugId);
+    if (!found) return res.status(404).json({ error: `No row with ID ${bugId} in the Velma bug sheets (${sheet.title}).` });
     // Re-linking a ticket that is already on hold keeps the hold's start, so
     // the time it has already spent waiting is not counted as ours when it
     // ends. A ticket linked to a bug that is already DONE never goes on hold.
@@ -5445,7 +5508,7 @@ async function syncVelmaBugStatuses() {
     for (const id of ids) {
       const previous = currentLinks[id];
       if (!previous?.id) continue;
-      const found = findVelmaBugRow(sheet.rows, previous.id);
+      const found = findVelmaBugInSheets(sheet, previous.id, previous);
       // A row deleted from the sheet keeps the last copy; the agent still
       // sees what it was and can remove the link.
       if (!found) continue;
@@ -5617,7 +5680,7 @@ app.get('/auth/google/callback', requireAuth, async (req, res) => {
       expiresAt: Date.now() + Number(tokenJson.expires_in || 3600) * 1000,
       metadata: { email, username: String(req.session.username || ''), connectedAt: new Date().toISOString() }
     });
-    velmaSheetCache = { at: 0, rows: null, title: '' };
+    velmaSheetCache = { at: 0, sheets: null };
     // Read the sheet straight away, so the person who just connected learns
     // now - not at their next link - whether this account can actually open it.
     let result = 'connected';
@@ -5672,7 +5735,7 @@ app.post('/auth/google/disconnect', requireAuth, async (req, res) => {
       body: new URLSearchParams({ token: refreshToken })
     }).catch(() => null);
   }
-  velmaSheetCache = { at: 0, rows: null, title: '' };
+  velmaSheetCache = { at: 0, sheets: null };
   res.json({ ok: true });
 });
 
@@ -5695,7 +5758,7 @@ app.put('/api/google/service-account', requireAdmin, async (req, res) => {
       metadata: { email: parsed.email, savedBy: String(req.session.username || '').toUpperCase() || null, savedAt: new Date().toISOString() }
     });
     googleServiceAccountCache = { at: 0, value: null };
-    velmaSheetCache = { at: 0, rows: null, title: '' };
+    velmaSheetCache = { at: 0, sheets: null };
     let sheetAccess = 'ok';
     let sheetError = null;
     try {
@@ -5714,7 +5777,7 @@ app.delete('/api/google/service-account', requireAdmin, async (req, res) => {
   await prisma.oAuthToken.delete({ where: { provider: GOOGLE_SERVICE_ACCOUNT_PROVIDER } }).catch(() => null);
   googleServiceAccountCache = { at: 0, value: null };
   googleTokenCache = { token: '', expiresAt: 0 };
-  velmaSheetCache = { at: 0, rows: null, title: '' };
+  velmaSheetCache = { at: 0, sheets: null };
   res.json({ ok: true });
 });
 
@@ -6269,7 +6332,10 @@ async function loadKpiWorkingSet(req) {  const bounds = kpiDateBounds(req.query.
   // anywhere in the data for the filter dropdown. Extracting this function left
   // it behind, so /api/tickets/kpis threw ReferenceError: tickets is not defined
   // on every request and the whole dashboard 500d.
-  return { bounds, myTeam, team, agent, company, jiraOnly, baseWhere, accessWhere, tickets, scopedTickets, workTickets, duplicatesOpen, duplicatesInRange };
+  // The one agent the figures are pinned to, if any - whose SLA reset applies
+  // to the headline SLA met.
+  const slaAgent = (myTeam === 'cs' || myTeam === 'support') ? username : (agent && agent !== 'ALL' ? agent : null);
+  return { bounds, myTeam, team, agent, slaAgent, company, jiraOnly, baseWhere, accessWhere, tickets, scopedTickets, workTickets, duplicatesOpen, duplicatesInRange };
 }
 function kpiDrilldownRow(t, detail) {
   return {
@@ -6286,7 +6352,7 @@ function kpiDrilldownRow(t, detail) {
 }
 app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
   try {
-    const { bounds, myTeam, team, agent, company, jiraOnly, baseWhere, accessWhere, tickets, scopedTickets, workTickets, duplicatesOpen, duplicatesInRange } = await loadKpiWorkingSet(req);
+    const { bounds, myTeam, team, agent, slaAgent, company, jiraOnly, baseWhere, accessWhere, tickets, scopedTickets, workTickets, duplicatesOpen, duplicatesInRange } = await loadKpiWorkingSet(req);
 
     const statusKeys = ['new', 'inp', 'wus', 'dft', 'wct', 'res'];
     const statusCounts = Object.fromEntries(statusKeys.map(k => [k, 0]));
@@ -6425,13 +6491,23 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
     let slaBreached = 0;
     let slaUnmeasured = 0;
     let slaEstimated = 0;
+    let slaReset = 0;
     for (const ticket of resolvedInRange) {
       const snapshot = ticketSlaSnapshot(ticket, now);
       if (snapshot.estimated) slaEstimated++;
-      const rows = rowKeysForTicket(ticket).map(ensureAgentRow);
-      if (snapshot.state === 'met') { slaMet++; rows.forEach(row => row.slaMet++); }
+      const rowKeys = rowKeysForTicket(ticket);
+      const rows = rowKeys.map(ensureAgentRow);
+      // Rows whose agent has not had their SLA reset since this was resolved.
+      const slaRows = rowKeys.filter(key => !kpiSlaResetFor(ticket, [key])).map(ensureAgentRow);
+      const measured = snapshot.state === 'met' || snapshot.state === 'breached';
+      if (measured && kpiSlaResetFor(ticket, kpiSlaAgentKeys(ticket, team, slaAgent))) {
+        slaReset++;
+        if (snapshot.state === 'met') slaRows.forEach(row => row.slaMet++);
+        else slaRows.forEach(row => row.slaBreached++);
+      }
+      else if (snapshot.state === 'met') { slaMet++; slaRows.forEach(row => row.slaMet++); }
       else if (snapshot.state === 'breached') {
-        slaBreached++; rows.forEach(row => row.slaBreached++);
+        slaBreached++; slaRows.forEach(row => row.slaBreached++);
         breachedRows.push({
           ticketNumber: ticket.displayNumber ? `#${String(ticket.displayNumber).padStart(4, '0')}` : null,
           externalId: ticket.externalId,
@@ -6446,7 +6522,7 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
         });
       }
       else slaUnmeasured++;
-      if (snapshot.state === 'met' || snapshot.state === 'breached') {
+      if (measured) {
         resolveShiftHours.push(hoursFromMs(snapshot.shiftMs));
         rows.forEach(row => row.resolveHours.push(hoursFromMs(snapshot.shiftMs)));
       }
@@ -6559,6 +6635,10 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
         // clock ever ran, or linked to Jira, so the clock was off. Excluded
         // from the percentage rather than silently counted as met.
         unmeasured: slaUnmeasured,
+        // Resolved before the SLA of the agent(s) this figure is about was
+        // reset (SLA_COUNTED_FROM_BY_AGENT): out of the percentage, still in
+        // Resolved and the resolve times. on time + late + no SLA + reset = Resolved.
+        reset: slaReset,
         // The part of met + breached resolved from before the shift history
         // was complete, measured on office hours rather than logged-in time.
         estimated: slaEstimated,
@@ -6622,7 +6702,7 @@ const KPI_STATUS_CATEGORIES = new Set(['new', 'inp', 'wus', 'dft', 'wct', 'res']
 app.get('/api/tickets/kpis/drilldown', requireAuth, async (req, res) => {
   try {
     const category = String(req.query.category || '').trim();
-    const { bounds, baseWhere, accessWhere, scopedTickets, workTickets, duplicatesOpen } = await loadKpiWorkingSet(req);
+    const { bounds, team, slaAgent, baseWhere, accessWhere, scopedTickets, workTickets, duplicatesOpen } = await loadKpiWorkingSet(req);
     const now = Date.now();
     let rows;
 
@@ -6668,9 +6748,13 @@ app.get('/api/tickets/kpis/drilldown', requireAuth, async (req, res) => {
         .filter(t => normalizeDbStatusForBoard(t.status) === 'res')
         .map(t => ({ t, snapshot: ticketSlaSnapshot(t, now) }));
       const wantStates = category === 'slaMet' ? ['met'] : category === 'slaBreached' ? ['breached'] : ['met', 'breached'];
+      // A ticket from before an agent's SLA reset is in the resolve times
+      // (slaMeasured) but not in met or late, the same as the cards.
       rows = resolvedSnapshots.filter(x => wantStates.includes(x.snapshot.state))
+        .map(x => ({ ...x, reset: kpiSlaResetFor(x.t, kpiSlaAgentKeys(x.t, team, slaAgent)) }))
+        .filter(x => category === 'slaMeasured' || !x.reset)
         .sort((a, b) => b.snapshot.overdueMs - a.snapshot.overdueMs)
-        .map(({ t, snapshot }) => kpiDrilldownRow(t, (snapshot.state === 'met' ? 'Met SLA' : `Missed by ${hoursFromMs(snapshot.overdueMs)}h`)));
+        .map(({ t, snapshot, reset }) => kpiDrilldownRow(t, reset ? 'Before SLA reset' : (snapshot.state === 'met' ? 'Met SLA' : `Missed by ${hoursFromMs(snapshot.overdueMs)}h`)));
     } else if (category === 'reopened') {
       const events = await prisma.ticketEvent.findMany({
         where: {

@@ -8873,7 +8873,7 @@ th {
       <div class="form-field">
         <label id="velma-input-label">Velma bug ticket ID</label>
         <input id="velma-input" class="form-input" type="text" placeholder="The ID from the Velma bug sheet" style="font-size:16.5px;font-weight:700;letter-spacing:.5px;"/>
-        <div style="font-size:12px;color:var(--slate-400);margin-top:3px;">The row with this ID is looked up in the Velma bug sheet and linked to the ticket. The SLA goes on hold while the bug is open, and starts again by itself once its Status is DONE.</div>
+        <div style="font-size:12px;color:var(--slate-400);margin-top:3px;">The row with this ID is looked up in the Velma bug sheets and linked to the ticket. The SLA goes on hold while the bug is open, and starts again by itself once its Status is DONE.</div>
       </div>
     </div>
     <div class="modal-actions">
@@ -14803,8 +14803,8 @@ async function renderKpiView(){
       kpiCard('At risk',sla.atRisk||0,{tone:(sla.atRisk||0)>0?'warn':'',hint:'Under 25% of target left',category:'atRisk'}),
       kpiCard('SLA met',compliance===null||compliance===undefined?'-':`${compliance}%`,{
         tone:compliance===null||compliance===undefined?'':(compliance>=90?'good':compliance>=75?'warn':'bad'),
-        // on time + late + no SLA = the Resolved card, ticket for ticket.
-        hint:`${sla.met||0} on time · ${sla.breached||0} late`+(sla.unmeasured?` · ${sla.unmeasured} no SLA`:''),category:'slaMeasured'}),
+        // on time + late + no SLA + before reset = the Resolved card, ticket for ticket.
+        hint:`${sla.met||0} on time · ${sla.breached||0} late`+(sla.unmeasured?` · ${sla.unmeasured} no SLA`:'')+(sla.reset?` · ${sla.reset} before SLA reset`:''),category:'slaMeasured'}),
       kpiCard('Avg resolve',(sla.met||0)+(sla.breached||0)?fmtHoursShort(sla.avgResolveShiftHours):'-',{hint:`Median ${fmtHours(sla.medianResolveShiftHours)}`,category:'slaMeasured'}),
       kpiCard('Oldest open',fmtHoursShort(sla.oldestOpenHours),{hint:'Working time',category:'oldestOpen'}),
       kpiCard('Created',flow.created||0,{hint:'In this range',category:'created'}),

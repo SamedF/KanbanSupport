@@ -882,7 +882,12 @@ still holds the ticket on its own. **Account > Google account > Check linked bug
 now** runs the same check immediately.
 
 Optional: `VELMA_BUG_SHEET_ID` and `VELMA_BUG_SHEET_GID` (default to the current
-sheet and tab); `VELMA_BUG_ID_COLUMN` - the header of the ID column, if the
+sheet and tab); `VELMA_BUG_EXTRA_SHEETS` - more sheets to look bugs up in, as
+`<spreadsheet id>:<gid>` comma separated (defaults to the second Velma bug sheet,
+`1NEMGFrVtEPJUqdfUX53lfKxAD3J87E_YikYj0y41_JA:1291300537`; set it empty for none).
+Sheets are searched in order and the first match wins; a link keeps its sheet.
+The Google account or service account must be able to open every sheet; one it
+cannot open is skipped and logged. `VELMA_BUG_ID_COLUMN` - the header of the ID column, if the
 automatic guess (a header such as `ID`, `Bug ID`, `Ticket ID`) picks the wrong one;
 `VELMA_BUG_STATUS_COLUMN` - the header of the status dropdown, if it is not called
 `Status`; `VELMA_DONE_STATUSES` - comma-separated values that count as done
