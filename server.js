@@ -2516,6 +2516,35 @@ async function safeWriteState(state, actor = null) {
 
   return { saved: true, partial: isStale, backupCreated, refused: refusedChanges, state: finalState };
 }
+/* When each ticket's status and support assignee last actually changed in the
+   database, from the audit events every writer records. Not Ticket.updatedAt:
+   that moves on any write at all (a cached email body, a Jira link, a
+   comment), and using it as the status clock is how a stale database status
+   came to overwrite a ticket the board had resolved.
+
+   Losing the clocks must not lose the board. Empty maps mean every ticket
+   falls back to its creation time, which is the conservative direction: the
+   board's own value keeps winning rather than being overwritten. */
+async function loadTicketFieldClocks() {
+  const lastAssignChangeAt = new Map();
+  const lastStatusChangeAt = new Map();
+  try {
+    const fieldEvents = await prisma.ticketEvent.groupBy({
+      by: ['ticketId', 'eventType'],
+      where: { eventType: { in: ['ticket_assignedAgent_changed', 'ticket_status_changed'] } },
+      _max: { createdAt: true }
+    });
+    fieldEvents.forEach((row) => {
+      const at = new Date(row._max?.createdAt || 0).getTime() || 0;
+      const target = row.eventType === 'ticket_status_changed' ? lastStatusChangeAt : lastAssignChangeAt;
+      if (at > (target.get(row.ticketId) || 0)) target.set(row.ticketId, at);
+    });
+  } catch (error) {
+    console.error('Ticket field clock lookup failed:', error?.message || error);
+  }
+  return { lastAssignChangeAt, lastStatusChangeAt };
+}
+
 async function hydrateStateFromDatabase(baseState = {}) {
   const state = (baseState && typeof baseState === 'object') ? JSON.parse(JSON.stringify(baseState)) : {};
   const tickets = await prisma.ticket.findMany({
@@ -2552,25 +2581,7 @@ async function hydrateStateFromDatabase(baseState = {}) {
      defect, so both clocks are read here.
 
      One groupBy for the whole board rather than a query per ticket. */
-  let lastAssignChangeAt = new Map();
-  let lastStatusChangeAt = new Map();
-  try {
-    const fieldEvents = await prisma.ticketEvent.groupBy({
-      by: ['ticketId', 'eventType'],
-      where: { eventType: { in: ['ticket_assignedAgent_changed', 'ticket_status_changed'] } },
-      _max: { createdAt: true }
-    });
-    fieldEvents.forEach((row) => {
-      const at = new Date(row._max?.createdAt || 0).getTime() || 0;
-      const target = row.eventType === 'ticket_status_changed' ? lastStatusChangeAt : lastAssignChangeAt;
-      if (at > (target.get(row.ticketId) || 0)) target.set(row.ticketId, at);
-    });
-  } catch (error) {
-    // Losing the clocks must not lose the board. Empty maps mean every ticket
-    // falls back to its creation time, which is the conservative direction: the
-    // board's own value keeps winning rather than being overwritten.
-    console.error('Ticket field clock lookup failed:', error?.message || error);
-  }
+  const { lastAssignChangeAt, lastStatusChangeAt } = await loadTicketFieldClocks();
 
   const existingTickets = Array.isArray(state.allTickets) ? state.allTickets : [];
   const ticketsById = new Map(
@@ -3718,7 +3729,12 @@ async function upsertBoardTicketsToDatabase(state, req) {  if (!state || typeof 
     const subject = String(email.subject || item.subject || '(No subject)').slice(0, 1000);
     const senderEmail = normalizeEmailForDb(ticketClientEmail[externalId] || email.sender || email.from || email.fromAddress || '');
     const senderName = String(email.senderName || email.fromName || '').trim() || null;
-    const status = normalizeBoardStatusForDb(ticketState[externalId] || 'new');
+    // A ticket the board holds no stage for keeps the status the database has.
+    // Defaulting it to New is how a resolved ticket, saved by a board that had
+    // lost (or never loaded) its stage, came back as New.
+    const status = ticketState[externalId]
+      ? normalizeBoardStatusForDb(ticketState[externalId])
+      : (existingByExternalId.get(externalId)?.status || 'New');
     const priority = String(ticketPriority[externalId] || item.priority || 'Normal').trim() || 'Normal';
     const category = String(ticketCategory[externalId] || ticketSubtype[externalId] || '').trim() || null;
     const rawAssignedAgent = String(ticketAssignee[externalId] || '').trim().toUpperCase();
@@ -5770,6 +5786,122 @@ app.delete('/api/admin/users/:id', requireAdmin, async (req, res) => {
 
 app.get('/admin/users', requireAdmin, (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'admin-users.html'));
+});
+
+/* The board's once-a-minute check against the database (the KPIs' source):
+   just each ticket's status, owners and the clock of its last real status
+   change, so the board can take a newer database status and push a newer
+   board one, without pulling every comment and event of every ticket. */
+app.get('/api/tickets/status-summary', requireAuth, async (req, res) => {
+  try {
+    const [tickets, clocks] = await Promise.all([
+      prisma.ticket.findMany({ select: { id: true, externalId: true, status: true, assignedAgent: true, csAgent: true, resolvedAt: true, createdAt: true } }),
+      loadTicketFieldClocks()
+    ]);
+    res.json({
+      at: Date.now(),
+      tickets: tickets.filter(t => t.externalId).map(t => {
+        const created = new Date(t.createdAt || 0).getTime() || 0;
+        return {
+          externalId: t.externalId,
+          status: t.status,
+          assignedAgent: t.assignedAgent,
+          csAgent: t.csAgent,
+          resolvedAt: t.resolvedAt,
+          statusAt: clocks.lastStatusChangeAt.get(t.id) || created,
+          assignAt: clocks.lastAssignChangeAt.get(t.id) || created
+        };
+      })
+    });
+  } catch (error) {
+    res.status(500).json({ error: String(error.message || error) });
+  }
+});
+
+/* Put back resolved tickets that were wrongly moved out of Resolved.
+
+   On 2026-10-15 a stale database status (New) overwrote the board's Resolved
+   for a batch of old tickets (see loadTicketFieldClocks and
+   mergeDatabaseTickets in index.html). This finds them by their audit trail:
+   a status change away from Resolved inside the window, that is still the
+   ticket's latest status change, on a ticket with no client email after it
+   was resolved and no client-reply re-open. A ticket the client really wrote
+   back on is left alone.
+
+   Dry run unless { apply: true }. Restoring does not send the "Resolved"
+   Teams message again - those were sent the first time. */
+app.post('/api/admin/repair/resolved-flips', requireAdmin, async (req, res) => {
+  try {
+    const since = new Date(req.body?.since || Date.now() - 24 * 60 * 60 * 1000);
+    const until = new Date(req.body?.until || Date.now());
+    if (Number.isNaN(since.getTime()) || Number.isNaN(until.getTime()) || since >= until) return res.status(400).json({ error: 'invalid_window' });
+    const apply = req.body?.apply === true;
+
+    const flips = await prisma.ticketEvent.findMany({
+      where: { eventType: 'ticket_status_changed', oldValue: 'Resolved', createdAt: { gte: since, lte: until } },
+      orderBy: { createdAt: 'asc' },
+      include: { user: { select: { username: true } } }
+    });
+    const state = safeReadState();
+    const reopenedAt = (state.ticketReopenedAt && typeof state.ticketReopenedAt === 'object') ? state.ticketReopenedAt : {};
+    const candidates = [];
+    const skipped = [];
+    const seenTickets = new Set();
+    for (const flip of flips) {
+      if (seenTickets.has(flip.ticketId)) continue;
+      seenTickets.add(flip.ticketId);
+      const ticket = await prisma.ticket.findUnique({ where: { id: flip.ticketId } });
+      if (!ticket) continue;
+      const label = { ticketNumber: ticket.displayNumber ? `#${String(ticket.displayNumber).padStart(4, '0')}` : null, subject: ticket.subject, externalId: ticket.externalId };
+      if (ticket.status === 'Resolved') continue;
+      const later = await prisma.ticketEvent.findFirst({ where: { ticketId: ticket.id, eventType: 'ticket_status_changed', createdAt: { gt: flip.createdAt } }, select: { id: true } });
+      if (later) { skipped.push({ ...label, reason: 'status_changed_again_since' }); continue; }
+      const resolvedEvent = await prisma.ticketEvent.findFirst({
+        where: { ticketId: ticket.id, eventType: 'ticket_status_changed', newValue: 'Resolved', createdAt: { lt: flip.createdAt } },
+        orderBy: { createdAt: 'desc' }, select: { createdAt: true }
+      });
+      const resolvedAt = resolvedEvent?.createdAt || null;
+      const lastEmailAt = new Date(ticket.emailRaw?.receivedDateTime || 0).getTime() || 0;
+      if (resolvedAt && lastEmailAt > resolvedAt.getTime()) { skipped.push({ ...label, reason: 'client_wrote_after_resolution' }); continue; }
+      const reopen = Number(reopenedAt[ticket.externalId] || 0);
+      if (resolvedAt && reopen > resolvedAt.getTime()) { skipped.push({ ...label, reason: 'reopened_by_client_reply' }); continue; }
+      candidates.push({ ...label, id: ticket.id, status: ticket.status, flippedAt: flip.createdAt, flippedBy: flip.user?.username || null, resolvedAt });
+    }
+
+    if (!apply) return res.json({ dryRun: true, window: { since, until }, count: candidates.length, candidates, skipped });
+
+    const now = Date.now();
+    const nextState = safeReadState();
+    nextState.ticketState = (nextState.ticketState && typeof nextState.ticketState === 'object') ? nextState.ticketState : {};
+    nextState.ticketStageTouchedAt = (nextState.ticketStageTouchedAt && typeof nextState.ticketStageTouchedAt === 'object') ? nextState.ticketStageTouchedAt : {};
+    for (const c of candidates) {
+      const before = await prisma.ticket.findUnique({ where: { id: c.id } });
+      const after = await prisma.ticket.update({
+        where: { id: c.id },
+        data: { status: 'Resolved', resolvedAt: c.resolvedAt || c.flippedAt, resolvedTeamsNotifiedAt: before?.resolvedTeamsNotifiedAt || new Date() }
+      });
+      await auditTicketChanges({
+        ticketId: c.id,
+        userId: req.session.userId || null,
+        before, after,
+        fields: ['status'],
+        fieldMetadata: { status: { source: 'repair/resolved-flips', flippedAt: c.flippedAt } }
+      });
+      if (c.externalId) {
+        nextState.ticketState[c.externalId] = 'res';
+        nextState.ticketStageTouchedAt[c.externalId] = now;
+      }
+    }
+    if (candidates.length) {
+      await safeWriteState(nextState, { role: req.session.role, username: req.session.username });
+      sseBroadcast('board_reload', { reason: 'resolved_repair', actor: String(req.session.username || '').toUpperCase() || null });
+    }
+    console.log(`[repair] ${candidates.length} wrongly re-opened ticket(s) put back to Resolved by ${req.session.username}`);
+    return res.json({ dryRun: false, restored: candidates.length, candidates, skipped });
+  } catch (error) {
+    console.error('Resolved repair failed:', error);
+    return res.status(500).json({ error: String(error.message || error) });
+  }
 });
 
 app.get('/api/tickets', requireAuth, async (req, res) => {
@@ -8644,6 +8776,27 @@ async function mcpUpdateTicket(apiUser, id, fields) {
 
   const updated = await prisma.ticket.update({ where: { id }, data });
   await auditTicketChanges({ ticketId: id, userId: apiUser.id, before: existingTicket, after: updated, fields: ['status', 'assignedAgent', 'csAgent', 'priority'] });
+
+  // Into the board state and out to every open board now, the way a board
+  // save is - otherwise an update made here sat in the database only, and the
+  // board (and its "My resolved") disagreed with the KPIs until someone
+  // reloaded. Stamped now, so the board's clock-based merges take it.
+  if (updated.externalId) {
+    const now = Date.now();
+    const key = String(updated.externalId);
+    const entries = [];
+    if (data.status !== undefined && updated.status !== existingTicket.status) {
+      entries.push({ field: 'ticketState', id: key, value: normalizeDbStatusForBoard(updated.status) });
+      entries.push({ field: 'ticketStageTouchedAt', id: key, value: now });
+    }
+    if (data.assignedAgent !== undefined && updated.assignedAgent !== existingTicket.assignedAgent) {
+      entries.push({ field: 'ticketAssignee', id: key, value: updated.assignedAgent || null });
+      entries.push({ field: 'ticketAssigneeTouchedAt', id: key, value: now });
+    }
+    if (data.csAgent !== undefined && updated.csAgent !== existingTicket.csAgent) entries.push({ field: 'ticketCSOwner', id: key, value: updated.csAgent || null });
+    if (data.priority !== undefined && updated.priority !== existingTicket.priority) entries.push({ field: 'ticketPriority', id: key, value: updated.priority });
+    if (entries.length) writeServerFieldsIntoState(entries);
+  }
 
   if (data.status === 'Resolved' && existingTicket.status !== 'Resolved') {
     const alert = await claimResolvedTeamsAlert({

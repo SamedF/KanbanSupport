@@ -10233,6 +10233,30 @@ async function fetchMailboxWindow(afterDateTime){
   if(afterDateTime)args.afterDateTime=afterDateTime;
   return window.cowork.callMcpTool(SEARCH_TOOL,args);
 }
+/* When a database row's status and support assignee last actually changed:
+   the latest audit event for each (the server records one on every write of
+   either column), else the row's creation. statusAt/assignAt when the server
+   already worked them out (/api/tickets/status-summary).
+
+   Not row.updatedAt. That moves on any write - a cached email body, a Jira
+   link, a comment - so with it as the clock a row whose status was stale
+   (still New, for a ticket the board had resolved) won the moment anything
+   else touched it, and the ticket came back off Resolved on every board that
+   loaded it. That is what happened to a batch of old resolved tickets on
+   2026-10-15. The server's hydrate had already been fixed this way. */
+function dbRowFieldClocks(row){
+  const created=Date.parse(row?.createdAt||'')||0;
+  let statusAt=Number(row?.statusAt||0)||0;
+  let assignAt=Number(row?.assignAt||0)||0;
+  if(Array.isArray(row?.events)){
+    row.events.forEach(e=>{
+      const at=Date.parse(e?.createdAt||'')||0;
+      if(e?.eventType==='ticket_status_changed'&&at>statusAt)statusAt=at;
+      else if(e?.eventType==='ticket_assignedAgent_changed'&&at>assignAt)assignAt=at;
+    });
+  }
+  return{statusAt:statusAt||created,assignAt:assignAt||created};
+}
 function mergeDatabaseTickets(dbTickets){
   if(!Array.isArray(dbTickets)||!dbTickets.length)return 0;
   const byId=new Map(allTickets.filter(t=>t&&t.id).map(t=>[String(t.id),t]));
@@ -10259,21 +10283,21 @@ function mergeDatabaseTickets(dbTickets){
     byId.set(id,{...(current||{}),id,email:nextEmail,priority:row.priority||current?.priority||'Normal'});
     ensureTicketNumber(id);
     seen[id]=true;
-    const dbTouchedAt=Date.parse(row.updatedAt||row.createdAt||'')||Date.now();
+    const {statusAt:dbStatusAt,assignAt:dbAssignAt}=dbRowFieldClocks(row);
     const currentTouchedAt=Number(ticketStageTouchedAt[id]||0);
-    if(dbTouchedAt>=currentTouchedAt||!ticketState[id]){
+    if(dbStatusAt>=currentTouchedAt||!ticketState[id]){
       ticketState[id]=normalizeDbStatusForBoard(row.status||ticketState[id]||'new');
-      ticketStageTouchedAt[id]=dbTouchedAt;
+      ticketStageTouchedAt[id]=dbStatusAt;
     }else{
       ticketStageTouchedAt[id]=currentTouchedAt;
     }
     if(row.priority)ticketPriority[id]=row.priority;
     if(row.category)ticketCategory[id]=row.category;
-    // Gated on the DB row's own updatedAt, the same way the stage above is.
+    // Gated on the assignment's own clock, the same way the stage above is.
     // Unconditionally taking the DB value re-imposed whatever assignee was
     // last written to Postgres over a newer local assignment on every load.
-    if(row.assignedAgent&&dbTouchedAt>=Number(ticketAssigneeTouchedAt[id]||0)){
-      setTicketAssignee(id,normalizeSupportAgent(row.assignedAgent)||row.assignedAgent,dbTouchedAt);
+    if(row.assignedAgent&&dbAssignAt>=Number(ticketAssigneeTouchedAt[id]||0)){
+      setTicketAssignee(id,normalizeSupportAgent(row.assignedAgent)||row.assignedAgent,dbAssignAt);
     }
     if(row.csAgent)ticketCSOwner[id]=normalizeCSAgent(row.csAgent)||row.csAgent;
     if(row.assignedAgent||row.csAgent)ticketAssignmentMode[id]='support';
@@ -10332,8 +10356,21 @@ function setLiveIndicator(state,detail){
   el.className='live-indicator live-'+state;
   el.title=detail||('Live sync: '+state);
 }
+/* Real-time KPIs. Every board change reaches this tab as a live patch (or a
+   reload), and the server sends those only after the database - which the
+   KPIs are counted from - has been written. So an open KPI view re-pulls on
+   each one, debounced so a burst of saves is one request. Our own saves count
+   too: their echo is ignored as a board patch, but it is still the signal
+   that the database now has them. The 60-second timer stays as the backstop. */
+let kpiLiveRefreshTimer=null;
+function scheduleKpiLiveRefresh(){
+  if(viewMode!=='kpi'||document.visibilityState!=='visible')return;
+  clearTimeout(kpiLiveRefreshTimer);
+  kpiLiveRefreshTimer=setTimeout(()=>{if(viewMode==='kpi')void renderKpiView();},1500);
+}
 function applyBoardPatch(p){
   if(!p)return;
+  scheduleKpiLiveRefresh();
   // Our own save echoing back - applying it could clobber an edit the user
   // has made since, and it is already in our maps anyway.
   if(p.origin&&p.origin===LIVE_CLIENT_ID)return;
@@ -10417,10 +10454,70 @@ function applyBoardPatch(p){
     setLiveIndicator('active','Last update from '+p.actor+' at '+new Date().toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit',second:'2-digit'}));
   }
 }
+/* Real-time check, every 60 seconds: the board against the database the KPIs
+   are counted from. For each ticket whose status differs, the newer one wins,
+   by the same clocks the server uses - a database status changed after the
+   board last moved the card is taken (an MCP or API update, another board);
+   a board move the database has not caught up with is pushed with a save.
+   So a resolved ticket cannot sit Resolved on the board and open in the KPIs,
+   or the other way round, for more than a minute.
+
+   One small request (status and clocks only). Skipped in a hidden tab, and
+   the push is throttled so a ticket the database keeps refusing cannot turn
+   every tab into a save loop. */
+const DB_RECONCILE_MS=60000;
+const DB_RECONCILE_PUSH_MIN_MS=5*60000;
+let dbReconcileLastAt=0,dbReconcileLastPushAt=0,dbReconcileInFlight=false;
+async function reconcileBoardWithDatabase(){
+  if(dbReconcileInFlight||document.visibilityState!=='visible')return;
+  dbReconcileInFlight=true;
+  try{
+    const res=await fetch('/api/tickets/status-summary',{credentials:'include'});
+    if(!res.ok)return;
+    const out=await res.json();
+    const rows=Array.isArray(out?.tickets)?out.tickets:[];
+    const onBoard=new Set(allTickets.map(t=>String(t.id)));
+    let adopted=0,boardAhead=0;
+    rows.forEach(r=>{
+      const id=String(r?.externalId||'');
+      if(!id||!onBoard.has(id))return;
+      const dbStage=normalizeDbStatusForBoard(r.status);
+      const boardStage=ticketState[id]?normalizeTicketStage(ticketState[id]):'';
+      if(boardStage===dbStage)return;
+      const statusAt=Number(r.statusAt||0);
+      if(!boardStage||statusAt>Number(ticketStageTouchedAt[id]||0)){
+        ticketState[id]=dbStage;
+        ticketStageTouchedAt[id]=statusAt||Date.now();
+        adopted++;
+      }else{
+        boardAhead++;
+      }
+    });
+    dbReconcileLastAt=Date.now();
+    if(adopted){
+      updateWorkload();updateArchiveBadge();
+      if(typeof updateMyResolvedBadge==='function')updateMyResolvedBadge();
+      renderActiveView();
+    }
+    if(boardAhead&&Date.now()-dbReconcileLastPushAt>=DB_RECONCILE_PUSH_MIN_MS){
+      dbReconcileLastPushAt=Date.now();
+      await saveState('db_reconcile_board_ahead');
+      // The KPIs read the database, so they are only right once the push lands.
+      if(viewMode==='kpi')void renderKpiView();
+    }
+    if(adopted||boardAhead)console.info(`[sync] board/database check: ${adopted} taken from the database, ${boardAhead} pushed from the board`);
+  }catch(_){
+  }finally{
+    dbReconcileInFlight=false;
+  }
+}
+setInterval(reconcileBoardWithDatabase,DB_RECONCILE_MS);
+document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible'&&Date.now()-dbReconcileLastAt>DB_RECONCILE_MS)void reconcileBoardWithDatabase();});
 async function reloadBoardFromServer(reason){
   // Used when a patch stream can't be trusted (replay gap, oversized diff).
   clearTimeout(liveReloadTimer);
   liveReloadTimer=setTimeout(async()=>{
+    scheduleKpiLiveRefresh();
     await loadState();
     const dbTickets=await apiGetTickets();
     if(dbTickets)mergeDatabaseTickets(dbTickets);
@@ -14467,7 +14564,7 @@ function renderSimpleKpiRows(rows,labelKey,valueKey){
 let kpiAutoRefresh=true;
 let kpiLastLoadedAt=0;
 let kpiRefreshTimer=null,kpiFreshnessTimer=null;
-const KPI_REFRESH_MS=45000;
+const KPI_REFRESH_MS=60000;
 function kpiFreshnessText(){
   if(!kpiLastLoadedAt)return'Not loaded yet';
   const secs=Math.max(0,Math.round((Date.now()-kpiLastLoadedAt)/1000));
