@@ -42,9 +42,12 @@ const SHIFTS_PATH = path.join(__dirname, 'data', 'shifts.json');
 // browser crash cannot accrue SLA time overnight.
 const SHIFT_IDLE_MS = Number(process.env.SHIFT_IDLE_MS || 30 * 60 * 1000);
 const SHIFT_SWEEP_MS = 60_000;
-// SLA only ever looks back over open tickets; 120 days is far more history than
-// that needs and keeps the file small.
-const SHIFT_RETENTION_MS = 120 * 24 * 60 * 60 * 1000;
+// Kept since launch: the KPI dashboard measures resolved tickets over any
+// range back to go-live, and that needs the shift time they were worked in.
+const SHIFT_RETENTION_MS = Number(process.env.SHIFT_RETENTION_DAYS || 1095) * 24 * 60 * 60 * 1000;
+// What /api/shift/state sends each tab: the board only times open tickets, so
+// it never needs the full history, and every tab polls it.
+const SHIFT_STATE_WINDOW_MS = 120 * 24 * 60 * 60 * 1000;
 
 //const USERNAME = process.env.KANBAN_USER || 'admin';
 const SESSION_SECRET = process.env.SESSION_SECRET || 'change-this-session-secret';
@@ -974,11 +977,21 @@ function isDateInBounds(value, bounds) {
    touched is the closest thing to a resolution date we hold. */
 function kpiTicketInRange(ticket, bounds) {
   const statusKey = normalizeDbStatusForBoard(ticket?.status);
-  if (statusKey === 'res') {
-    if (ticket?.resolvedAt) return isDateInBounds(ticket.resolvedAt, bounds);
-    return isDateInBounds(ticket?.updatedAt, bounds);
-  }
+  if (statusKey === 'res') return isDateInBounds(kpiResolvedDate(ticket), bounds);
   return isDateInBounds(ticket?.createdAt, bounds);
+}
+/* The date a resolved ticket counts on: resolvedAt, else updatedAt - never
+   before the ticket arrived, never after now. A resolvedAt written from a
+   board clock a little ahead, or a stage time older than the row, put a
+   ticket outside every range, so "Since launch" resolved fewer tickets than
+   the launch banner over the very same tickets. */
+function kpiResolvedDate(ticket) {
+  const created = ticket?.createdAt ? new Date(ticket.createdAt).getTime() : NaN;
+  const raw = new Date(ticket?.resolvedAt || ticket?.updatedAt || 0).getTime();
+  let at = Number.isFinite(raw) && raw > 0 ? raw : created;
+  if (Number.isFinite(created) && at < created) at = created;
+  at = Math.min(at, Date.now());
+  return Number.isFinite(at) ? new Date(at) : null;
 }
 function safeDateForDb(value) {
   if (!value) return null;
@@ -1548,6 +1561,14 @@ function mergeShiftStores(a, b, now = Date.now()) {
     const starts = Object.values(out.agents).flatMap(r => r.sessions.map(s => Number(s.start))).filter(v => v > 0);
     out.since = starts.length ? Math.min(...starts) : now;
   }
+  // Set by rebuildShiftHistoryFromActivity. measuredSince is when live
+  // tracking began; the rest records the rebuild that filled in before it.
+  const measured = [a?.measuredSince, b?.measuredSince].map(Number).filter(v => v > 0);
+  if (measured.length) out.measuredSince = Math.min(...measured);
+  for (const key of ['rebuiltAt', 'rebuiltFrom']) {
+    const v = Math.max(Number(a?.[key] || 0), Number(b?.[key] || 0));
+    if (v > 0) out[key] = v;
+  }
   return out;
 }
 async function loadShiftStoreFromDb() {
@@ -1559,6 +1580,11 @@ async function loadShiftStoreFromDb() {
     persistShiftStore();
     void saveShiftStoreToDb();
     console.log(`Shift history loaded (${Object.keys(shiftStore.agents).length} agent(s), complete since ${new Date(shiftStore.since).toISOString()}).`);
+    if (!shiftStore.rebuiltAt) {
+      rebuildShiftHistoryFromActivity()
+        .then(r => console.log('Shift history rebuilt from the activity log:', JSON.stringify(r)))
+        .catch(e => console.warn('Shift history rebuild failed:', e?.message || e));
+    }
   } catch (error) {
     // Try again rather than start saving over a copy we could not read.
     console.warn('Shift store database read failed, retrying:', error.message || error);
@@ -1698,9 +1724,93 @@ function shiftSnapshotFor(code) {
     cooldownMs: SHIFT_BREAK_COOLDOWN_MS,
     cooldownRemainingMs: breakCooldownRemaining(rec, now),
     lastSeen: rec.lastSeen || 0,
-    sessions: rec.sessions,
+    sessions: rec.sessions.filter(s => s.end === null || s.end === undefined || Number(s.end) >= now - SHIFT_STATE_WINDOW_MS),
     leaves: rec.leaves || []
   };
+}
+
+/* Shift history before live tracking, rebuilt from the activity log.
+
+   Until shifts were kept in the database, every deploy wiped data/shifts.json,
+   and with it every agent's logged-in time from launch to then. That cannot be
+   read back - but what each agent DID on the board can: every save, move,
+   assignment, comment and reply is in TicketEvent / TicketComment with the
+   user and the time, back to launch. An open board saves by itself as it works
+   (assignments, CS owners), so that log follows a person's presence closely.
+
+   Each agent's actions are grouped into sessions: actions less than
+   REBUILD_GAP_MS apart are one session, which then runs from REBUILD_PAD_MS
+   before the first to REBUILD_PAD_MS after the last. Days with no action at
+   all get no session - the agent was off, which stops the clock just as a
+   day off does in live tracking. Shift time is still clipped to office hours
+   by shiftElapsedMs, like any session.
+
+   Only the time before live tracking (measuredSince) is filled, so real
+   heartbeats are never overwritten. Rebuilt sessions carry rebuilt: true;
+   running it again replaces them. */
+const REBUILD_GAP_MS = 90 * 60 * 1000;
+const REBUILD_PAD_MS = 15 * 60 * 1000;
+async function rebuildShiftHistoryFromActivity() {
+  if (!shiftStoreDbReady) throw new Error('the shift history has not loaded from the database yet');
+  const launch = kpiLaunchAt || await refreshKpiLaunchAt();
+  const measuredSince = Number(shiftStore.measuredSince || shiftStore.since || Date.now());
+  const from = launch ? startOfLocalDay(launch).getTime() : measuredSince - SHIFT_RETENTION_MS;
+  if (!(measuredSince > from)) return { ok: true, sessions: 0, note: 'live tracking already covers everything since launch' };
+
+  const fromDate = new Date(from);
+  const untilDate = new Date(measuredSince);
+  const rows = await prisma.$queryRaw`
+    SELECT UPPER(TRIM(u."username")) AS "code", e."createdAt" AS "at"
+    FROM "TicketEvent" e JOIN "User" u ON u."id" = e."userId"
+    WHERE e."createdAt" >= ${fromDate} AND e."createdAt" < ${untilDate}
+    UNION ALL
+    SELECT UPPER(TRIM(u."username")) AS "code", c."createdAt" AS "at"
+    FROM "TicketComment" c JOIN "User" u ON u."id" = c."userId"
+    WHERE c."createdAt" >= ${fromDate} AND c."createdAt" < ${untilDate}`;
+
+  const byAgent = new Map();
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const code = String(row.code || '');
+    if (!SUPPORT_AGENT_CODES.has(code) && !CS_AGENT_CODES.has(code)) continue;
+    const at = new Date(row.at).getTime();
+    if (!Number.isFinite(at)) continue;
+    if (!byAgent.has(code)) byAgent.set(code, []);
+    byAgent.get(code).push(at);
+  }
+
+  const summary = {};
+  let total = 0;
+  for (const code of new Set([...Object.keys(shiftStore.agents), ...byAgent.keys()])) {
+    const rec = shiftAgentRecord(code);
+    // Replace an earlier rebuild; never touch a live session.
+    rec.sessions = rec.sessions.filter(s => !s.rebuilt);
+    const times = (byAgent.get(code) || []).sort((a, b) => a - b);
+    const built = [];
+    for (const at of times) {
+      const last = built[built.length - 1];
+      const sameDay = last && startOfLocalDay(new Date(last.lastAt)).getTime() === startOfLocalDay(new Date(at)).getTime();
+      if (last && sameDay && at - last.lastAt <= REBUILD_GAP_MS) last.lastAt = at;
+      else built.push({ firstAt: at, lastAt: at });
+    }
+    const sessions = built.map(b => ({
+      start: Math.max(from, b.firstAt - REBUILD_PAD_MS),
+      end: Math.min(measuredSince, b.lastAt + REBUILD_PAD_MS),
+      breaks: [],
+      rebuilt: true
+    })).filter(s => s.end > s.start);
+    rec.sessions = [...sessions, ...rec.sessions].sort((a, b) => a.start - b.start);
+    if (sessions.length) {
+      summary[code] = { sessions: sessions.length, days: new Set(sessions.map(s => startOfLocalDay(new Date(s.start)).getTime())).size };
+      total += sessions.length;
+    }
+  }
+  shiftStore.measuredSince = measuredSince;
+  shiftStore.since = Math.min(Number(shiftStore.since || measuredSince), from);
+  shiftStore.rebuiltAt = Date.now();
+  shiftStore.rebuiltFrom = from;
+  persistShiftStore();
+  await saveShiftStoreToDb();
+  return { ok: true, from: fromDate.toISOString(), until: untilDate.toISOString(), sessions: total, agents: summary };
 }
 
 shiftStore = loadShiftStore();
@@ -1998,9 +2108,17 @@ function shiftElapsedMs(fromMs, toMs, agentCode) {
 //                     leaves the column (setTicketStage in index.html), so
 //                     once it is back with us the count resumes from where it
 //                     stopped and the wait never reaches met/breached either.
-//   no_history      - resolved, but its clock started before the shift history
-//                     was complete (shiftStore.since), so its worked time is
-//                     unknown. Unmeasured, like no_clock.
+//   met / breached with estimated: true
+//                   - resolved, but its clock started before the shift history
+//                     was complete (shiftStore.since): the deploys that wiped
+//                     data/ took the logged-in time with them, and it cannot be
+//                     recovered. Leaving all of those unmeasured blanked the SLA
+//                     card for every range since launch. They are measured on
+//                     office hours instead (the windows the shift clock runs
+//                     in, no nights or weekends). That never undercounts: an
+//                     agent cannot have been on shift outside office hours, so
+//                     an estimate can only read later than the truth, never
+//                     flatter it. Reported as estimated, so the card says so.
 //   leave_hold      - open, and the assigned agent is marked off. The days
 //                     off are cut out of the clock (rec.leaves), so it
 //                     resumes where it stopped.
@@ -2028,7 +2146,7 @@ function ticketSlaSnapshot(ticket, now = Date.now()) {
   if (!Number.isFinite(createdMs)) return base;
 
   const endMs = resolved
-    ? (ticket?.resolvedAt ? new Date(ticket.resolvedAt).getTime() : now)
+    ? (kpiResolvedDate(ticket)?.getTime() ?? now)
     : now;
   const wallMs = Math.max(0, (Number.isFinite(endMs) ? endMs : now) - createdMs);
   // The ticket's age in the hours the SLA runs: no nights, lunch or weekends.
@@ -2052,9 +2170,12 @@ function ticketSlaSnapshot(ticket, now = Date.now()) {
 
   // Its clock started before the shift history was complete, so the time
   // worked on it is not known - not zero. Reporting it as met in 0h is what
-  // made the dashboard read 100% after every deploy wiped the history.
+  // made the dashboard read 100% after every deploy wiped the history. It is
+  // measured on office hours instead, and flagged as an estimate.
   if (resolved && Number(shiftStore.since) > 0 && createdMs < Number(shiftStore.since)) {
-    return { ...base, state: 'no_history', wallMs };
+    const officeMs = businessMsInRange(createdMs, Number.isFinite(endMs) ? endMs : now);
+    const left = targetMs - officeMs;
+    return { ...base, state: left >= 0 ? 'met' : 'breached', estimated: true, shiftMs: officeMs, wallMs, overdueMs: Math.max(0, -left) };
   }
 
   const shiftMs = shiftElapsedMs(createdMs, Number.isFinite(endMs) ? endMs : now, agent);
@@ -4412,6 +4533,17 @@ app.get('/api/shift/state', requireAuth, (req, res) => {
   return res.json({ me, agents, idleMs: SHIFT_IDLE_MS, serverNow: Date.now(), leave: activeAgentLeave() });
 });
 
+// Re-run the rebuild of shift history from the activity log (admins). Safe to
+// repeat: it replaces only the sessions an earlier rebuild made.
+app.post('/api/shift/rebuild-history', requireAdmin, async (req, res) => {
+  try {
+    return res.json(await rebuildShiftHistoryFromActivity());
+  } catch (error) {
+    console.error('Shift history rebuild failed:', error?.message || error);
+    return res.status(500).json({ error: 'shift_rebuild_failed', message: String(error?.message || error) });
+  }
+});
+
 // Who is off, and whose leave this login may change.
 app.get('/api/agents/leave', requireAuth, async (req, res) => {
   res.json({
@@ -6081,6 +6213,11 @@ async function loadKpiWorkingSet(req) {  const bounds = kpiDateBounds(req.query.
   const baseWhere = {
     NOT: [{ category: { equals: 'Spam', mode: 'insensitive' } }]
   };
+  // One set of tickets for the whole dashboard: everything since the board
+  // went live. The launch banner counted from launch while the cards counted
+  // every row, so the two could never agree.
+  const launchStart = kpiLaunchAt ? kpiDateBounds('since_launch', req.query.tzOffset).start : null;
+  if (launchStart) baseWhere.createdAt = { gte: launchStart };
   if (company && company !== 'all') baseWhere.companyName = company;
   if (jiraOnly) baseWhere.jiraTicketKey = { not: null };
 
@@ -6287,10 +6424,10 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
     let slaMet = 0;
     let slaBreached = 0;
     let slaUnmeasured = 0;
-    let slaNoHistory = 0;
+    let slaEstimated = 0;
     for (const ticket of resolvedInRange) {
       const snapshot = ticketSlaSnapshot(ticket, now);
-      if (snapshot.state === 'no_history') slaNoHistory++;
+      if (snapshot.estimated) slaEstimated++;
       const rows = rowKeysForTicket(ticket).map(ensureAgentRow);
       if (snapshot.state === 'met') { slaMet++; rows.forEach(row => row.slaMet++); }
       else if (snapshot.state === 'breached') {
@@ -6351,24 +6488,28 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
       ...tickets.flatMap(t => [t.assignedAgent, t.csAgent]).filter(Boolean).map(v => String(v).trim().toUpperCase())
     ])).sort((a, b) => a.localeCompare(b));
 
-    // The whole life of the board, for admins: how many tickets it has taken
-    // in since it went live. Independent of the range and the team/agent
-    // filters on purpose - it answers "how many tickets in total", which no
-    // single range does. Spam is left out, as everywhere on this dashboard;
-    // duplicates are counted separately so both figures are there to read.
+    // The whole life of the board, for admins, under the same filters as the
+    // cards. Counted off the very tickets the cards are counted off
+    // (workTickets: since launch, no spam, no duplicates), so with "Since
+    // launch" picked the banner and the cards are the same numbers:
+    //   created = Created card, resolved = Resolved card,
+    //   open = New + In Progress + Waiting On Us + Due for test + Waiting On Contact.
     let allTime = null;
     if (myTeam === 'admin') {
       const since = kpiLaunchAt || await refreshKpiLaunchAt();
-      const sinceWhere = since ? { createdAt: { gte: startOfLocalDay(since) } } : {};
-      const notSpam = { NOT: [{ category: { equals: 'Spam', mode: 'insensitive' } }] };
-      const [created, resolved, duplicates, spam] = await Promise.all([
-        prisma.ticket.count({ where: { AND: [notSpam, sinceWhere, { duplicateOfExternalId: null }] } }),
-        // Same test as normalizeDbStatusForBoard: Resolved or Closed, any case.
-        prisma.ticket.count({ where: { AND: [notSpam, sinceWhere, { duplicateOfExternalId: null }, { OR: [{ status: { equals: 'Resolved', mode: 'insensitive' } }, { status: { equals: 'Closed', mode: 'insensitive' } }] }] } }),
-        prisma.ticket.count({ where: { AND: [notSpam, sinceWhere, { NOT: [{ duplicateOfExternalId: null }] }] } }),
-        prisma.ticket.count({ where: { AND: [sinceWhere, { category: { equals: 'Spam', mode: 'insensitive' } }] } })
-      ]);
-      allTime = { since: since ? since.toISOString() : null, created, resolved, open: created - resolved, duplicates, spam };
+      const created = workTickets.length;
+      const resolved = workTickets.filter(t => normalizeDbStatusForBoard(t.status) === 'res').length;
+      const spamWhere = { ...accessWhere, category: { equals: 'Spam', mode: 'insensitive' } };
+      if (baseWhere.createdAt) spamWhere.createdAt = baseWhere.createdAt;
+      if (baseWhere.companyName) spamWhere.companyName = baseWhere.companyName;
+      if (baseWhere.jiraTicketKey) spamWhere.jiraTicketKey = baseWhere.jiraTicketKey;
+      const spam = await prisma.ticket.count({ where: spamWhere }).catch(() => 0);
+      const scope = [
+        agent && agent !== 'ALL' ? agent : team === 'cs' ? 'CS only' : team === 'support' ? 'Support only' : '',
+        company && company !== 'all' ? company : '',
+        jiraOnly ? 'Jira-linked' : ''
+      ].filter(Boolean).join(' · ');
+      allTime = { since: since ? since.toISOString() : null, scope: scope || 'whole board', created, resolved, open: created - resolved, duplicates: duplicatesOpen.length, spam };
     }
 
     return res.json({
@@ -6418,9 +6559,9 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
         // clock ever ran, or linked to Jira, so the clock was off. Excluded
         // from the percentage rather than silently counted as met.
         unmeasured: slaUnmeasured,
-        // The part of `unmeasured` resolved from before the shift history
-        // was complete, so the dashboard can say why they are missing.
-        noHistory: slaNoHistory,
+        // The part of met + breached resolved from before the shift history
+        // was complete, measured on office hours rather than logged-in time.
+        estimated: slaEstimated,
         historySince: shiftStore.since ? new Date(Number(shiftStore.since)).toISOString() : null,
         compliancePct: slaMeasured ? Math.round((slaMet / slaMeasured) * 1000) / 10 : null,
         avgResolveShiftHours: avgOf(resolveShiftHours),
@@ -6529,7 +6670,7 @@ app.get('/api/tickets/kpis/drilldown', requireAuth, async (req, res) => {
       const wantStates = category === 'slaMet' ? ['met'] : category === 'slaBreached' ? ['breached'] : ['met', 'breached'];
       rows = resolvedSnapshots.filter(x => wantStates.includes(x.snapshot.state))
         .sort((a, b) => b.snapshot.overdueMs - a.snapshot.overdueMs)
-        .map(({ t, snapshot }) => kpiDrilldownRow(t, snapshot.state === 'met' ? 'Met SLA' : `Missed by ${hoursFromMs(snapshot.overdueMs)}h`));
+        .map(({ t, snapshot }) => kpiDrilldownRow(t, (snapshot.state === 'met' ? 'Met SLA' : `Missed by ${hoursFromMs(snapshot.overdueMs)}h`)));
     } else if (category === 'reopened') {
       const events = await prisma.ticketEvent.findMany({
         where: {
@@ -7531,13 +7672,20 @@ async function pruneProjectRuns(projectId) {
   await prisma.$executeRaw`
     DELETE FROM "ClaudeProjectRun"
     WHERE "projectId" = ${Number(projectId)}
-      AND "status" NOT IN ('queued', 'running')
+      AND "status" NOT IN ('collecting', 'queued', 'running')
       AND "id" NOT IN (
         SELECT "id" FROM "ClaudeProjectRun"
         WHERE "projectId" = ${Number(projectId)}
         ORDER BY "createdAt" DESC, "id" DESC
         LIMIT ${PROJECT_RUN_KEEP}
       )
+  `;
+  // Collected data is only needed while a Claude works the run. A follow-up
+  // queues a new run, which collects afresh.
+  await ensureProjectRunDataTable();
+  await prisma.$executeRaw`
+    DELETE FROM "ClaudeProjectRunData" d
+    WHERE NOT EXISTS (SELECT 1 FROM "ClaudeProjectRun" r WHERE r."id" = d."runId" AND r."status" IN ('collecting', 'queued', 'running'))
   `;
 }
 
@@ -7546,7 +7694,7 @@ async function queueProjectRunRow(entry) {
   const rows = await prisma.$queryRaw`
     INSERT INTO "ClaudeProjectRun" ("projectId","source","title","inputs","output","model","status","request","createdBy")
     VALUES (${Number(entry.projectId)}, 'board', ${String(entry.title || '').slice(0, 200)},
-            ${JSON.stringify(entry.inputs || [])}::jsonb, '', '', 'queued',
+            ${JSON.stringify(entry.inputs || [])}::jsonb, '', '', ${entry.status === 'collecting' ? 'collecting' : 'queued'},
             ${JSON.stringify(entry.request || {})}::jsonb, ${String(entry.createdBy || '').slice(0, 120)})
     RETURNING "id"
   `;
@@ -7567,12 +7715,150 @@ async function expireStaleProjectRuns() {
       "error" = 'Nobody picked this run up, so it was dropped. Run it again, then hand it to Claude.'
     WHERE "status" = 'queued' AND "createdAt" < ${queueCutoff}
   `;
+  const collectCutoff = new Date(Date.now() - PROJECT_COLLECT_STALE_MS);
+  await prisma.$executeRaw`
+    UPDATE "ClaudeProjectRun" SET "status" = 'error',
+      "error" = 'The board started collecting data for this run but never finished (the server may have restarted). Run it again.'
+    WHERE "status" = 'collecting' AND "createdAt" < ${collectCutoff}
+  `;
 }
+
+// Which board this deployment is. Prod and preprod are separate databases with
+// their own run ids, and a Claude often has both connectors switched on - run 12
+// on one is not run 12 on the other - so every hand-off names its board.
+const BOARD_LABEL = String(process.env.BOARD_LABEL || '').trim()
+  || (/preprod/i.test(APP_BASE_URL) ? 'preprod' : IS_PRODUCTION ? 'prod' : 'local');
 
 // The words that hand a queued run to Claude. Shown on the board for someone to
 // paste into claude.ai, and used verbatim by the runner script.
 function projectRunHandoffPrompt(runId) {
-  return `Use the support board connector: call claim_project_run with runId ${runId}, do the work it describes with the tools you have, then call post_project_run with runId ${runId} and the finished answer.`;
+  return `Use the support board connector for the ${BOARD_LABEL} board (${APP_BASE_URL}): call claim_project_run with runId ${runId}, do the work it describes with the tools you have, then call post_project_run with runId ${runId} and the finished answer.`;
+}
+
+/* Collection, done by the board.
+   The Q-data audit starts by pulling the hotel's corpus from the n8n audit
+   gateway with AUDIT_API_KEY. Asking the Claude that claims the run to make
+   that call means handing a secret to an unattended session and having it
+   post the secret to an outside URL - which Claude's safety check rightly
+   refuses, so every audit run from the board failed at step one.
+   The board is the right place for it: the key stays in this server's env,
+   the board calls the gateway itself between Run and the queue, and Claude is
+   handed the corpus (claim_project_run / get_project_run_data) with nothing
+   to collect and no key to see. A run sits in 'collecting' until that lands,
+   so no Claude can take it half-ready. */
+const AUDIT_API_KEY = String(process.env.AUDIT_API_KEY || '').trim();
+const AUDIT_GATEWAY_URL = String(process.env.AUDIT_GATEWAY_URL || 'https://n8n-staging.quicktext.im/webhook/qdata-audit-api').trim();
+const AUDIT_PROJECT_PATTERN = (() => {
+  try { return new RegExp(process.env.AUDIT_PROJECT_PATTERN || 'audit', 'i'); } catch (_) { return /audit/i; }
+})();
+const AUDIT_COLLECT_TIMEOUT_MS = Math.max(10, Number(process.env.AUDIT_COLLECT_TIMEOUT_SECONDS || 300)) * 1000;
+// A collection the server never finished - it restarted mid-call - is failed
+// after this long rather than left 'collecting' for days.
+const PROJECT_COLLECT_STALE_MS = AUDIT_COLLECT_TIMEOUT_MS + 5 * 60 * 1000;
+const PROJECT_DATA_MAX_CHARS = 8_000_000;
+// One get_project_run_data page. Small enough to sit inside an MCP tool result
+// without being cut, big enough that a normal corpus is a handful of calls.
+const PROJECT_DATA_PART_CHARS = 60_000;
+
+async function ensureProjectRunDataTable() {
+  await prisma.$executeRaw`
+    CREATE TABLE IF NOT EXISTS "ClaudeProjectRunData" (
+      "runId" INTEGER PRIMARY KEY,
+      "source" TEXT NOT NULL DEFAULT '',
+      "label" TEXT NOT NULL DEFAULT '',
+      "content" TEXT NOT NULL DEFAULT '',
+      "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+  `;
+}
+
+/* Which collection, if any, a run of this project needs. Today that is the
+   audit: a project whose slug or name matches AUDIT_PROJECT_PATTERN and that
+   asks for a Team ID. Returns null when nothing is collected (no key set, or
+   not an audit project), or { teamId } - teamId '' when the field holds no
+   number, which the caller turns into a form error. */
+function projectCollectionFor(project, values) {
+  if (!AUDIT_API_KEY || !AUDIT_GATEWAY_URL) return null;
+  if (!AUDIT_PROJECT_PATTERN.test(`${project?.slug || ''} ${project?.name || ''}`)) return null;
+  const fields = Array.isArray(project?.inputs) ? project.inputs : [];
+  const field = fields.find(f => /team/i.test(`${f.key} ${f.label}`));
+  if (!field) return null;
+  const supplied = (values && typeof values === 'object') ? values : {};
+  // People type "2876", "Audit 2876" or "team 2876"; the gateway wants the number.
+  const match = String(supplied[field.key] ?? '').match(/\d+/);
+  return { teamId: match ? match[0] : '' };
+}
+
+async function collectAuditCorpus(runId, teamId) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), AUDIT_COLLECT_TIMEOUT_MS);
+  try {
+    const res = await fetch(AUDIT_GATEWAY_URL, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${AUDIT_API_KEY}`, 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({ team_id: Number(teamId) }),
+      signal: controller.signal
+    });
+    const text = await res.text();
+    if (!res.ok) throw new Error(`the audit gateway answered HTTP ${res.status}${text ? `: ${text.replace(/\s+/g, ' ').slice(0, 300)}` : ''}`);
+    if (!text.trim()) throw new Error('the audit gateway answered with an empty corpus');
+    if (text.length > PROJECT_DATA_MAX_CHARS) throw new Error(`the corpus is ${text.length} characters, over the board's ${PROJECT_DATA_MAX_CHARS} limit`);
+    await ensureProjectRunDataTable();
+    await prisma.$executeRaw`
+      INSERT INTO "ClaudeProjectRunData" ("runId","source","label","content")
+      VALUES (${runId}, ${AUDIT_GATEWAY_URL}, ${`Q-data corpus for team ${teamId}`}, ${text})
+      ON CONFLICT ("runId") DO UPDATE SET "source" = EXCLUDED."source", "label" = EXCLUDED."label",
+        "content" = EXCLUDED."content", "createdAt" = CURRENT_TIMESTAMP`;
+    await prisma.$executeRaw`UPDATE "ClaudeProjectRun" SET "status" = 'queued' WHERE "id" = ${runId} AND "status" = 'collecting'`;
+  } catch (error) {
+    const reason = error?.name === 'AbortError'
+      ? `the audit gateway did not answer within ${Math.round(AUDIT_COLLECT_TIMEOUT_MS / 1000)}s`
+      : String(error?.message || error);
+    console.error(`Run ${runId}: collection for team ${teamId} failed:`, reason);
+    await prisma.$executeRaw`
+      UPDATE "ClaudeProjectRun" SET "status" = 'error',
+        "error" = ${`The board could not collect the Q-data corpus for team ${teamId}: ${reason}. Nothing was sent to Claude. Run it again, or check the gateway.`.slice(0, 1000)}
+      WHERE "id" = ${runId} AND "status" = 'collecting'`.catch(() => {});
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// What claim_project_run says about collected data: the whole thing when it is
+// small, otherwise its size and how to page through it.
+async function projectRunDataSummary(runId) {
+  await ensureProjectRunDataTable();
+  const rows = await prisma.$queryRaw`
+    SELECT "label", LENGTH("content") AS "chars",
+           CASE WHEN LENGTH("content") <= ${PROJECT_DATA_PART_CHARS} THEN "content" ELSE NULL END AS "content"
+    FROM "ClaudeProjectRunData" WHERE "runId" = ${runId} LIMIT 1`;
+  const row = Array.isArray(rows) ? rows[0] : null;
+  if (!row) return null;
+  const chars = Number(row.chars) || 0;
+  const parts = Math.max(1, Math.ceil(chars / PROJECT_DATA_PART_CHARS));
+  return {
+    label: row.label || 'Collected data',
+    chars,
+    parts,
+    ...(row.content != null ? { content: row.content } : {}),
+    note: 'The board already ran the collection step server-side and this is its result. Do not call the n8n audit gateway, do not look for AUDIT_API_KEY, and do not ask for a corpus: use this data as the corpus.'
+      + (row.content != null ? '' : ` It is too large to inline: read it with get_project_run_data (runId ${runId}, part 1 to ${parts}) and join the parts in order before you start.`)
+  };
+}
+
+async function readProjectRunData(runId, part) {
+  await ensureProjectRunDataTable();
+  const from = (part - 1) * PROJECT_DATA_PART_CHARS + 1;
+  const rows = await prisma.$queryRaw`
+    SELECT d."label", LENGTH(d."content") AS "chars", SUBSTRING(d."content" FROM ${from} FOR ${PROJECT_DATA_PART_CHARS}) AS "content", r."status"
+    FROM "ClaudeProjectRunData" d JOIN "ClaudeProjectRun" r ON r."id" = d."runId"
+    WHERE d."runId" = ${runId} LIMIT 1`;
+  const row = Array.isArray(rows) ? rows[0] : null;
+  if (!row) throw Object.assign(new Error(`no_data: run ${runId} has no collected data on the board.`), { status: 404 });
+  const chars = Number(row.chars) || 0;
+  const parts = Math.max(1, Math.ceil(chars / PROJECT_DATA_PART_CHARS));
+  if (part > parts) throw Object.assign(new Error(`part_out_of_range: run ${runId} has ${parts} part(s).`), { status: 400 });
+  return { runId, label: row.label, part, parts, chars, content: row.content || '' };
 }
 
 function projectRunRow(row) {
@@ -7582,7 +7868,7 @@ function projectRunRow(row) {
     title: row.title || '',
     inputs: Array.isArray(row.inputs) ? row.inputs : [],
     output: row.output || '',
-    status: ['queued', 'running', 'error'].includes(row.status) ? row.status : 'done',
+    status: ['collecting', 'queued', 'running', 'error'].includes(row.status) ? row.status : 'done',
     error: row.error || '',
     claimedBy: row.claimedBy || '',
     handoff: row.status === 'queued' ? projectRunHandoffPrompt(row.id) : '',
@@ -8169,7 +8455,11 @@ async function handleProjectRun(req, res, { withHistory }) {
     if (history.error) return res.status(400).json({ error: 'invalid_history', message: history.error });
     if (withHistory && !history.turns.length) return res.status(400).json({ error: 'invalid_history', message: 'There is no question to answer yet.' });
 
+    const collection = projectCollectionFor(project, req.body?.values);
+    if (collection && !collection.teamId) return res.status(400).json({ error: 'missing_inputs', message: 'Team ID needs the numeric team id, e.g. 2876.' });
+
     const runId = await queueProjectRunRow({
+      status: collection ? 'collecting' : 'queued',
       projectId: project.id,
       title: withHistory ? 'Follow-up' : 'Run',
       inputs: projectRunInputPairs(project, req.body?.values),
@@ -8177,6 +8467,12 @@ async function handleProjectRun(req, res, { withHistory }) {
       createdBy: req.session?.username || ''
     });
     if (!runId) return res.status(500).json({ error: 'project_run_failed', message: 'Could not queue the run.' });
+    if (collection) {
+      // Not awaited: the panel polls the run, which moves to 'queued' (or
+      // 'error') when the gateway answers.
+      collectAuditCorpus(runId, collection.teamId);
+      return res.status(202).json({ ok: true, runId, status: 'collecting', handoff: '' });
+    }
     return res.status(202).json({ ok: true, runId, status: 'queued', handoff: projectRunHandoffPrompt(runId) });
   } catch (error) {
     console.error('Project run could not be queued:', String(error?.message || error));
@@ -9103,6 +9399,7 @@ async function mcpClaimProjectRun(apiUser, args) {
   const projects = await prisma.$queryRaw`SELECT "name","instructions" FROM "ClaudeProject" WHERE "id" = ${run.projectId} LIMIT 1`;
   const project = Array.isArray(projects) ? projects[0] : null;
   const request = run.request && typeof run.request === 'object' ? run.request : {};
+  const collected = await projectRunDataSummary(run.id);
   return {
     ok: true,
     claimed: true,
@@ -9112,8 +9409,10 @@ async function mcpClaimProjectRun(apiUser, args) {
     instructions: String(project?.instructions || ''),
     brief: String(request.brief || ''),
     followUp: Array.isArray(request.turns) ? request.turns : [],
+    ...(collected ? { collected } : {}),
     howToFinish: [
       'Follow "instructions" as your project instructions, with "brief" as what the person asked for.',
+      collected ? `Any data-collection step in the instructions is already done: "collected" holds its result. ${collected.note}` : '',
       Array.isArray(request.turns) && request.turns.length
         ? '"followUp" is the conversation so far: your earlier answer, then the question to answer now. Answer the last question.'
         : '',
@@ -9222,6 +9521,8 @@ async function mcpSettleQueuedRun(apiUser, runId, { output, failure, model }) {
     if (!found) throw Object.assign(new Error(`run_not_found: there is no run ${runId} on the board.`), { status: 404 });
     throw Object.assign(new Error(`run_already_settled: run ${runId} is already ${found.status}. Post without runId to add it as a new result instead.`), { status: 409 });
   }
+  await ensureProjectRunDataTable();
+  await prisma.$executeRaw`DELETE FROM "ClaudeProjectRunData" WHERE "runId" = ${runId}`;
   const projects = await prisma.$queryRaw`SELECT "name" FROM "ClaudeProject" WHERE "id" = ${row.projectId} LIMIT 1`;
   const name = (Array.isArray(projects) ? projects[0]?.name : '') || 'the project';
   return {
@@ -9582,8 +9883,25 @@ function mcpTextResult(value) {
 function mcpErrorResult(error) {
   return { content: [{ type: 'text', text: error?.message || String(error) }], isError: true };
 }
+/* What a Claude is told when it connects. The point is "push to kanban prod":
+   said inside a Claude project, it should put that project on the board with
+   no slug, prompt or copy-paste from anyone. */
+function kanbanMcpInstructions() {
+  return [
+    `This is the Support Kanban ${BOARD_LABEL} board (${APP_BASE_URL}). A Claude may have more than one Support Kanban connector switched on (prod and preprod); they are separate boards with separate run ids, so use the one the request names.`,
+    '',
+    'PUSH A PROJECT. When the user says "push to kanban", "push to kanban prod", "push to kanban preprod", "push this to the board" or similar inside a Claude project:',
+    `1. Pick the board: "prod" means the prod board, "preprod" the preprod board, nothing named means prod. If that is not this board (${BOARD_LABEL}), use the other Support Kanban connector instead of this one.`,
+    '2. Call list_board_projects. If a project with the same name (or obviously the same project) is there, reuse its slug so the entry is updated, not duplicated.',
+    '3. Call register_project with: name = the name of this Claude project; instructions = your own project instructions, verbatim and complete; a one-line description; inputs = each piece of information the project asks people for (e.g. Team ID, Mode as a select with its options), required where the instructions require it.',
+    '4. Do not ask for confirmation first - the user already asked. Answer with one line: what was pushed, to which board, and how many input fields it has. If register_project says admin_required, say the connector token must belong to an admin.',
+    '',
+    'RUN A QUEUED JOB. When asked to claim a run, call claim_project_run, do the work, and always finish with post_project_run (output, or error) so the board stops waiting. If the claim returns "collected", the board has already done that data-collection step server-side: use the data and never call the collection gateway or look for its API key yourself.'
+  ].join('\n');
+}
+
 function buildKanbanMcpServer(apiUser, { McpServer, z }) {
-  const server = new McpServer({ name: 'support-kanban', version: '1.0.0' });
+  const server = new McpServer({ name: 'support-kanban', version: '1.0.0' }, { instructions: kanbanMcpInstructions() });
 
   server.registerTool(
     'list_tickets',
@@ -9696,7 +10014,7 @@ function buildKanbanMcpServer(apiUser, { McpServer, z }) {
     'register_project',
     {
       title: 'Put this project on the support board',
-      description: "Register the Claude project you are running inside with the support board, so the team can run it from QT-Tools without opening Claude. Use this when someone asks to add, register or update a project on the board. If Compliance API sync is unavailable, this is the direct route: read your OWN project instructions out of your context and pass them as instructions, and describe the information the project asks the user for as inputs - the board turns that list into a form. Calling it again with the same name updates the entry; leaving instructions empty keeps whatever is already saved.",
+      description: "Register the Claude project you are running inside with the support board, so the team can run it from QT-Tools without opening Claude. Use this when someone asks to add, register, push or update a project on the board - including the short form \"push to kanban prod\" / \"push to kanban preprod\" (use the connector for the board named). If Compliance API sync is unavailable, this is the direct route: read your OWN project instructions out of your context and pass them as instructions, and describe the information the project asks the user for as inputs - the board turns that list into a form. Calling it again with the same name updates the entry; leaving instructions empty keeps whatever is already saved.",
       inputSchema: {
         name: z.string().min(1).describe('The project name, as it appears in Claude.'),
         description: z.string().optional().describe('One line on what the project does.'),
@@ -9742,6 +10060,21 @@ function buildKanbanMcpServer(apiUser, { McpServer, z }) {
     },
     async (args) => {
       try { return mcpTextResult(await mcpClaimProjectRun(apiUser, args)); } catch (error) { return mcpErrorResult(error); }
+    }
+  );
+
+  server.registerTool(
+    'get_project_run_data',
+    {
+      title: 'Read data the board collected for a run',
+      description: "Some projects need data collected before Claude can work (e.g. the Q-data audit corpus from the n8n gateway). The board does that collection itself, server-side, so no API key is ever handed to Claude. claim_project_run returns it inline when it is small; otherwise it says how many parts there are, and this returns one part at a time. Join the parts in order to get the full data.",
+      inputSchema: {
+        runId: z.number().int().positive().describe('The run you claimed.'),
+        part: z.number().int().positive().optional().describe('Which part, starting at 1. Defaults to 1.')
+      }
+    },
+    async ({ runId, part }) => {
+      try { return mcpTextResult(await readProjectRunData(runId, part || 1)); } catch (error) { return mcpErrorResult(error); }
     }
   );
 

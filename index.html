@@ -13656,6 +13656,7 @@ function projectThreadHtml(slug){
     const working=t.status==='running';
     const head=working
       ?`<strong>Claude is working on it</strong>${t.claimedBy?` (${esc(String(t.claimedBy).replace(/^mcp:/,''))})`:''}`
+      :t.status==='collecting'?'<strong>The board is collecting the data for this run</strong>'
       :t.status==='queued'?'<strong>Waiting for Claude to pick this up</strong>':'<strong>Sending…</strong>';
     parts.push(`<div class="pj-result pj-running pj-progress">
     <span class="spinner"></span>
@@ -13695,7 +13696,9 @@ function projectRunsHtml(slug){
     // The newest result is the one someone opened the card to read, so it is
     // expanded unless they have since collapsed it themselves.
     const open=projectRunOpen[key]!==undefined?projectRunOpen[key]:idx===0;
-    const badge=run.status==='queued'
+    const badge=run.status==='collecting'
+      ?'<span class="pj-badge pj-badge-queued">Collecting data</span>'
+      :run.status==='queued'
       ?'<span class="pj-badge pj-badge-queued">Waiting for Claude</span>'
       :run.status==='running'
       ?'<span class="pj-badge pj-badge-running">Claude working</span>'
@@ -13721,7 +13724,9 @@ function projectRunsHtml(slug){
       ${open?`<div class="pj-run-panel">
         <div class="pj-run-meta">${chips}<span>${meta}</span>
           ${run.status==='done'?`<button class="btn-out pj-copy" type="button" data-pj-run-copy="${esc(key)}">Copy</button>`:''}</div>
-        ${run.status==='queued'
+        ${run.status==='collecting'
+          ?`<div class="pj-run-note"><span class="spinner"></span> The board is collecting the data this run needs. Claude gets it as soon as it lands.</div>`
+          :run.status==='queued'
           ?`<div class="pj-run-note">No Claude has taken this run yet.</div>${projectHandoffHtml(p,run.handoff)}`
           :run.status==='running'
           ?`<div class="pj-run-note"><span class="spinner"></span> ${run.claimedBy?esc(String(run.claimedBy).replace(/^mcp:/,''))+"'s ":''}Claude is working on this one. It updates here by itself.</div>`
@@ -13760,7 +13765,7 @@ async function loadProjectRuns(slug){
 let projectRunsRefreshTimer={};
 function scheduleProjectRunsRefresh(slug){
   clearTimeout(projectRunsRefreshTimer[slug]);
-  const running=(projectRuns[slug]?.rows||[]).some(r=>r.status==='running'||r.status==='queued');
+  const running=(projectRuns[slug]?.rows||[]).some(r=>r.status==='running'||r.status==='queued'||r.status==='collecting');
   if(!running||projectThread[slug]?.running)return;
   projectRunsRefreshTimer[slug]=setTimeout(()=>{
     if(projectOpen===slug&&!projectThread[slug]?.running)loadProjectRuns(slug);
@@ -13940,7 +13945,7 @@ async function startAndAwaitProjectRun(slug,p,url,body,t){
     const data=await res.json().catch(()=>({}));
     if(!res.ok||data.ok===false||!data.runId){t.error=data?.message||data?.error||`HTTP ${res.status}`;return null;}
     runId=data.runId;
-    t.runId=runId;t.status='queued';t.handoff=data.handoff||'';t.claimedBy='';
+    t.runId=runId;t.status=data.status||'queued';t.handoff=data.handoff||'';t.claimedBy='';
     renderProjectsView();
   }catch(error){
     t.error=String(error?.message||error);
@@ -14475,7 +14480,7 @@ function renderKpiAllTime(all){
   const n=v=>Number(v||0).toLocaleString('en-GB');
   el.innerHTML=`
     <div class="kpi-alltime-main">
-      <span class="kpi-alltime-label">Since the board went live on ${esc(since)}</span>
+      <span class="kpi-alltime-label">Since the board went live on ${esc(since)}${all.scope?` · ${esc(all.scope)}`:''}</span>
       <span class="kpi-alltime-value">${n(all.created)}<small>tickets</small></span>
     </div>
     <div class="kpi-alltime-stats">
@@ -14608,6 +14613,9 @@ function fmtHours(h){
   if(n<100)return`${Math.round(n*10)/10}h`;
   return`${Math.round(n/SLA_HOURS_PER_WORKDAY*10)/10} working days`;
 }
+// The same, short enough for a card's big number: "29.4d" rather than a
+// three-line "29.4 working days".
+function fmtHoursShort(h){return fmtHours(h).replace(' working days','d');}
 // Every card carries the tickets behind its number so clicking one opens
 // them, rather than leaving the agent to go hunt through a filter to find
 // what's driving it. `category` cards fetch on demand from the server
@@ -14770,7 +14778,7 @@ async function renderKpiView(){
     const sla=data.sla||{};
     const flow=data.throughput||{};
     const dupNote=totals.duplicates?` · ${totals.duplicates} duplicate${totals.duplicates>1?'s':''} excluded`:'';
-    document.getElementById('kpi-range-label').textContent=`Live DB tickets: ${totals.tickets||0} current (range: ${totals.rangeTickets||0})${dupNote} · ${data.range?.label||'Range'} · ${start} to ${end} · ${teamLabel} · ${agentLabel}`;
+    document.getElementById('kpi-range-label').textContent=`${totals.tickets||0} tickets in scope, ${totals.rangeTickets||0} active in this range${dupNote} · ${data.range?.label||'Range'} · ${start} to ${end} · ${teamLabel} · ${agentLabel}`;
     kpiLastLoadedAt=Date.now();
     updateKpiFreshnessLabel();
     const compliance=sla.compliancePct;
@@ -14786,7 +14794,8 @@ async function renderKpiView(){
       kpiCard('Due for test',s.dft||0,{category:'dft',hint:'Open now'}),
       kpiCard('Waiting On Contact',s.wct||0,{category:'wct',hint:'Open now'}),
       kpiCard('Resolved',s.res||0,{category:'res',hint:'In this range'}),
-      kpiCard('Tickets with CS',totals.ticketsWithCs||0,{category:'ticketsWithCs'}),
+      kpiCard('Tickets with CS',totals.ticketsWithCs||0,{category:'ticketsWithCs',
+        hint:`of ${totals.rangeTickets||0} in this range`}),
       kpiCard('Jira Linked',totals.jiraLinked||0,{category:'jiraLinked'})
     ].join('');
     document.getElementById('kpi-sla-cards').innerHTML=[
@@ -14794,13 +14803,14 @@ async function renderKpiView(){
       kpiCard('At risk',sla.atRisk||0,{tone:(sla.atRisk||0)>0?'warn':'',hint:'Under 25% of target left',category:'atRisk'}),
       kpiCard('SLA met',compliance===null||compliance===undefined?'-':`${compliance}%`,{
         tone:compliance===null||compliance===undefined?'':(compliance>=90?'good':compliance>=75?'warn':'bad'),
-        hint:`${sla.met||0} of ${(sla.met||0)+(sla.breached||0)} resolved in range`+(sla.noHistory?` - ${sla.noHistory} not measured (from before shift history was kept)`:''),category:'slaMeasured'}),
-      kpiCard('Avg resolve',fmtHours(sla.avgResolveShiftHours),{hint:`Median ${fmtHours(sla.medianResolveShiftHours)} - shift time`,category:'slaMeasured'}),
-      kpiCard('Oldest open',fmtHours(sla.oldestOpenHours),{hint:'Working hours since arrival (no nights or weekends)',category:'oldestOpen'}),
+        // on time + late + no SLA = the Resolved card, ticket for ticket.
+        hint:`${sla.met||0} on time · ${sla.breached||0} late`+(sla.unmeasured?` · ${sla.unmeasured} no SLA`:''),category:'slaMeasured'}),
+      kpiCard('Avg resolve',(sla.met||0)+(sla.breached||0)?fmtHoursShort(sla.avgResolveShiftHours):'-',{hint:`Median ${fmtHours(sla.medianResolveShiftHours)}`,category:'slaMeasured'}),
+      kpiCard('Oldest open',fmtHoursShort(sla.oldestOpenHours),{hint:'Working time',category:'oldestOpen'}),
       kpiCard('Created',flow.created||0,{hint:'In this range',category:'created'}),
-      kpiCard('Resolved',flow.resolved||0,{hint:`Net ${(flow.net||0)>0?'+':''}${flow.net||0} vs created`,tone:(flow.net||0)>0?'warn':'',category:'resolved'}),
+      kpiCard('Resolved',flow.resolved||0,{hint:(flow.net||0)>0?`Backlog +${flow.net}`:(flow.net||0)<0?`Backlog ${flow.net}`:'Backlog unchanged',tone:(flow.net||0)>0?'warn':'',category:'resolved'}),
       kpiCard('Reopened',flow.reopened||0,{tone:(flow.reopened||0)>0?'warn':'',hint:'Left Resolved again',category:'reopened'}),
-      kpiCard('Duplicates',totals.duplicates||0,{hint:`${totals.duplicatesResolvedInRange||0} resolved in range, not counted`,category:'duplicates'})
+      kpiCard('Duplicates',totals.duplicates||0,{hint:'Not counted',category:'duplicates'})
     ].join('');
     document.getElementById('kpi-overdue-rows').innerHTML=(data.overdueRows||[]).length
       ?data.overdueRows.map(r=>`<tr style="border-bottom:1px solid var(--legacy-f0f0f0);">
@@ -15535,18 +15545,34 @@ function resolveDefaultCSForTicket(id,emailObj){
   if(fromSibling)return fromSibling;
   return null;
 }
+/* Resolving a CS owner while a card is drawn used to change it in this tab
+   only: the board showed the owner and the database - which the KPI dashboard
+   reads - never got it, so "Tickets with CS" ran behind the board. A change
+   made here is now saved, a few seconds later and once for a whole render. */
+let csOwnerSyncTimer=null;
+function queueCSOwnerSync(){
+  if(csOwnerSyncTimer)return;
+  csOwnerSyncTimer=setTimeout(()=>{csOwnerSyncTimer=null;saveState('cs_owner_resolved');},5000);
+}
 function ensureTicketCSOwnerResolved(id,emailObj){
   if(manualCSOverride[id])return ticketCSOwner[id]||null;
+  // A closed ticket's owner is history, not something a render may rewrite.
+  if(ticketCSOwner[id]&&isArchivedTicket(id))return ticketCSOwner[id];
   const resolved=resolveDefaultCSForTicket(id,emailObj);
   if(resolved){
-    ticketCSOwner[id]=resolved;
+    if(ticketCSOwner[id]!==resolved){ticketCSOwner[id]=resolved;queueCSOwnerSync();}
     return resolved;
   }
   return ticketCSOwner[id]||null;
 }
 function ensureSupportAssignmentForTicket(id,emailObj,opts={}){if(!id||ticketCategory[id]==='Spam'||isArchivedTicket(id))return false;const currentAssignee=ticketAssignee[id]||'';const keepExistingSupport=!!opts.keepExistingSupport&&SUPPORT_AGENTS.includes(currentAssignee);const supportAgent=keepExistingSupport?currentAssignee:defaultSupportAgentForTicket(emailObj,id);const csOwner=resolveDefaultCSForTicket(id,emailObj);let changed=false;if(csOwner&&ticketCSOwner[id]!==csOwner&&!manualCSOverride[id]){ticketCSOwner[id]=csOwner;changed=true;}if(ticketAssignee[id]!==supportAgent||ticketAssignmentMode[id]!=='support'){setTicketAssignee(id,supportAgent);ticketAssignmentMode[id]='support';changed=true;}if(manualSupportOverride[id]===undefined){manualSupportOverride[id]=false;changed=true;}return changed;}
 function shouldRefreshHubspotCacheEntry(email){const ce=String(email||'').toLowerCase();if(!ce)return false;if(!(ce in hsCache))return true;const cached=hsCache[ce];const related=allTickets.filter(t=>ticketCategory[t.id]!=='Spam'&&!isArchivedTicket(t.id)&&(ticketClientEmail[t.id]||getClientEmail(t.email))===ce);if(!related.length)return false;if(cached===null)return related.some(t=>isSupportAssignedTicket(t.id)&&!ticketCSOwner[t.id]);if(!cached||!cached.companyName||!cached.companyId||!cached.coOwner)return true;return related.some(t=>isSupportAssignedTicket(t.id)&&!ticketCSOwner[t.id]);}
-function applyCompanyCSAssignments(){let changed=0;let reassigned=0;allTickets.forEach(t=>{if(ticketCategory[t.id]==='Spam'||isArchivedTicket(t.id))return;const id=t.id;const ce=ticketClientEmail[id]||getClientEmail(t.email);if(!ce)return;const cs=resolveDefaultCSForTicket(id,t.email);if(cs&&ticketCSOwner[id]!==cs&&!manualCSOverride[id]){ticketCSOwner[id]=cs;changed++;}if(manualSupportOverride[id])return;if(!SUPPORT_AGENTS.includes(ticketAssignee[id])||ticketAssignmentMode[id]!=='support'){if(ensureSupportAssignmentForTicket(id,t.email,{keepExistingSupport:true})){changed++;reassigned++;}}});
+function applyCompanyCSAssignments(){let changed=0;let reassigned=0;allTickets.forEach(t=>{if(ticketCategory[t.id]==='Spam')return;
+  // Closed tickets keep the CS owner they were closed under. One closed with
+  // none is only given one, so the KPIs since launch count it under its CS
+  // instead of leaving it out of "Tickets with CS" for good.
+  if(isArchivedTicket(t.id)){const id=t.id;if(!ticketCSOwner[id]&&!manualCSOverride[id]){const cs=resolveDefaultCSForTicket(id,t.email);if(cs){ticketCSOwner[id]=cs;changed++;}}return;}
+  const id=t.id;const ce=ticketClientEmail[id]||getClientEmail(t.email);if(!ce)return;const cs=resolveDefaultCSForTicket(id,t.email);if(cs&&ticketCSOwner[id]!==cs&&!manualCSOverride[id]){ticketCSOwner[id]=cs;changed++;}if(manualSupportOverride[id])return;if(!SUPPORT_AGENTS.includes(ticketAssignee[id])||ticketAssignmentMode[id]!=='support'){if(ensureSupportAssignmentForTicket(id,t.email,{keepExistingSupport:true})){changed++;reassigned++;}}});
   // Retiring an agent from SUPPORT_AGENTS makes every ticket they hold fail the
   // roster test above, so all of them are reassigned - by every open session,
   // on every load. That is how an entire queue can silently land on one agent
