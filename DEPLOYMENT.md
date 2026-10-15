@@ -711,6 +711,14 @@ A hold (Waiting on Contact, a Jira link, an open Velma bug) carries the clock
 over in working time: when it ends, the ticket resumes with exactly the working
 hours it had when the hold began (`businessPointBefore`).
 
+**Shift history survives deploys.** `data/` is not a persistent volume, so
+`data/shifts.json` is also saved to Postgres (`OAuthToken` row `shift-store`) a
+few seconds after each change and on SIGTERM, and merged back at boot. Before
+this, every deploy wiped all logged-in time, and every resolved ticket's SLA
+read "met in 0h". `since` in that row is when the history became complete;
+resolved tickets whose clock started earlier are reported as not measured
+(`no_history`) instead of met.
+
 An agent marked **Off** puts every open ticket they hold on hold. Each leave is
 also kept as a period in `data/shifts.json` (`agents.<CODE>.leaves`), because
 the leave row itself is deleted when it ends, and those periods are cut out of
