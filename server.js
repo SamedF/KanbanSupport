@@ -2861,7 +2861,12 @@ async function hydrateStateFromDatabase(baseState = {}) {
     if (ticket.hubspotTicketId) state.ticketHubspotId[externalId] = ticket.hubspotTicketId;
     if (ticket.displayNumber) state.ticketNumbers[externalId] = ticket.displayNumber;
     if (Array.isArray(ticket.comments) && ticket.comments.length) {
+      // The row has no author or edit marker; the board's own copy of the note,
+      // matched on its timestamp, still does.
+      const boardCopies = new Map((Array.isArray(state.ticketComments[externalId]) ? state.ticketComments[externalId] : [])
+        .map(c => [safeDateForDb(c?.ts || c?.createdAt)?.getTime(), c]));
       state.ticketComments[externalId] = ticket.comments.map(comment => ({
+        ...(boardCopies.get(comment.createdAt?.getTime?.()) || {}),
         text: comment.comment,
         comment: comment.comment,
         ts: comment.createdAt?.toISOString?.() || new Date().toISOString(),
@@ -3947,9 +3952,24 @@ async function upsertBoardTicketsToDatabase(state, req) {  if (!state || typeof 
       : (existingTicket?.duplicateOfExternalId || null);
     const comments = Array.isArray(ticketComments[externalId]) ? ticketComments[externalId] : [];
     const existingCommentTexts = new Set((existingTicket?.comments || []).map(c => c.comment));
-    const newComments = comments
-      .map(c => ({ text: String(c?.text || c?.comment || '').trim(), ts: c?.ts || c?.createdAt, tags: Array.isArray(c?.tags) ? c.tags.map(t => String(t)).filter(Boolean) : [] }))
-      .filter(c => c.text && !existingCommentTexts.has(c.text));
+    // A note keeps its original timestamp when it is edited, and the row was
+    // written with that timestamp, so this is how an edited note finds its row
+    // - matching on text would file the edit as a second note.
+    const existingCommentsByTs = new Map((existingTicket?.comments || []).map(c => [new Date(c.createdAt).getTime(), c]));
+    const boardComments = comments
+      .map(c => ({ text: String(c?.text || c?.comment || '').trim(), ts: c?.ts || c?.createdAt, edited: !!c?.editedAt, tags: Array.isArray(c?.tags) ? c.tags.map(t => String(t)).filter(Boolean) : [] }))
+      .filter(c => c.text);
+    const editedComments = [];
+    const newComments = [];
+    for (const c of boardComments) {
+      const at = safeDateForDb(c.ts);
+      const row = c.edited && at ? existingCommentsByTs.get(at.getTime()) : null;
+      if (row) {
+        if (row.comment !== c.text) editedComments.push({ id: row.id, text: c.text });
+      } else if (!existingCommentTexts.has(c.text)) {
+        newComments.push(c);
+      }
+    }
 
     const previousStatus = existingTicket?.status || null;
     const wasResolved = previousStatus === 'Resolved';
@@ -3985,7 +4005,7 @@ async function upsertBoardTicketsToDatabase(state, req) {  if (!state || typeof 
       && existingTicket.body === body
       && Number(existingTicket.slaResetAt ? new Date(existingTicket.slaResetAt).getTime() : 0) === Number(slaResetAt ? slaResetAt.getTime() : 0);
 
-    if (fieldsUnchanged && !newComments.length) continue;
+    if (fieldsUnchanged && !newComments.length && !editedComments.length) continue;
 
     // If only new comments arrived and every other field already matches, we
     // already have the ticket id from the batch fetch - no need to upsert.
@@ -4097,6 +4117,9 @@ async function upsertBoardTicketsToDatabase(state, req) {  if (!state || typeof 
           createdAt: safeDateForDb(comment.ts) || new Date()
         }
       });
+    }
+    for (const comment of editedComments) {
+      await prisma.ticketComment.update({ where: { id: comment.id }, data: { comment: comment.text } });
     }
 
     count += 1;

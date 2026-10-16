@@ -2383,6 +2383,9 @@ button.sla-hold-badge { cursor: pointer; }
   line-height: 1.45;
   white-space: pre-wrap;
   word-break: break-word;
+  /* The card is user-select:none for dragging; its notes must stay copyable. */
+  user-select: text;
+  cursor: text;
 }
 
 .card-inline-empty {
@@ -3211,6 +3214,68 @@ textarea:focus {
   line-height: 1.5;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+.note-link {
+  color: var(--indigo-600, #4f46e5);
+  text-decoration: underline;
+  word-break: break-all;
+  cursor: pointer;
+}
+
+.note-link-copy {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  vertical-align: middle;
+  margin: 0 2px 0 3px;
+  padding: 2px 3px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--white);
+  color: var(--slate-500);
+  cursor: pointer;
+  line-height: 0;
+}
+
+.note-link-copy:hover {
+  color: var(--text);
+  border-color: var(--slate-400);
+}
+
+.comment-edited {
+  font-size: 11.5px;
+  color: var(--muted-light);
+  font-style: italic;
+}
+
+.comment-edit-btn {
+  margin-left: auto;
+  border: 0;
+  background: none;
+  padding: 0 2px;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--slate-500);
+  cursor: pointer;
+}
+
+.comment-edit-btn:hover {
+  color: var(--text);
+  text-decoration: underline;
+}
+
+.comment-edit-input {
+  width: 100%;
+  min-height: 72px;
+}
+
+.comment-edit-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-top: 6px;
 }
 
 .no-comments {
@@ -16943,8 +17008,8 @@ function makeCard(ticket,isNew=false){
   const inlineDraft=String(inlineCommentDrafts[id]||'');
   const inlineTags=inlineSelectedTags(id);
   const inlineTagsHtml=[...SUPPORT_AGENTS,...CS_AGENTS].filter((v,i,a)=>a.indexOf(v)===i).map(tag=>`<button class="card-inline-tag${inlineTags.includes(tag)?' selected':''}" data-inline-tag="${esc(tag)}" style="${inlineTags.includes(tag)?`background:${agentColor(tag)};`:''}">@${esc(tag)}</button>`).join('');
-  const recentComments=comments.slice(-2).reverse();
-  const recentCommentsHtml=recentComments.length?recentComments.map(c=>{const tagHtml=(c.tags||[]).map(t=>`<span class="ctag" style="background:${t===CLIENT_TAG?'var(--slate-600)':agentColor(t)}">@${esc(t)}</span>`).join('');return`<div class="card-inline-comment"><div class="card-inline-head"><span class="card-inline-author">${esc(c.author||'SYSTEM')}</span><span class="card-inline-time">${fmtTime(c.ts)}</span>${tagHtml}</div><div class="card-inline-text">${esc(c.text||'')}</div></div>`;}).join(''):'<div class="card-inline-empty">No internal comments yet.</div>';
+  const recentComments=comments.map((c,ci)=>({c,ci})).slice(-2).reverse();
+  const recentCommentsHtml=recentComments.length?recentComments.map(({c,ci})=>{const tagHtml=(c.tags||[]).map(t=>`<span class="ctag" style="background:${t===CLIENT_TAG?'var(--slate-600)':agentColor(t)}">@${esc(t)}</span>`).join('');return`<div class="card-inline-comment"><div class="card-inline-head"><span class="card-inline-author">${esc(c.author||'SYSTEM')}</span><span class="card-inline-time">${fmtTime(c.ts)}</span>${c.editedAt?'<span class="comment-edited">(edited)</span>':''}${tagHtml}${canEditNote(c)?`<button type="button" class="comment-edit-btn" data-inline-edit="${ci}">Edit</button>`:''}</div><div class="card-inline-text">${noteTextHtml(c.text||'')}</div></div>`;}).join(''):'<div class="card-inline-empty">No internal comments yet.</div>';
   const inlineSectionHtml=inlineOpen?`<div class="card-inline-thread"><div class="card-inline-comments">${recentCommentsHtml}</div><div class="card-inline-compose"><textarea class="card-inline-textarea" data-inline-text="${id}" placeholder="Add an internal note or tag a teammate...">${esc(inlineDraft)}</textarea><div class="card-inline-tags">${inlineTagsHtml}</div><div class="card-inline-actions"><button class="btn-out" data-inline-modal="${id}" style="font-size:12px;padding:3px 8px;">Full thread</button><button class="btn-primary" data-inline-post="${id}" style="font-size:12px;padding:4px 10px;">Post comment</button></div></div></div>`:'';
   const subtype=ticketSubtype[id]||'';const catOpts=CATEGORIES.map(c=>`<option value="${esc(c)}"${c===cat?' selected':''}>${esc(c)}</option>`).join('');const subOpts=TICKET_SUBTYPES.filter(x=>x.type===cat).map(x=>`<option value="${x.id}"${x.id===subtype?' selected':''}>${x.id} – ${esc(x.label)}</option>`).join('');
   // Under "Other" the sub-category is typed rather than picked - see
@@ -17143,7 +17208,8 @@ function makeCard(ticket,isNew=false){
   // its own card mid-gesture leaves that armed drag with nothing to finish
   // against, and the board stops accepting clicks until a reload. Disarm the
   // drag for any gesture that starts on a control, and re-arm it after.
-  const armDrag=ev=>{div.draggable=!ev.target?.closest?.('button,select,a,textarea,input,label,.agent-assign-menu');};
+  // Note text is left out too, so it can be selected and copied.
+  const armDrag=ev=>{div.draggable=!ev.target?.closest?.('button,select,a,textarea,input,label,.agent-assign-menu,.card-inline-text');};
   const rearmDrag=()=>{div.draggable=true;};
   div.addEventListener('pointerdown',armDrag);
   div.addEventListener('mousedown',armDrag);
@@ -17299,6 +17365,10 @@ function makeCard(ticket,isNew=false){
   div.querySelector('[data-inline-toggle]')?.addEventListener('click',ev=>{ev.stopPropagation();inlineCommentOpen[id]=!inlineOpen;if(inlineCommentOpen[id]){markAlertFeedReadForTicket(id,currentUser());clearNewReplyGlow(id);}renderBoard();});
   div.querySelector('[data-inline-bell]')?.addEventListener('click',ev=>{ev.stopPropagation();inlineCommentOpen[id]=true;markAlertFeedReadForTicket(id,currentUser());clearNewReplyGlow(id);renderBoard();});
   div.querySelector('[data-inline-modal]')?.addEventListener('click',ev=>{ev.stopPropagation();clearNewReplyGlow(id);openComModal(ticket);});
+  div.querySelectorAll('[data-inline-edit]').forEach(btn=>btn.addEventListener('click',ev=>{ev.stopPropagation();clearNewReplyGlow(id);openComModal(ticket,{editIndex:Number(btn.dataset.inlineEdit)});}));
+  // Links in notes open in a new tab; the copy button next to each is handled
+  // by the page-wide [data-copy-text] listener. Neither should reach the card.
+  div.querySelector('.card-inline-comments')?.addEventListener('click',ev=>{if(ev.target.closest('.note-link'))ev.stopPropagation();});
   div.querySelector('[data-res-confirm]')?.addEventListener('click',ev=>{ev.stopPropagation();confirmTicketResolved(id);});
   div.querySelector('[data-res-sendback]')?.addEventListener('click',ev=>{ev.stopPropagation();sendResolvedTicketBack(id);});
   div.querySelector('[data-inline-text]')?.addEventListener('input',ev=>{inlineCommentDrafts[id]=ev.target.value;});
@@ -21092,8 +21162,91 @@ if(comTrState.undo||comTrState.lang){comTrState.undo=null;comTrState.lang=null;t
 // rather than patched into the DOM, so they survive this rewrite. A note posted
 // since the translation has no entry and shows as written.
 const trNotes=trTicketIsOn(id)?(trNotesCache.get(id)||{}):null;
-const cs=ticketComments[id]||[];const el=document.getElementById('com-thread');if(!cs.length){el.innerHTML='<div class="no-comments"> No comments yet.</div>';return;}el.innerHTML=cs.map((c,ci)=>{const tagHtml=(c.tags||[]).map(t=>{const bg=t===CLIENT_TAG?'var(--slate-600)':agentColor(t);return`<span class="ctag" style="background:${bg}">@${t}</span>`;}).join('');const bg=ALL_AGENTS.includes(c.author)?agentColor(c.author):'var(--slate-600)';const shown=trNotes&&typeof trNotes[ci]==='string'?trNotes[ci]:c.text;const trMark=trNotes&&typeof trNotes[ci]==='string'&&trNotes[ci]!==c.text?' tr-seg':'';return`<div class="comment-item"><div class="comment-avatar" style="background:${bg}">${esc(c.author)}</div><div class="comment-bubble"><div class="comment-header"><span class="comment-author">${esc(c.author)}</span><span class="comment-time">${fmtTime(c.ts)}</span>${tagHtml?`<div class="comment-tags">${tagHtml}</div>`:''}</div><div class="comment-text${trMark}">${esc(shown)}</div></div></div>`;}).join('');el.scrollTop=el.scrollHeight;}
-function openComModal(ticket){const{email,id}=ticket;comTicketId=id;trResetNotesState(id);trRenderNotesBar();trLoadCachedFor(id);const clientEmail=ticketClientEmail[id];const hs=clientEmail?hsCache[clientEmail]:null;const coStr=hs?.companyName?(hs.inferredVia?'   '+hs.companyName+' ~':'   '+hs.companyName):'';const who=isQuintaSender(email.sender)&&clientEmail?`Client: ${clientEmail}`:email.sender||'';const csOwner=ticketCSOwner[id]||null;const assignee=ticketAssignee[id]||'';const agInfo=csOwner?`${assignee} · CS:${csOwner}`:assignee;document.getElementById('com-title').textContent=email.subject||'(no subject)';document.getElementById('com-subtitle').textContent=`${who}${coStr} · ${agInfo} · ${fmtDate(email.receivedDateTime)}`;document.getElementById('com-input').value='';selectedTags.clear();document.querySelectorAll('.tag-chip').forEach(c=>c.classList.remove('selected'));renderThread(id);document.getElementById('com-modal').classList.add('open');}
+const cs=ticketComments[id]||[];const el=document.getElementById('com-thread');if(!cs.length){el.innerHTML='<div class="no-comments"> No comments yet.</div>';return;}
+// A live-sync redraw while a note is being edited must not throw the draft away.
+const editing=comEditing&&comEditing.ticketId===id?comEditing:null;
+const keepScroll=editing?el.scrollTop:null;
+el.innerHTML=cs.map((c,ci)=>{const tagHtml=(c.tags||[]).map(t=>{const bg=t===CLIENT_TAG?'var(--slate-600)':agentColor(t);return`<span class="ctag" style="background:${bg}">@${t}</span>`;}).join('');const bg=ALL_AGENTS.includes(c.author)?agentColor(c.author):'var(--slate-600)';const shown=trNotes&&typeof trNotes[ci]==='string'?trNotes[ci]:c.text;const trMark=trNotes&&typeof trNotes[ci]==='string'&&trNotes[ci]!==c.text?' tr-seg':'';
+  const isEditing=editing&&editing.ci===ci;
+  const editedHtml=c.editedAt?`<span class="comment-edited" title="Edited ${esc(fmtTime(c.editedAt))}${c.editedBy?' by '+esc(c.editedBy):''}">(edited)</span>`:'';
+  const editBtn=!isEditing&&canEditNote(c)?`<button type="button" class="comment-edit-btn" data-com-edit="${ci}">Edit</button>`:'';
+  const body=isEditing
+    ?`<div class="comment-edit"><textarea class="compose-textarea comment-edit-input" data-com-edit-input="${ci}">${esc(editing.draft)}</textarea><div class="comment-edit-actions"><button type="button" class="btn-out" data-com-edit-cancel="${ci}">Cancel</button><button type="button" class="btn-primary" data-com-edit-save="${ci}">Save</button></div></div>`
+    :`<div class="comment-text${trMark}">${noteTextHtml(shown)}</div>`;
+  return`<div class="comment-item"><div class="comment-avatar" style="background:${bg}">${esc(c.author)}</div><div class="comment-bubble"><div class="comment-header"><span class="comment-author">${esc(c.author)}</span><span class="comment-time">${fmtTime(c.ts)}</span>${editedHtml}${editBtn}${tagHtml?`<div class="comment-tags">${tagHtml}</div>`:''}</div>${body}</div></div>`;}).join('');
+if(editing){el.scrollTop=keepScroll;const input=el.querySelector('[data-com-edit-input]');if(input&&editing.focus){editing.focus=false;input.focus();input.setSelectionRange(input.value.length,input.value.length);input.scrollIntoView({block:'nearest'});}}
+else el.scrollTop=el.scrollHeight;}
+/* Notes are plain text. Links in them are made clickable, with a copy button
+   beside each, so a URL someone pasted can be opened or passed on without
+   having to select it by hand. Everything else is escaped as before. */
+const NOTE_URL_RE=/\bhttps?:\/\/[^\s<>"']+|\bwww\.[^\s<>"']+/gi;
+const NOTE_COPY_SVG='<svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><rect x="5" y="5" width="9" height="9" rx="2" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M11 3.5V3a1.5 1.5 0 0 0-1.5-1.5h-6A1.5 1.5 0 0 0 2 3v6.5A1.5 1.5 0 0 0 3.5 11H4" fill="none" stroke="currentColor" stroke-width="1.6"/></svg>';
+function noteTextHtml(text){
+  const s=String(text||'');
+  let out='',last=0;
+  s.replace(NOTE_URL_RE,(match,offset)=>{
+    let url=match,trail='';
+    // Sentence punctuation after a link is not part of it; a closing bracket
+    // is, when the link opened one (Wikipedia-style URLs).
+    while(/[.,;:!?)\]}]$/.test(url)){
+      const ch=url.slice(-1);
+      if(ch===')'&&(url.match(/\(/g)||[]).length>=(url.match(/\)/g)||[]).length)break;
+      trail=ch+trail;url=url.slice(0,-1);
+    }
+    const href=/^www\./i.test(url)?'https://'+url:url;
+    out+=esc(s.slice(last,offset))
+      +`<a class="note-link" href="${esc(href)}" target="_blank" rel="noopener noreferrer">${esc(url)}</a>`
+      +`<button type="button" class="note-link-copy" data-copy-text="${esc(href)}" title="Copy link" aria-label="Copy link">${NOTE_COPY_SVG}</button>`
+      +esc(trail);
+    last=offset+match.length;
+    return match;
+  });
+  return out+esc(s.slice(last));
+}
+// The author can correct their own note; admins can correct anyone's.
+function canEditNote(c){return !!c&&(currentUserIsAdmin()||(!!c.author&&agentIdentityCode(c.author)===agentIdentityCode(currentUser())));}
+// {ticketId, ci, draft, focus} while a note in the thread modal is being edited.
+let comEditing=null;
+function startNoteEdit(ticketId,ci){
+  const c=(ticketComments[ticketId]||[])[ci];
+  if(!canEditNote(c))return;
+  comEditing={ticketId,ci,draft:String(c.text||''),focus:true};
+  renderThread(ticketId);
+}
+function saveNoteEdit(){
+  if(!comEditing)return;
+  const{ticketId,ci,draft}=comEditing;
+  const c=(ticketComments[ticketId]||[])[ci];
+  if(!canEditNote(c)){comEditing=null;renderThread(ticketId);return;}
+  const text=String(draft||'').trim();
+  if(!text){showToast('A note cannot be empty','warn');return;}
+  comEditing=null;
+  if(text!==String(c.text||'').trim()){
+    c.text=text;
+    if('comment' in c)c.comment=text;
+    c.editedAt=Date.now();
+    c.editedBy=currentUser();
+    // The cached translation was of the old wording.
+    const tr=trNotesCache.get(ticketId);if(tr)delete tr[ci];
+    saveState('ticket_comment_edited');
+    renderBoard();
+    showToast('Note updated','ok');
+  }
+  renderThread(ticketId);
+}
+document.getElementById('com-thread').addEventListener('click',ev=>{
+  const edit=ev.target.closest('[data-com-edit]');
+  if(edit&&comTicketId){startNoteEdit(comTicketId,Number(edit.dataset.comEdit));return;}
+  if(ev.target.closest('[data-com-edit-cancel]')){const id=comEditing?.ticketId;comEditing=null;if(id)renderThread(id);return;}
+  if(ev.target.closest('[data-com-edit-save]'))saveNoteEdit();
+});
+document.getElementById('com-thread').addEventListener('input',ev=>{if(ev.target.matches('[data-com-edit-input]')&&comEditing)comEditing.draft=ev.target.value;});
+document.getElementById('com-thread').addEventListener('keydown',ev=>{
+  if(!ev.target.matches('[data-com-edit-input]'))return;
+  if(ev.key==='Enter'&&(ev.ctrlKey||ev.metaKey)){ev.preventDefault();saveNoteEdit();}
+  else if(ev.key==='Escape'){ev.preventDefault();ev.stopPropagation();const id=comEditing?.ticketId;comEditing=null;if(id)renderThread(id);}
+});
+function openComModal(ticket,opts){const{email,id}=ticket;comTicketId=id;comEditing=null;trResetNotesState(id);trRenderNotesBar();trLoadCachedFor(id);const clientEmail=ticketClientEmail[id];const hs=clientEmail?hsCache[clientEmail]:null;const coStr=hs?.companyName?(hs.inferredVia?'   '+hs.companyName+' ~':'   '+hs.companyName):'';const who=isQuintaSender(email.sender)&&clientEmail?`Client: ${clientEmail}`:email.sender||'';const csOwner=ticketCSOwner[id]||null;const assignee=ticketAssignee[id]||'';const agInfo=csOwner?`${assignee} · CS:${csOwner}`:assignee;document.getElementById('com-title').textContent=email.subject||'(no subject)';document.getElementById('com-subtitle').textContent=`${who}${coStr} · ${agInfo} · ${fmtDate(email.receivedDateTime)}`;document.getElementById('com-input').value='';selectedTags.clear();document.querySelectorAll('.tag-chip').forEach(c=>c.classList.remove('selected'));renderThread(id);document.getElementById('com-modal').classList.add('open');if(opts&&Number.isInteger(opts.editIndex))startNoteEdit(id,opts.editIndex);}
 function postTicketComment(ticketId,text,tags){if(!text||!ticketId)return false;if(!ticketComments[ticketId])ticketComments[ticketId]=[];const author=currentUser();const normalizedTags=[...new Set((Array.isArray(tags)?tags:[]).map(t=>t===CLIENT_TAG?CLIENT_TAG:agentIdentityCode(t)).filter(Boolean))];ticketComments[ticketId].push({author,text,tags:normalizedTags,ts:Date.now()});saveState('ticket_comment_added');renderBoard();if(comTicketId===ticketId)renderThread(ticketId);const at=normalizedTags.filter(t=>t!==CLIENT_TAG);if(at.length)showToast(`Bell alert sent to: ${at.join(', ')}`,'ok');else showToast('Comment posted','ok');return true;}
 function addInternalComment(ticketId,text,tags){if(!postTicketComment(ticketId,text,tags))return;if(comTicketId===ticketId)renderThread(ticketId);}
 document.getElementById('com-post').addEventListener('click',()=>{const text=document.getElementById('com-input').value.trim();if(!text||!comTicketId)return;const tags=[...selectedTags];if(!postTicketComment(comTicketId,text,tags))return;document.getElementById('com-input').value='';selectedTags.clear();document.querySelectorAll('.tag-chip').forEach(c=>c.classList.remove('selected'));if(comTicketId)renderThread(comTicketId);});
