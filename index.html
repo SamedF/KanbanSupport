@@ -15519,9 +15519,10 @@ function resolveCSAgentFromCoOwner(raw){
       (first.slice(0,3)||'')
     ].map(acceptCode).filter(Boolean);
     for(const cand of candidates){if(isKnownAgent(cand))return cand;}
-    return candidates[0]||null;
   }
-  return acceptCode(rawStr.slice(0,3));
+  // No known agent in the co-owner: no owner. Guessing a trigram from the
+  // name's letters used to make up CS agents who are not on the roster.
+  return null;
 }
 function displayCSOwner(raw){
   const rawStr=String(raw||'').trim();
@@ -15646,6 +15647,9 @@ function resolveProfileCSOwner(companyId,companyName){
   }
   return null;
 }
+/* Only owners a person chose count. An owner that was itself inferred from
+   another ticket would otherwise pass from ticket to ticket with nothing in
+   any email or HubSpot record behind it. */
 function resolveSiblingCSOwner(ticketId,clientEmail,companyId,companyName){
   const scores={};
   const bump=(code,weight)=>{
@@ -15654,6 +15658,7 @@ function resolveSiblingCSOwner(ticketId,clientEmail,companyId,companyName){
   };
   allTickets.forEach(ticket=>{
     if(!ticket?.id||ticket.id===ticketId)return;
+    if(manualCSOverride[ticket.id]!==true)return;
     const candidate=normalizeAgentCode(ticketCSOwner[ticket.id]);
     if(!CS_AGENTS.includes(candidate))return;
     const otherClient=ticketClientEmail[ticket.id]||getClientEmail(ticket.email);

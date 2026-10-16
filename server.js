@@ -6649,6 +6649,22 @@ function kpiTicketMatchesAccess(t, access) {
   if (access.either) return t.csAgent === access.either || t.assignedAgent === access.either;
   return true;
 }
+/* Resolved work credited to an agent by hand, for tickets closed outside the
+   board. Each credit is counted as that many resolved tickets assigned to the
+   agent on its date, so the team, agent and range filters treat it like a
+   ticket; it has no company or Jira link, so those filters leave it out. It
+   adds to Resolved only - never to the SLA figures or the drilldowns, which
+   are about real tickets. */
+// board: the one deployment (BOARD_LABEL) a credit belongs to.
+const KPI_RESOLVED_CREDITS = [
+  { agent: 'MEZ', count: 6, at: '2026-10-16T10:00:00Z', board: 'prod' }
+];
+function kpiResolvedCreditTickets() {
+  return KPI_RESOLVED_CREDITS.filter(c => c.board === BOARD_LABEL).map(c => ({
+    assignedAgent: c.agent, csAgent: null, count: c.count,
+    createdAt: new Date(c.at), resolvedAt: new Date(c.at)
+  }));
+}
 async function loadKpiWorkingSet(req) {  const bounds = kpiDateBounds(req.query.range, req.query.tzOffset);
   const username = actorAgentCode(req);
   /* The KPI dashboard is the one view where "see all tickets" does not carry
@@ -6727,7 +6743,9 @@ async function loadKpiWorkingSet(req) {  const bounds = kpiDateBounds(req.query.
   // The one agent the figures are pinned to, if any - whose SLA reset applies
   // to the headline SLA met.
   const slaAgent = (myTeam === 'cs' || myTeam === 'support') ? username : (agent && agent !== 'ALL' ? agent : null);
-  return { bounds, myTeam, team, agent, slaAgent, company, jiraOnly, baseWhere, accessWhere, tickets, scopedTickets, workTickets, duplicatesOpen, duplicatesInRange, snapshot, spamCount };
+  const creditsAll = kpiResolvedCreditTickets().filter(c => kpiTicketMatchesBase(c, baseFilter) && kpiTicketMatchesAccess(c, access));
+  const creditsInRange = creditsAll.filter(c => inBounds(c.resolvedAt));
+  return { bounds, myTeam, team, agent, slaAgent, company, jiraOnly, baseWhere, accessWhere, tickets, scopedTickets, workTickets, duplicatesOpen, duplicatesInRange, snapshot, spamCount, creditsAll, creditsInRange };
 }
 function kpiDrilldownRow(t, detail) {
   return {
@@ -6744,7 +6762,9 @@ function kpiDrilldownRow(t, detail) {
 }
 app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
   try {
-    const { bounds, myTeam, team, agent, slaAgent, company, jiraOnly, baseWhere, accessWhere, tickets, scopedTickets, workTickets, duplicatesOpen, duplicatesInRange, snapshot, spamCount } = await loadKpiWorkingSet(req);
+    const { bounds, myTeam, team, agent, slaAgent, company, jiraOnly, baseWhere, accessWhere, tickets, scopedTickets, workTickets, duplicatesOpen, duplicatesInRange, snapshot, spamCount, creditsAll, creditsInRange } = await loadKpiWorkingSet(req);
+    const sumCredits = list => list.reduce((sum, c) => sum + c.count, 0);
+    const resolvedCredit = sumCredits(creditsInRange);
 
     const statusKeys = ['new', 'inp', 'wus', 'dft', 'wct', 'res'];
     const statusCounts = Object.fromEntries(statusKeys.map(k => [k, 0]));
@@ -6797,7 +6817,14 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
       const statusKey = normalizeDbStatusForBoard(ticket.status);
       if (statusKey !== 'res' && statusKey in statusCounts) statusCounts[statusKey]++;
     }
-    statusCounts.res = scopedTickets.filter(t => normalizeDbStatusForBoard(t.status) === 'res').length;
+    statusCounts.res = scopedTickets.filter(t => normalizeDbStatusForBoard(t.status) === 'res').length + resolvedCredit;
+    for (const credit of creditsInRange) {
+      for (const key of rowKeysForTicket(credit)) {
+        const row = ensureAgentRow(key);
+        row.total += credit.count;
+        row.res += credit.count;
+      }
+    }
 
     for (const ticket of scopedTickets) {
       const statusKey = normalizeDbStatusForBoard(ticket.status);
@@ -6967,14 +6994,15 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
     if (myTeam === 'admin') {
       const since = kpiLaunchAt || await refreshKpiLaunchAt();
       const created = workTickets.length;
-      const resolved = workTickets.filter(t => normalizeDbStatusForBoard(t.status) === 'res').length;
+      const resolvedTickets = workTickets.filter(t => normalizeDbStatusForBoard(t.status) === 'res').length;
+      const resolved = resolvedTickets + sumCredits(creditsAll);
       const spam = spamCount;
       const scope = [
         agent && agent !== 'ALL' ? agent : team === 'cs' ? 'CS only' : team === 'support' ? 'Support only' : '',
         company && company !== 'all' ? company : '',
         jiraOnly ? 'Jira-linked' : ''
       ].filter(Boolean).join(' · ');
-      allTime = { since: since ? since.toISOString() : null, scope: scope || 'whole board', created, resolved, open: created - resolved, duplicates: duplicatesOpen.length, spam };
+      allTime = { since: since ? since.toISOString() : null, scope: scope || 'whole board', created, resolved, open: created - resolvedTickets, duplicates: duplicatesOpen.length, spam };
     }
 
     return res.json({
@@ -7001,7 +7029,9 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
         // other number on this dashboard.
         duplicates: duplicatesOpen.length,
         duplicatesInRange: duplicatesInRange.length,
-        duplicatesResolvedInRange: duplicatesInRange.filter(t => normalizeDbStatusForBoard(t.status) === 'res').length
+        duplicatesResolvedInRange: duplicatesInRange.filter(t => normalizeDbStatusForBoard(t.status) === 'res').length,
+        // Of Resolved, the part credited by hand (KPI_RESOLVED_CREDITS).
+        resolvedCredit
       },
       sla: {
         targetsByPriority: SLA_HOURS_BY_PRIORITY,
@@ -7047,9 +7077,9 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
       },
       throughput: {
         created: createdInRange,
-        resolved: resolvedInRange.length,
+        resolved: resolvedInRange.length + resolvedCredit,
         reopened,
-        net: createdInRange - resolvedInRange.length,
+        net: createdInRange - resolvedInRange.length - resolvedCredit,
         backlogOpen: openWorkTickets.length
       },
       overdueRows: overdueRows.slice(0, 25),
