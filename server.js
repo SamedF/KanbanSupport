@@ -993,6 +993,34 @@ function kpiResolvedDate(ticket) {
   at = Math.min(at, Date.now());
   return Number.isFinite(at) ? new Date(at) : null;
 }
+/* SLA met % started over for these agents. A ticket they resolved before the
+   moment still counts as resolved, and in the resolve times, but not as on
+   time or late for them. */
+// SFA's reset of 2026-10-15 is covered by SLA_BASELINE_AT now: everything
+// resolved before the baseline counts as met, for everyone. Add
+// { CODE: <ms> } to start one agent's percentage over on top of that.
+const SLA_COUNTED_FROM_BY_AGENT = {};
+// True when every agent the figure is about has had their SLA reset since this
+// ticket was resolved, so it drops out of that figure's met/late count.
+function kpiSlaResetFor(ticket, agentKeys) {
+  const keys = (agentKeys || []).map(k => String(k || '').trim().toUpperCase()).filter(Boolean);
+  if (!keys.length) return false;
+  const resolvedMs = kpiResolvedDate(ticket)?.getTime();
+  if (!Number.isFinite(resolvedMs)) return false;
+  return keys.every(k => resolvedMs < Number(SLA_COUNTED_FROM_BY_AGENT[k] || 0));
+}
+// Whose figures a KPI ticket counts towards: the agent the dashboard is pinned
+// to, or else the rows of the breakdown table it fans out to.
+function kpiSlaAgentKeys(ticket, team, slaAgent) {
+  if (slaAgent) return [slaAgent];
+  const assignee = String(ticket.assignedAgent || '').trim().toUpperCase();
+  const csOwner = String(ticket.csAgent || '').trim().toUpperCase();
+  if (team === 'cs') return [csOwner || 'Unassigned'];
+  if (team === 'support') return [assignee || 'Unassigned'];
+  const keys = [assignee || 'Unassigned'];
+  if (csOwner && csOwner !== assignee) keys.push(csOwner);
+  return keys;
+}
 function safeDateForDb(value) {
   if (!value) return null;
   const date = new Date(value);
@@ -2132,7 +2160,24 @@ function shiftElapsedMs(fromMs, toMs, agentCode) {
 // reported under its own heading and kept out of the percentage - the same
 // treatment no_clock already gets, and for the same reason.
 
+/* The SLA baseline. Everything resolved before this moment is counted as met
+   (the board's SLA history from launch was not measured reliably), and every
+   ticket still open at it had its clock restarted from it
+   (restartOpenSlaClocksAtBaselineOnce). From here on, every figure is live.
+   SLA_BASELINE_AT overrides; empty turns it off. */
+const SLA_BASELINE_AT = (() => {
+  const raw = String(process.env.SLA_BASELINE_AT ?? '2026-10-16T08:00:00+01:00').trim();
+  const ms = raw ? new Date(raw).getTime() : NaN;
+  return Number.isFinite(ms) ? ms : 0;
+})();
 function ticketSlaSnapshot(ticket, now = Date.now()) {
+  const snapshot = liveTicketSlaSnapshot(ticket, now);
+  if (snapshot.state === 'breached' && SLA_BASELINE_AT && (kpiResolvedDate(ticket)?.getTime() ?? Infinity) < SLA_BASELINE_AT) {
+    return { ...snapshot, state: 'met', overdueMs: 0, baseline: true };
+  }
+  return snapshot;
+}
+function liveTicketSlaSnapshot(ticket, now = Date.now()) {
   const arrivedMs = ticket?.createdAt ? new Date(ticket.createdAt).getTime() : NaN;
   const resetMs = ticket?.slaResetAt ? new Date(ticket.slaResetAt).getTime() : NaN;
   // The later of the two: a thread that has been replied to is measured from
@@ -2145,9 +2190,16 @@ function ticketSlaSnapshot(ticket, now = Date.now()) {
   const base = { targetHours, resolved, state: 'no_clock', shiftMs: 0, wallMs: 0, ageMs: 0, overdueMs: 0 };
   if (!Number.isFinite(createdMs)) return base;
 
-  const endMs = resolved
+  // Frozen by an admin: the clock stopped when the hold began. Released, the
+  // restart point moves forward by the hold (see /api/tickets/:id/sla-hold).
+  const holdMs = ticket?.slaHoldAt ? new Date(ticket.slaHoldAt).getTime() : NaN;
+  const held = Number.isFinite(holdMs);
+  const endMs = Math.min(resolved
     ? (kpiResolvedDate(ticket)?.getTime() ?? now)
-    : now;
+    : now, held ? Math.max(holdMs, createdMs) : Infinity);
+  if (held && !resolved) {
+    return { ...base, state: 'admin_hold', ageMs: businessMsInRange(createdMs, endMs), wallMs: Math.max(0, endMs - createdMs), heldBy: ticket.slaHoldBy || null };
+  }
   const wallMs = Math.max(0, (Number.isFinite(endMs) ? endMs : now) - createdMs);
   // The ticket's age in the hours the SLA runs: no nights, lunch or weekends.
   // What "oldest open" and "h open" report, so a Monday dashboard does not
@@ -2553,6 +2605,8 @@ async function safeWriteState(state, actor = null) {
   keepServerOwned('ticketJira');
   keepServerOwned('ticketDuplicateOf');
   keepServerOwned('ticketVelmaBug');
+  // Only the admin hold endpoint sets or clears a freeze.
+  keepServerOwned('ticketSlaHold');
 
   // The point each ticket's SLA clock counts from only ever moves forward: a
   // client reply, the end of a hold, or a reset all push it later, and nothing
@@ -2728,6 +2782,7 @@ async function hydrateStateFromDatabase(baseState = {}) {
   state.ticketHubspotId = (state.ticketHubspotId && typeof state.ticketHubspotId === 'object') ? state.ticketHubspotId : {};
   state.ticketDuplicateOf = (state.ticketDuplicateOf && typeof state.ticketDuplicateOf === 'object') ? state.ticketDuplicateOf : {};
   state.ticketVelmaBug = (state.ticketVelmaBug && typeof state.ticketVelmaBug === 'object') ? state.ticketVelmaBug : {};
+  state.ticketSlaHold = (state.ticketSlaHold && typeof state.ticketSlaHold === 'object') ? state.ticketSlaHold : {};
   state.ticketArchived = (state.ticketArchived && typeof state.ticketArchived === 'object') ? state.ticketArchived : {};
   state.manualCSOverride = (state.manualCSOverride && typeof state.manualCSOverride === 'object') ? state.manualCSOverride : {};
   state.ticketCreatedBy = (state.ticketCreatedBy && typeof state.ticketCreatedBy === 'object') ? state.ticketCreatedBy : {};
@@ -2800,10 +2855,18 @@ async function hydrateStateFromDatabase(baseState = {}) {
     if (ticket.velmaBugId && !state.ticketVelmaBug[externalId]) {
       state.ticketVelmaBug[externalId] = { id: ticket.velmaBugId, ...((ticket.velmaBugRow && typeof ticket.velmaBugRow === 'object') ? ticket.velmaBugRow : {}) };
     }
+    if (ticket.slaHoldAt && !state.ticketSlaHold[externalId]) {
+      state.ticketSlaHold[externalId] = { at: new Date(ticket.slaHoldAt).getTime(), by: ticket.slaHoldBy || null };
+    }
     if (ticket.hubspotTicketId) state.ticketHubspotId[externalId] = ticket.hubspotTicketId;
     if (ticket.displayNumber) state.ticketNumbers[externalId] = ticket.displayNumber;
     if (Array.isArray(ticket.comments) && ticket.comments.length) {
+      // The row has no author or edit marker; the board's own copy of the note,
+      // matched on its timestamp, still does.
+      const boardCopies = new Map((Array.isArray(state.ticketComments[externalId]) ? state.ticketComments[externalId] : [])
+        .map(c => [safeDateForDb(c?.ts || c?.createdAt)?.getTime(), c]));
       state.ticketComments[externalId] = ticket.comments.map(comment => ({
+        ...(boardCopies.get(comment.createdAt?.getTime?.()) || {}),
         text: comment.comment,
         comment: comment.comment,
         ts: comment.createdAt?.toISOString?.() || new Date().toISOString(),
@@ -3889,9 +3952,24 @@ async function upsertBoardTicketsToDatabase(state, req) {  if (!state || typeof 
       : (existingTicket?.duplicateOfExternalId || null);
     const comments = Array.isArray(ticketComments[externalId]) ? ticketComments[externalId] : [];
     const existingCommentTexts = new Set((existingTicket?.comments || []).map(c => c.comment));
-    const newComments = comments
-      .map(c => ({ text: String(c?.text || c?.comment || '').trim(), ts: c?.ts || c?.createdAt, tags: Array.isArray(c?.tags) ? c.tags.map(t => String(t)).filter(Boolean) : [] }))
-      .filter(c => c.text && !existingCommentTexts.has(c.text));
+    // A note keeps its original timestamp when it is edited, and the row was
+    // written with that timestamp, so this is how an edited note finds its row
+    // - matching on text would file the edit as a second note.
+    const existingCommentsByTs = new Map((existingTicket?.comments || []).map(c => [new Date(c.createdAt).getTime(), c]));
+    const boardComments = comments
+      .map(c => ({ text: String(c?.text || c?.comment || '').trim(), ts: c?.ts || c?.createdAt, edited: !!c?.editedAt, tags: Array.isArray(c?.tags) ? c.tags.map(t => String(t)).filter(Boolean) : [] }))
+      .filter(c => c.text);
+    const editedComments = [];
+    const newComments = [];
+    for (const c of boardComments) {
+      const at = safeDateForDb(c.ts);
+      const row = c.edited && at ? existingCommentsByTs.get(at.getTime()) : null;
+      if (row) {
+        if (row.comment !== c.text) editedComments.push({ id: row.id, text: c.text });
+      } else if (!existingCommentTexts.has(c.text)) {
+        newComments.push(c);
+      }
+    }
 
     const previousStatus = existingTicket?.status || null;
     const wasResolved = previousStatus === 'Resolved';
@@ -3927,7 +4005,7 @@ async function upsertBoardTicketsToDatabase(state, req) {  if (!state || typeof 
       && existingTicket.body === body
       && Number(existingTicket.slaResetAt ? new Date(existingTicket.slaResetAt).getTime() : 0) === Number(slaResetAt ? slaResetAt.getTime() : 0);
 
-    if (fieldsUnchanged && !newComments.length) continue;
+    if (fieldsUnchanged && !newComments.length && !editedComments.length) continue;
 
     // If only new comments arrived and every other field already matches, we
     // already have the ticket id from the batch fetch - no need to upsert.
@@ -4039,6 +4117,9 @@ async function upsertBoardTicketsToDatabase(state, req) {  if (!state || typeof 
           createdAt: safeDateForDb(comment.ts) || new Date()
         }
       });
+    }
+    for (const comment of editedComments) {
+      await prisma.ticketComment.update({ where: { id: comment.id }, data: { comment: comment.text } });
     }
 
     count += 1;
@@ -4530,7 +4611,9 @@ app.get('/api/shift/state', requireAuth, (req, res) => {
   const me = shiftAgentFromRequest(req, req.query?.agent);
   const agents = {};
   Object.keys(shiftStore.agents).forEach((code) => { agents[code] = shiftSnapshotFor(code); });
-  return res.json({ me, agents, idleMs: SHIFT_IDLE_MS, serverNow: Date.now(), leave: activeAgentLeave() });
+  // slaTimeZone: the zone the SLA's working hours are read in, so every board
+  // counts 08:00-12:00 / 14:00-17:00 the same way the server does.
+  return res.json({ me, agents, idleMs: SHIFT_IDLE_MS, serverNow: Date.now(), slaTimeZone: process.env.TZ || null, leave: activeAgentLeave() });
 });
 
 // Re-run the rebuild of shift history from the activity log (admins). Safe to
@@ -4907,6 +4990,17 @@ app.delete('/api/jira/link/:kanbanTicketId', requireAuth, async (req, res) => {
 // ---------------------------------------------------------------------------
 const VELMA_BUG_SHEET_ID = String(process.env.VELMA_BUG_SHEET_ID || '1do2eeXmIog5af-HX_VtrVHpLGyY5GxMkn2JX96pL3NI').trim();
 const VELMA_BUG_SHEET_GID = String(process.env.VELMA_BUG_SHEET_GID || '601357266').trim();
+/* Every sheet a Velma bug can be looked up in, in the order they are searched:
+   the one above, then VELMA_BUG_EXTRA_SHEETS ("<spreadsheet id>:<gid>",
+   comma separated). A bug ID found in an earlier sheet wins; a link keeps the
+   sheet it was found in, and its status is read from there. */
+const VELMA_BUG_SHEETS = [
+  `${VELMA_BUG_SHEET_ID}:${VELMA_BUG_SHEET_GID}`,
+  ...String(process.env.VELMA_BUG_EXTRA_SHEETS ?? '1NEMGFrVtEPJUqdfUX53lfKxAD3J87E_YikYj0y41_JA:1291300537').split(',')
+]
+  .map(v => v.trim()).filter(Boolean)
+  .map(v => { const [id, gid = '0'] = v.split(':'); return { id: id.trim(), gid: gid.trim() }; })
+  .filter((sheet, i, all) => sheet.id && all.findIndex(o => o.id === sheet.id && o.gid === sheet.gid) === i);
 // Header of the column holding the bug ID. Optional: without it the column is
 // guessed from the headers, and failing that any cell in the row may match.
 const VELMA_BUG_ID_COLUMN = String(process.env.VELMA_BUG_ID_COLUMN || '').trim();
@@ -5091,7 +5185,7 @@ async function googleSheetCredentials(preferUserId = null) {
   return out;
 }
 
-async function googleSheetsGet(pathAndQuery, { preferUserId = null } = {}) {
+async function googleSheetsGet(pathAndQuery, { preferUserId = null, spreadsheetId = VELMA_BUG_SHEET_ID } = {}) {
   const credentials = await googleSheetCredentials(preferUserId);
   if (!credentials.length) {
     throw new Error('velma_sheet_not_configured: sign in with a Google account that can open the Velma bug sheet (Account > Google account), upload a service account key there, or share the sheet as "Anyone with the link can view"');
@@ -5108,7 +5202,7 @@ async function googleSheetsGet(pathAndQuery, { preferUserId = null } = {}) {
       lastError = error;
       continue;
     }
-    const res = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(VELMA_BUG_SHEET_ID)}${pathAndQuery}`, {
+    const res = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(spreadsheetId)}${pathAndQuery}`, {
       headers: { Authorization: `Bearer ${token}` }
     });
     const out = await res.json().catch(() => ({}));
@@ -5125,26 +5219,34 @@ async function googleSheetsGet(pathAndQuery, { preferUserId = null } = {}) {
 // most, and re-reading the sheet for each one buys nothing. Read as displayed
 // values (the API default), which is what a dropdown cell shows - "DONE", not
 // an internal option id.
-let velmaSheetCache = { at: 0, rows: null, title: '' };
+let velmaSheetCache = { at: 0, sheets: null };
+// Every Velma bug sheet. One that cannot be read is left out (and logged) as
+// long as another one could be; only when none can is that an error.
 async function readVelmaBugSheet({ preferUserId = null, fresh = false } = {}) {
-  if (!fresh && velmaSheetCache.rows && Date.now() - velmaSheetCache.at < VELMA_SHEET_CACHE_MS) return velmaSheetCache;
+  if (!fresh && velmaSheetCache.sheets && Date.now() - velmaSheetCache.at < VELMA_SHEET_CACHE_MS) return velmaSheetCache;
+  const results = await Promise.allSettled(VELMA_BUG_SHEETS.map(sheet => readOneVelmaBugSheet(sheet, preferUserId)));
+  const sheets = results.filter(r => r.status === 'fulfilled').map(r => r.value);
+  const failed = results.map((r, i) => r.status === 'rejected' ? { ...VELMA_BUG_SHEETS[i], error: String(r.reason?.message || r.reason) } : null).filter(Boolean);
+  if (!sheets.length) throw new Error(failed[0]?.error || 'velma_sheet_read_failed');
+  failed.forEach(f => console.warn(`Velma bug sheet ${f.id} (gid ${f.gid}) skipped: ${f.error}`));
+  velmaSheetCache = { at: Date.now(), sheets, failed, title: sheets.map(s => s.title).join(', ') };
+  return velmaSheetCache;
+}
+async function readOneVelmaBugSheet({ id, gid }, preferUserId) {
   try {
-    const meta = await googleSheetsGet('?fields=sheets.properties(sheetId,title)', { preferUserId });
-    const tab = (meta.sheets || []).map(s => s.properties || {}).find(p => String(p.sheetId) === VELMA_BUG_SHEET_GID);
-    if (!tab) throw new Error(`velma_sheet_tab_missing: no tab with gid ${VELMA_BUG_SHEET_GID}`);
+    const meta = await googleSheetsGet('?fields=sheets.properties(sheetId,title)', { preferUserId, spreadsheetId: id });
+    const tab = (meta.sheets || []).map(s => s.properties || {}).find(p => String(p.sheetId) === gid);
+    if (!tab) throw new Error(`velma_sheet_tab_missing: no tab with gid ${gid}`);
     const quoted = `'${String(tab.title).replace(/'/g, "''")}'`;
-    const values = await googleSheetsGet(`/values/${encodeURIComponent(quoted)}?majorDimension=ROWS`, { preferUserId });
-    velmaSheetCache = { at: Date.now(), rows: Array.isArray(values.values) ? values.values : [], title: tab.title };
-    return velmaSheetCache;
+    const values = await googleSheetsGet(`/values/${encodeURIComponent(quoted)}?majorDimension=ROWS`, { preferUserId, spreadsheetId: id });
+    return { id, gid, rows: Array.isArray(values.values) ? values.values : [], title: tab.title };
   } catch (error) {
     // No account could read it: the sheet's link is the last way in, for a
     // sheet shared as "Anyone with the link can view". If that fails too,
     // the account's reason is the one worth showing - it says what to fix.
     if (/velma_sheet_tab_missing/.test(String(error.message))) throw error;
     try {
-      const sheet = await readSheetByLink();
-      velmaSheetCache = { at: Date.now(), ...sheet };
-      return velmaSheetCache;
+      return { id, gid, ...(await readSheetByLink({ id, gid })) };
     } catch (_) {
       throw error;
     }
@@ -5177,8 +5279,8 @@ function parseCsv(text) {
 /* The sheet as anyone with its link sees it: the tab's CSV export, displayed
    values ("DONE", as the dropdown shows it). A sheet not shared by link
    answers with a sign-in page or a 401 rather than CSV. */
-async function readSheetByLink() {
-  const url = `https://docs.google.com/spreadsheets/d/${encodeURIComponent(VELMA_BUG_SHEET_ID)}/export?format=csv&gid=${encodeURIComponent(VELMA_BUG_SHEET_GID)}`;
+async function readSheetByLink({ id, gid }) {
+  const url = `https://docs.google.com/spreadsheets/d/${encodeURIComponent(id)}/export?format=csv&gid=${encodeURIComponent(gid)}`;
   // Redirects followed: a shared sheet's export is served from
   // googleusercontent.com.
   const res = await fetch(url);
@@ -5216,7 +5318,7 @@ const isVelmaStatusDone = status => !!status && VELMA_DONE_STATUSES.some(done =>
    The status is the cell under a "Status" header (or VELMA_BUG_STATUS_COLUMN)
    in that row. A sheet with no such column simply has no status, and its
    links behave as before: on hold until removed. */
-function findVelmaBugRow(rows, bugId) {
+function findVelmaBugRow(rows, bugId, sheet = { id: VELMA_BUG_SHEET_ID, gid: VELMA_BUG_SHEET_GID }) {
   const wanted = normalizeVelmaBugId(bugId);
   if (!wanted || !Array.isArray(rows)) return null;
   const isIdHeader = (h) => {
@@ -5255,8 +5357,27 @@ function findVelmaBugRow(rows, bugId) {
       row: rowNumber,
       fields,
       status: status || null,
-      url: `https://docs.google.com/spreadsheets/d/${VELMA_BUG_SHEET_ID}/edit#gid=${VELMA_BUG_SHEET_GID}&range=A${rowNumber}:${lastColumn}${rowNumber}`
+      sheetId: sheet.id,
+      sheetGid: sheet.gid,
+      sheetTitle: sheet.title || null,
+      url: `https://docs.google.com/spreadsheets/d/${sheet.id}/edit#gid=${sheet.gid}&range=A${rowNumber}:${lastColumn}${rowNumber}`
     };
+  }
+  return null;
+}
+// A bug in any of the sheets. A linked bug is only looked for in the sheet it
+// was found in, so the same ID in another sheet never takes it over; a link
+// made before there was more than one sheet has no sheetId and is from the
+// first sheet.
+function findVelmaBugInSheets(cache, bugId, previous = null) {
+  const sheets = cache?.sheets || [];
+  if (previous) {
+    const home = sheets.find(s => s.id === (previous.sheetId || VELMA_BUG_SHEET_ID) && s.gid === (previous.sheetGid || VELMA_BUG_SHEET_GID));
+    return home ? findVelmaBugRow(home.rows, bugId, home) : null;
+  }
+  for (const sheet of sheets) {
+    const found = findVelmaBugRow(sheet.rows, bugId, sheet);
+    if (found) return found;
   }
   return null;
 }
@@ -5374,8 +5495,8 @@ app.post('/api/velma-bug/link', requireAuth, async (req, res) => {
     } catch (error) {
       return res.status(502).json({ error: String(error.message || error) });
     }
-    const found = findVelmaBugRow(sheet.rows, bugId);
-    if (!found) return res.status(404).json({ error: `No row with ID ${bugId} in the Velma bug sheet (${sheet.title}).` });
+    const found = findVelmaBugInSheets(sheet, bugId);
+    if (!found) return res.status(404).json({ error: `No row with ID ${bugId} in the Velma bug sheets (${sheet.title}).` });
     // Re-linking a ticket that is already on hold keeps the hold's start, so
     // the time it has already spent waiting is not counted as ours when it
     // ends. A ticket linked to a bug that is already DONE never goes on hold.
@@ -5406,6 +5527,109 @@ app.delete('/api/velma-bug/link/:kanbanTicketId', requireAuth, async (req, res) 
     const heldSince = current && !current.done ? Number(current.holdStartedAt || current.linkedAt || 0) : 0;
     return res.json({ ok: true, linkedAt: heldSince || null });
   } catch (error) {
+    return res.status(500).json({ error: String(error.message || error) });
+  }
+});
+
+/* Admin freeze of a ticket's SLA clock. Body: { hold: true | false }.
+
+   Held, the clock stops where it is: the badge says who froze it, and the
+   ticket drops out of overdue and at risk (admin_hold in ticketSlaSnapshot).
+   Released, it resumes from where it stopped - the restart point moves
+   forward by the working time the hold lasted, like the end of any other
+   hold - so the freeze neither counts against the agent nor gives time back. */
+app.post('/api/tickets/:externalId/sla-hold', requireAdmin, async (req, res) => {
+  try {
+    const externalId = String(req.params.externalId || '').trim();
+    if (!externalId) return res.status(400).json({ error: 'missing_ticket' });
+    const hold = req.body?.hold === true;
+    const actor = String(req.session.username || '').trim().toUpperCase() || null;
+    const now = Date.now();
+    const state = safeReadState();
+    const current = state.ticketSlaHold?.[externalId] || null;
+    if (hold && current) return res.json({ ok: true, hold: current });
+    if (!hold && !current) return res.json({ ok: true, hold: null });
+
+    const value = hold ? { at: now, by: actor } : null;
+    const entries = [{ field: 'ticketSlaHold', id: externalId, value }];
+    const resumeAt = hold ? null : slaResumePointAfterHold(state, externalId, Number(current.at || 0), now);
+    if (resumeAt) entries.push({ field: 'ticketSlaResetAt', id: externalId, value: resumeAt });
+    writeServerFieldsIntoState(entries);
+
+    const ticket = await findTicketRecordByKanbanId(externalId).catch(() => null);
+    if (ticket) {
+      await prisma.ticket.update({
+        where: { id: ticket.id },
+        data: {
+          slaHoldAt: hold ? new Date(now) : null,
+          slaHoldBy: hold ? actor : null,
+          ...(resumeAt ? { slaResetAt: new Date(resumeAt) } : {})
+        }
+      });
+      await createTicketAuditEvent({
+        ticketId: ticket.id,
+        userId: req.session.userId || null,
+        eventType: hold ? 'ticket_sla_hold' : 'ticket_sla_released',
+        oldValue: hold ? null : new Date(Number(current.at || now)).toISOString(),
+        newValue: hold ? new Date(now).toISOString() : null,
+        metadata: { actor, ...(resumeAt ? { slaResetAt: new Date(resumeAt).toISOString() } : {}) }
+      }).catch(() => null);
+    }
+    return res.json({ ok: true, hold: value, slaResetAt: resumeAt || null });
+  } catch (error) {
+    console.error('SLA hold failed:', error);
+    return res.status(500).json({ error: String(error.message || error) });
+  }
+});
+
+/* One-off at the SLA baseline: every ticket still open restarts its clock
+   from SLA_BASELINE_AT, so the backlog is measured live from there instead
+   of carrying time from before it. The restart point only ever moves
+   forward, so a ticket replied to after the baseline keeps its later point.
+   Run by an admin (POST /api/admin/sla/restart-at-baseline, the button in
+   Manage Users), once per database - a SyncLog row records it. */
+const SLA_BASELINE_SYNC_TYPE = 'sla_baseline_restart_v1';
+async function restartOpenSlaClocksAtBaselineOnce() {
+  if (!SLA_BASELINE_AT) return { ok: false, error: 'no_baseline' };
+  const done = await prisma.syncLog.findFirst({ where: { provider: 'kanban', syncType: SLA_BASELINE_SYNC_TYPE, status: 'success' } });
+  if (done) return { ok: true, alreadyDone: true, at: done.createdAt, message: done.message };
+  const state = safeReadState();
+  const stages = (state.ticketState && typeof state.ticketState === 'object') ? state.ticketState : {};
+  const resetAt = (state.ticketSlaResetAt && typeof state.ticketSlaResetAt === 'object') ? state.ticketSlaResetAt : {};
+  const createdAt = (state.ticketCreatedAt && typeof state.ticketCreatedAt === 'object') ? state.ticketCreatedAt : {};
+  const ids = Object.keys(stages).filter((id) => {
+    if (normalizeDbStatusForBoard(stages[id]) === 'res' || stages[id] === 'res') return false;
+    const base = Math.max(new Date(createdAt[id] || 0).getTime() || 0, Number(resetAt[id] || 0));
+    return base < SLA_BASELINE_AT;
+  });
+  if (ids.length) writeServerFieldsIntoState(ids.map(id => ({ field: 'ticketSlaResetAt', id, value: SLA_BASELINE_AT })));
+  await prisma.syncLog.create({
+    data: {
+      provider: 'kanban',
+      syncType: SLA_BASELINE_SYNC_TYPE,
+      status: 'success',
+      message: `SLA clock restarted at the baseline for ${ids.length} open ticket(s).`,
+      metadata: { baselineAt: new Date(SLA_BASELINE_AT).toISOString(), tickets: ids }
+    }
+  }).catch((error) => console.error('SLA baseline marker write failed:', error?.message || error));
+  // The database copy too, for tickets whose row is open - by status rather
+  // than by the state's ids alone, so a row the state does not hold is included.
+  const rows = await prisma.ticket.updateMany({
+    where: {
+      NOT: [{ status: 'Resolved' }],
+      OR: [{ slaResetAt: null }, { slaResetAt: { lt: new Date(SLA_BASELINE_AT) } }],
+      createdAt: { lt: new Date(SLA_BASELINE_AT) }
+    },
+    data: { slaResetAt: new Date(SLA_BASELINE_AT) }
+  }).catch((error) => { console.error('SLA baseline database update failed:', error?.message || error); return { count: 0 }; });
+  console.log(`SLA baseline: clock restarted for ${ids.length} open ticket(s) on the board, ${rows.count} row(s) in the database.`);
+  return { ok: true, board: ids.length, database: rows.count, baselineAt: new Date(SLA_BASELINE_AT).toISOString() };
+}
+app.post('/api/admin/sla/restart-at-baseline', requireAdmin, async (req, res) => {
+  try {
+    return res.json(await restartOpenSlaClocksAtBaselineOnce());
+  } catch (error) {
+    console.error('SLA baseline restart failed:', error);
     return res.status(500).json({ error: String(error.message || error) });
   }
 });
@@ -5445,7 +5669,7 @@ async function syncVelmaBugStatuses() {
     for (const id of ids) {
       const previous = currentLinks[id];
       if (!previous?.id) continue;
-      const found = findVelmaBugRow(sheet.rows, previous.id);
+      const found = findVelmaBugInSheets(sheet, previous.id, previous);
       // A row deleted from the sheet keeps the last copy; the agent still
       // sees what it was and can remove the link.
       if (!found) continue;
@@ -5617,7 +5841,7 @@ app.get('/auth/google/callback', requireAuth, async (req, res) => {
       expiresAt: Date.now() + Number(tokenJson.expires_in || 3600) * 1000,
       metadata: { email, username: String(req.session.username || ''), connectedAt: new Date().toISOString() }
     });
-    velmaSheetCache = { at: 0, rows: null, title: '' };
+    velmaSheetCache = { at: 0, sheets: null };
     // Read the sheet straight away, so the person who just connected learns
     // now - not at their next link - whether this account can actually open it.
     let result = 'connected';
@@ -5672,7 +5896,7 @@ app.post('/auth/google/disconnect', requireAuth, async (req, res) => {
       body: new URLSearchParams({ token: refreshToken })
     }).catch(() => null);
   }
-  velmaSheetCache = { at: 0, rows: null, title: '' };
+  velmaSheetCache = { at: 0, sheets: null };
   res.json({ ok: true });
 });
 
@@ -5695,7 +5919,7 @@ app.put('/api/google/service-account', requireAdmin, async (req, res) => {
       metadata: { email: parsed.email, savedBy: String(req.session.username || '').toUpperCase() || null, savedAt: new Date().toISOString() }
     });
     googleServiceAccountCache = { at: 0, value: null };
-    velmaSheetCache = { at: 0, rows: null, title: '' };
+    velmaSheetCache = { at: 0, sheets: null };
     let sheetAccess = 'ok';
     let sheetError = null;
     try {
@@ -5714,7 +5938,7 @@ app.delete('/api/google/service-account', requireAdmin, async (req, res) => {
   await prisma.oAuthToken.delete({ where: { provider: GOOGLE_SERVICE_ACCOUNT_PROVIDER } }).catch(() => null);
   googleServiceAccountCache = { at: 0, value: null };
   googleTokenCache = { token: '', expiresAt: 0 };
-  velmaSheetCache = { at: 0, rows: null, title: '' };
+  velmaSheetCache = { at: 0, sheets: null };
   res.json({ ok: true });
 });
 
@@ -6186,6 +6410,9 @@ const KPI_TICKET_SELECT = {
   velmaBugId: true,
   // The bug's copied row, for its status: a DONE bug no longer holds the SLA.
   velmaBugRow: true,
+  // Frozen by an admin: the clock stopped at slaHoldAt.
+  slaHoldAt: true,
+  slaHoldBy: true,
   duplicateOfExternalId: true,
   createdAt: true,
   updatedAt: true,
@@ -6269,7 +6496,10 @@ async function loadKpiWorkingSet(req) {  const bounds = kpiDateBounds(req.query.
   // anywhere in the data for the filter dropdown. Extracting this function left
   // it behind, so /api/tickets/kpis threw ReferenceError: tickets is not defined
   // on every request and the whole dashboard 500d.
-  return { bounds, myTeam, team, agent, company, jiraOnly, baseWhere, accessWhere, tickets, scopedTickets, workTickets, duplicatesOpen, duplicatesInRange };
+  // The one agent the figures are pinned to, if any - whose SLA reset applies
+  // to the headline SLA met.
+  const slaAgent = (myTeam === 'cs' || myTeam === 'support') ? username : (agent && agent !== 'ALL' ? agent : null);
+  return { bounds, myTeam, team, agent, slaAgent, company, jiraOnly, baseWhere, accessWhere, tickets, scopedTickets, workTickets, duplicatesOpen, duplicatesInRange };
 }
 function kpiDrilldownRow(t, detail) {
   return {
@@ -6286,7 +6516,7 @@ function kpiDrilldownRow(t, detail) {
 }
 app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
   try {
-    const { bounds, myTeam, team, agent, company, jiraOnly, baseWhere, accessWhere, tickets, scopedTickets, workTickets, duplicatesOpen, duplicatesInRange } = await loadKpiWorkingSet(req);
+    const { bounds, myTeam, team, agent, slaAgent, company, jiraOnly, baseWhere, accessWhere, tickets, scopedTickets, workTickets, duplicatesOpen, duplicatesInRange } = await loadKpiWorkingSet(req);
 
     const statusKeys = ['new', 'inp', 'wus', 'dft', 'wct', 'res'];
     const statusCounts = Object.fromEntries(statusKeys.map(k => [k, 0]));
@@ -6381,9 +6611,9 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
     const BACKLOG_KEY_BY_STATE = {
       overdue: 'overdue', at_risk: 'atRisk', on_track: 'onTrack',
       no_clock: 'noClock', jira_hold: 'jiraHold', velma_hold: 'velmaHold', contact_hold: 'contactHold',
-      leave_hold: 'leaveHold'
+      leave_hold: 'leaveHold', admin_hold: 'adminHold'
     };
-    const backlog = { overdue: 0, atRisk: 0, onTrack: 0, noClock: 0, jiraHold: 0, velmaHold: 0, contactHold: 0, leaveHold: 0 };
+    const backlog = { overdue: 0, atRisk: 0, onTrack: 0, noClock: 0, jiraHold: 0, velmaHold: 0, contactHold: 0, leaveHold: 0, adminHold: 0 };
     const overdueRows = [];
     let oldestOpenMs = 0;
 
@@ -6425,13 +6655,23 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
     let slaBreached = 0;
     let slaUnmeasured = 0;
     let slaEstimated = 0;
+    let slaReset = 0;
     for (const ticket of resolvedInRange) {
       const snapshot = ticketSlaSnapshot(ticket, now);
       if (snapshot.estimated) slaEstimated++;
-      const rows = rowKeysForTicket(ticket).map(ensureAgentRow);
-      if (snapshot.state === 'met') { slaMet++; rows.forEach(row => row.slaMet++); }
+      const rowKeys = rowKeysForTicket(ticket);
+      const rows = rowKeys.map(ensureAgentRow);
+      // Rows whose agent has not had their SLA reset since this was resolved.
+      const slaRows = rowKeys.filter(key => !kpiSlaResetFor(ticket, [key])).map(ensureAgentRow);
+      const measured = snapshot.state === 'met' || snapshot.state === 'breached';
+      if (measured && kpiSlaResetFor(ticket, kpiSlaAgentKeys(ticket, team, slaAgent))) {
+        slaReset++;
+        if (snapshot.state === 'met') slaRows.forEach(row => row.slaMet++);
+        else slaRows.forEach(row => row.slaBreached++);
+      }
+      else if (snapshot.state === 'met') { slaMet++; slaRows.forEach(row => row.slaMet++); }
       else if (snapshot.state === 'breached') {
-        slaBreached++; rows.forEach(row => row.slaBreached++);
+        slaBreached++; slaRows.forEach(row => row.slaBreached++);
         breachedRows.push({
           ticketNumber: ticket.displayNumber ? `#${String(ticket.displayNumber).padStart(4, '0')}` : null,
           externalId: ticket.externalId,
@@ -6446,7 +6686,7 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
         });
       }
       else slaUnmeasured++;
-      if (snapshot.state === 'met' || snapshot.state === 'breached') {
+      if (measured) {
         resolveShiftHours.push(hoursFromMs(snapshot.shiftMs));
         rows.forEach(row => row.resolveHours.push(hoursFromMs(snapshot.shiftMs)));
       }
@@ -6545,6 +6785,10 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
         // Reported so they are visibly parked rather than just missing from
         // the other three figures.
         jiraHold: backlog.jiraHold,
+        // Open tickets an admin has frozen.
+        adminHold: backlog.adminHold,
+        // Resolved before this moment counts as met; measured live after it.
+        baselineAt: SLA_BASELINE_AT ? new Date(SLA_BASELINE_AT).toISOString() : null,
         // Same, for tickets waiting on a Velma bug.
         velmaHold: backlog.velmaHold,
         // Open tickets whose clock is frozen while they wait on the client.
@@ -6559,6 +6803,10 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
         // clock ever ran, or linked to Jira, so the clock was off. Excluded
         // from the percentage rather than silently counted as met.
         unmeasured: slaUnmeasured,
+        // Resolved before the SLA of the agent(s) this figure is about was
+        // reset (SLA_COUNTED_FROM_BY_AGENT): out of the percentage, still in
+        // Resolved and the resolve times. on time + late + no SLA + reset = Resolved.
+        reset: slaReset,
         // The part of met + breached resolved from before the shift history
         // was complete, measured on office hours rather than logged-in time.
         estimated: slaEstimated,
@@ -6622,7 +6870,7 @@ const KPI_STATUS_CATEGORIES = new Set(['new', 'inp', 'wus', 'dft', 'wct', 'res']
 app.get('/api/tickets/kpis/drilldown', requireAuth, async (req, res) => {
   try {
     const category = String(req.query.category || '').trim();
-    const { bounds, baseWhere, accessWhere, scopedTickets, workTickets, duplicatesOpen } = await loadKpiWorkingSet(req);
+    const { bounds, team, slaAgent, baseWhere, accessWhere, scopedTickets, workTickets, duplicatesOpen } = await loadKpiWorkingSet(req);
     const now = Date.now();
     let rows;
 
@@ -6668,9 +6916,13 @@ app.get('/api/tickets/kpis/drilldown', requireAuth, async (req, res) => {
         .filter(t => normalizeDbStatusForBoard(t.status) === 'res')
         .map(t => ({ t, snapshot: ticketSlaSnapshot(t, now) }));
       const wantStates = category === 'slaMet' ? ['met'] : category === 'slaBreached' ? ['breached'] : ['met', 'breached'];
+      // A ticket from before an agent's SLA reset is in the resolve times
+      // (slaMeasured) but not in met or late, the same as the cards.
       rows = resolvedSnapshots.filter(x => wantStates.includes(x.snapshot.state))
+        .map(x => ({ ...x, reset: kpiSlaResetFor(x.t, kpiSlaAgentKeys(x.t, team, slaAgent)) }))
+        .filter(x => category === 'slaMeasured' || !x.reset)
         .sort((a, b) => b.snapshot.overdueMs - a.snapshot.overdueMs)
-        .map(({ t, snapshot }) => kpiDrilldownRow(t, (snapshot.state === 'met' ? 'Met SLA' : `Missed by ${hoursFromMs(snapshot.overdueMs)}h`)));
+        .map(({ t, snapshot, reset }) => kpiDrilldownRow(t, reset ? 'Before SLA reset' : (snapshot.state === 'met' ? 'Met SLA' : `Missed by ${hoursFromMs(snapshot.overdueMs)}h`)));
     } else if (category === 'reopened') {
       const events = await prisma.ticketEvent.findMany({
         where: {
@@ -10193,6 +10445,8 @@ const LIVE_SYNC_FIELDS = [
   'ticketDuplicateOf', 'ticketSnooze', 'ticketSlaResetAt',
   // A Velma bug link puts the SLA on hold, so every board has to show it.
   'ticketVelmaBug',
+  // So does an admin freeze.
+  'ticketSlaHold',
   // A CS send-back lands in the support agent's My Alerts, so it has to reach
   // their open board now rather than on their next reload.
   'ticketSendBackAlerts',

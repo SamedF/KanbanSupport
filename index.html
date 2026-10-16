@@ -1964,6 +1964,24 @@ body > header {
   display: block;
 }
 
+/* Admin SLA freeze in the card footer, in the Velma chip's language: dashed
+   while it is an action (Hold), solid once the clock is frozen. */
+.sla-hold-btn,
+.sla-hold-badge {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 800;
+  padding: 3px 8px;
+  color: var(--amber-700);
+  white-space: nowrap;
+}
+.sla-hold-btn { background: var(--slate-50); border: 1px dashed var(--slate-300); cursor: pointer; }
+.sla-hold-btn:hover { border-color: var(--amber-700); }
+.sla-hold-badge { background: var(--amber-50); border: 1px solid var(--amber-700); }
+button.sla-hold-badge { cursor: pointer; }
+
 /* Velma bug link in the card footer: dashed while unlinked (an action), solid
    once linked (a fact you can click to change) - the Jira controls' language. */
 .velma-link-btn,
@@ -2365,6 +2383,9 @@ body > header {
   line-height: 1.45;
   white-space: pre-wrap;
   word-break: break-word;
+  /* The card is user-select:none for dragging; its notes must stay copyable. */
+  user-select: text;
+  cursor: text;
 }
 
 .card-inline-empty {
@@ -3193,6 +3214,68 @@ textarea:focus {
   line-height: 1.5;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+.note-link {
+  color: var(--indigo-600, #4f46e5);
+  text-decoration: underline;
+  word-break: break-all;
+  cursor: pointer;
+}
+
+.note-link-copy {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  vertical-align: middle;
+  margin: 0 2px 0 3px;
+  padding: 2px 3px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--white);
+  color: var(--slate-500);
+  cursor: pointer;
+  line-height: 0;
+}
+
+.note-link-copy:hover {
+  color: var(--text);
+  border-color: var(--slate-400);
+}
+
+.comment-edited {
+  font-size: 11.5px;
+  color: var(--muted-light);
+  font-style: italic;
+}
+
+.comment-edit-btn {
+  margin-left: auto;
+  border: 0;
+  background: none;
+  padding: 0 2px;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--slate-500);
+  cursor: pointer;
+}
+
+.comment-edit-btn:hover {
+  color: var(--text);
+  text-decoration: underline;
+}
+
+.comment-edit-input {
+  width: 100%;
+  min-height: 72px;
+}
+
+.comment-edit-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-top: 6px;
 }
 
 .no-comments {
@@ -8873,7 +8956,7 @@ th {
       <div class="form-field">
         <label id="velma-input-label">Velma bug ticket ID</label>
         <input id="velma-input" class="form-input" type="text" placeholder="The ID from the Velma bug sheet" style="font-size:16.5px;font-weight:700;letter-spacing:.5px;"/>
-        <div style="font-size:12px;color:var(--slate-400);margin-top:3px;">The row with this ID is looked up in the Velma bug sheet and linked to the ticket. The SLA goes on hold while the bug is open, and starts again by itself once its Status is DONE.</div>
+        <div style="font-size:12px;color:var(--slate-400);margin-top:3px;">The row with this ID is looked up in the Velma bug sheets and linked to the ticket. The SLA goes on hold while the bug is open, and starts again by itself once its Status is DONE.</div>
       </div>
     </div>
     <div class="modal-actions">
@@ -9403,6 +9486,9 @@ let ticketJira={};   // ticketId  Jira key (e.g. 'QT-1234') | null
    ticketJira - only /api/velma-bug/link writes it - and, like a Jira link, it
    puts the SLA on hold (getSLAStatus). */
 let ticketVelmaBug={};
+// ticketId -> { at, by }: an admin froze the SLA clock at `at`. Server-owned
+// (POST /api/tickets/:id/sla-hold); released, the clock resumes where it stopped.
+let ticketSlaHold={};
 // ticketId -> the ticket id this one duplicates. The same problem reaches the
 // helpdesk twice often enough (a resend, a reply Outlook threads under a fresh
 // conversation, a client writing from two addresses) that clearing the copy by
@@ -10314,6 +10400,7 @@ function mergeDatabaseTickets(dbTickets){
     // in exactly that window.
     if(row.duplicateOfExternalId)ticketDuplicateOf[id]=String(row.duplicateOfExternalId);
     if(row.velmaBugId&&!ticketVelmaBug[id])ticketVelmaBug[id]={id:String(row.velmaBugId),...(row.velmaBugRow&&typeof row.velmaBugRow==='object'?row.velmaBugRow:{})};
+    if(row.slaHoldAt&&!ticketSlaHold[id])ticketSlaHold[id]={at:new Date(row.slaHoldAt).getTime(),by:row.slaHoldBy||null};
     if(row.hubspotTicketId)ticketHubspotId[id]=row.hubspotTicketId;
     if(Array.isArray(row.comments)){
       ticketComments[id]=row.comments.map(c=>({author:c?.user?.displayName||c?.user?.username||'SYSTEM',text:c?.comment||'',comment:c?.comment||'',tags:Array.isArray(c?.tags)?c.tags:[],ts:c?.createdAt||Date.now(),createdAt:c?.createdAt||new Date().toISOString(),isInternal:c?.isInternal!==false}));
@@ -10347,7 +10434,7 @@ function liveSyncTargets(){
   return {ticketState,ticketStageTouchedAt,ticketAssigneeTouchedAt,ticketAssignee,ticketCSOwner,ticketAssignmentMode,
     manualSupportOverride,manualCSOverride,ticketPriority,ticketCategory,ticketSubtype,
     ticketJira,ticketDuplicateOf,ticketHubspotId,ticketArchived,ticketResolutionMeta,ticketHasNewReply,
-    ticketNumbers,ticketComments,ticketCreatedBy,ticketSnooze,ticketSlaResetAt,ticketSendBackAlerts,ticketReopenedAt,ticketVelmaBug,ticketReopenRequests};
+    ticketNumbers,ticketComments,ticketCreatedBy,ticketSnooze,ticketSlaResetAt,ticketSendBackAlerts,ticketReopenedAt,ticketVelmaBug,ticketSlaHold,ticketReopenRequests};
 }
 function setLiveIndicator(state,detail){
   const el=document.getElementById('live-indicator');
@@ -10644,6 +10731,10 @@ async function loadState(){
     Object.keys(ticketVelmaBug).forEach(k=>{delete ticketVelmaBug[k];});
     Object.entries(s.ticketVelmaBug).forEach(([k,v])=>{if(v&&v.id)ticketVelmaBug[k]=v;});
   }
+  if(s.ticketSlaHold&&typeof s.ticketSlaHold==='object'){
+    Object.keys(ticketSlaHold).forEach(k=>{delete ticketSlaHold[k];});
+    Object.entries(s.ticketSlaHold).forEach(([k,v])=>{if(v&&v.at)ticketSlaHold[k]=v;});
+  }
   if(s.ticketHubspotId)Object.assign(ticketHubspotId,s.ticketHubspotId);
   // Snoozes are shared board state, not a personal view: if one agent parks a
   // ticket until Monday it has to be parked for everyone, or the next person
@@ -10810,25 +10901,49 @@ function isWeekendDay(d){const day=d.getDay();return day===0||day===6;}
    by an hour. */
 const BUSINESS_WINDOWS = [[8, 0, 12, 0], [14, 0, 17, 0]];
 const BUSINESS_MS_PER_DAY = BUSINESS_WINDOWS.reduce((total, [sh, sm, eh, em]) => total + ((eh * 60 + em) - (sh * 60 + sm)) * 60000, 0);
+/* Read in the SLA's time zone - the server's (slaTimeZone, from
+   /api/shift/state) - not the browser's. Counted in the viewer's own zone, an
+   agent abroad or on a PC set to another zone saw 08:00-12:00 land on the
+   wrong hours, and their badges disagreed with the dashboard. Offsets are
+   cached per hour, since they only change on the hour. */
+let slaTimeZone='Africa/Casablanca';
+let slaZoneFmt=null;
+let slaZoneOffsetCache=new Map();
+function setSlaTimeZone(tz){
+  const next=String(tz||'').trim();
+  if(!next||next===slaTimeZone)return;
+  try{new Intl.DateTimeFormat('en-US',{timeZone:next});}catch(_){return;}
+  slaTimeZone=next;slaZoneFmt=null;slaZoneOffsetCache=new Map();
+}
+function slaZoneOffsetMs(ms){
+  const hour=Math.floor(ms/3600000);
+  const cached=slaZoneOffsetCache.get(hour);
+  if(cached!==undefined)return cached;
+  let offset;
+  try{
+    if(!slaZoneFmt)slaZoneFmt=new Intl.DateTimeFormat('en-US',{timeZone:slaTimeZone,hourCycle:'h23',year:'numeric',month:'numeric',day:'numeric',hour:'numeric',minute:'numeric',second:'numeric'});
+    const p={};
+    slaZoneFmt.formatToParts(new Date(hour*3600000)).forEach(x=>{p[x.type]=x.value;});
+    offset=Date.UTC(+p.year,+p.month-1,+p.day,(+p.hour)%24,+p.minute,+p.second)-hour*3600000;
+  }catch(_){offset=-new Date(ms).getTimezoneOffset()*60000;}
+  if(slaZoneOffsetCache.size>50000)slaZoneOffsetCache=new Map();
+  slaZoneOffsetCache.set(hour,offset);
+  return offset;
+}
+// A wall-clock time in the SLA zone, written as if it were UTC, to the instant.
+function slaZoneToUtc(wall){return wall-slaZoneOffsetMs(wall-slaZoneOffsetMs(wall));}
+function slaZoneDayStart(ms){return Math.floor((ms+slaZoneOffsetMs(ms))/86400000)*86400000;}
+function slaZoneIsWeekend(day){const d=new Date(day).getUTCDay();return d===0||d===6;}
 function businessMsInRange(from, to) {
   if (!(to > from)) return 0;
   let total = 0;
-  const cursor = new Date(from);
-  cursor.setHours(0, 0, 0, 0);
-  while (cursor.getTime() < to) {
-    const next = new Date(cursor);
-    next.setDate(next.getDate() + 1);
-    next.setHours(0, 0, 0, 0);
-    if (!isWeekendDay(cursor)) {
-      for (const [sh, sm, eh, em] of BUSINESS_WINDOWS) {
-        const windowStart = new Date(cursor); windowStart.setHours(sh, sm, 0, 0);
-        const windowEnd = new Date(cursor); windowEnd.setHours(eh, em, 0, 0);
-        const start = Math.max(windowStart.getTime(), from);
-        const end = Math.min(windowEnd.getTime(), to);
-        if (end > start) total += end - start;
-      }
+  for (let day = slaZoneDayStart(from); slaZoneToUtc(day) < to; day += 86400000) {
+    if (slaZoneIsWeekend(day)) continue;
+    for (const [sh, sm, eh, em] of BUSINESS_WINDOWS) {
+      const start = Math.max(slaZoneToUtc(day + (sh * 60 + sm) * 60000), from);
+      const end = Math.min(slaZoneToUtc(day + (eh * 60 + em) * 60000), to);
+      if (end > start) total += end - start;
     }
-    cursor.setTime(next.getTime());
   }
   return total;
 }
@@ -10838,23 +10953,18 @@ function businessMsInRange(from, to) {
 function businessPointBefore(to, amount) {
   let left = amount;
   if (!(left > 0)) return to;
-  const cursor = new Date(to);
-  cursor.setHours(0, 0, 0, 0);
+  let day = slaZoneDayStart(to);
   // Ten years of days: far past any SLA, and a stop if the windows are empty.
-  for (let day = 0; day < 3660; day++) {
-    if (!isWeekendDay(cursor)) {
-      for (let i = BUSINESS_WINDOWS.length - 1; i >= 0; i--) {
-        const [sh, sm, eh, em] = BUSINESS_WINDOWS[i];
-        const windowStart = new Date(cursor); windowStart.setHours(sh, sm, 0, 0);
-        const windowEnd = new Date(cursor); windowEnd.setHours(eh, em, 0, 0);
-        const end = Math.min(windowEnd.getTime(), to);
-        const start = windowStart.getTime();
-        if (!(end > start)) continue;
-        if (end - start >= left) return end - left;
-        left -= end - start;
-      }
+  for (let i = 0; i < 3660; i++, day -= 86400000) {
+    if (slaZoneIsWeekend(day)) continue;
+    for (let w = BUSINESS_WINDOWS.length - 1; w >= 0; w--) {
+      const [sh, sm, eh, em] = BUSINESS_WINDOWS[w];
+      const end = Math.min(slaZoneToUtc(day + (eh * 60 + em) * 60000), to);
+      const start = slaZoneToUtc(day + (sh * 60 + sm) * 60000);
+      if (!(end > start)) continue;
+      if (end - start >= left) return end - left;
+      left -= end - start;
     }
-    cursor.setDate(cursor.getDate() - 1);
   }
   return to - amount;
 }
@@ -10909,7 +11019,8 @@ function leavePeriodEnd(p,now){
 function shiftElapsedMs(fromMs,toMs,agentCode){
   const rec=shiftAgents[String(agentCode||'').toUpperCase()];
   if(!rec||!Array.isArray(rec.sessions))return 0;
-  const now=Date.now();
+  // The server's clock: a PC clock a few minutes out moved every badge.
+  const now=boardNow();
   const leaves=(rec.leaves||[]).map(p=>[Number(p.start||0),leavePeriodEnd(p,now)]);
   let total=0;
   rec.sessions.forEach(s=>{
@@ -10937,6 +11048,7 @@ async function refreshShiftState(){
     const out=await res.json();
     const serverNow=Number(out?.serverNow||0);
     if(serverNow>0)serverClockOffset=serverNow-Date.now();
+    setSlaTimeZone(out?.slaTimeZone);
     shiftAgents=out?.agents||{};
     shiftMe=out?.me||null;
     if(out&&'leave' in out)applyAgentLeave(out.leave);
@@ -11049,7 +11161,8 @@ function getSLAStatus(id){
   // The later of the two: a thread that has been replied to is measured from
   // the last reply, an untouched one from when it arrived.
   const createdMs=Math.max(new Date(createdAt).getTime(), Number(ticketSlaResetAt[id] || 0));
-  const wallElapsed=Date.now()-createdMs;
+  const slaNow=boardNow();
+  const wallElapsed=slaNow-createdMs;
   const resetAt=Number(ticketSlaResetAt[id]||0)>new Date(createdAt).getTime()?Number(ticketSlaResetAt[id]):0;
   const wallText=fmtDuration(wallElapsed)+(resetAt?' since the client\'s last reply':' since received');
   /* Linked to Jira, so the clock is off. The commitment is a response time
@@ -11064,6 +11177,14 @@ function getSLAStatus(id){
      stays false, so it drops out of the Overdue filter, the workload counts
      and the KPI figures on its own. Mirrors the jira_hold state in
      ticketSlaSnapshot, which is what the dashboard is computed from. */
+  /* Frozen by an admin: the clock stopped when they pressed Hold, and resumes
+     from there when they release it. Mirrors admin_hold in ticketSlaSnapshot. */
+  const adminHold=ticketSlaHold[id];
+  if(adminHold&&adminHold.at){
+    const frozenAt=Math.max(Number(adminHold.at),createdMs);
+    const frozenWall=fmtDuration(Math.max(0,frozenAt-createdMs))+(resetAt?' since the client\'s last reply':' since received');
+    return{text:`SLA frozen${adminHold.by?' by '+adminHold.by:''}`,cls:'sla-warn',overdue:false,wallText:frozenWall,shiftMs:0,noClock:true,adminHold};
+  }
   const jiraHoldKey=canonicalJiraKey(ticketJira[id]);
   if(jiraHoldKey)return{text:`SLA on hold - ${jiraHoldKey}`,cls:'sla-warn',overdue:false,wallText,shiftMs:0,noClock:true,jiraHold:jiraHoldKey};
   // Waiting on a Velma bug: the same hold, for the same reason - until the
@@ -11099,7 +11220,7 @@ function getSLAStatus(id){
   if(!shiftLoaded){
     return{text:'Loading shift data',cls:'sla-warn',overdue:false,wallText,shiftMs:0,noClock:true};
   }
-  const elapsed=shiftElapsedMs(createdMs,Date.now(),agent);
+  const elapsed=shiftElapsedMs(createdMs,slaNow,agent);
   const remaining=slaMs-elapsed;
   const shiftText=fmtDuration(elapsed)+' worked ('+agent+')';
   if(remaining<=0){
@@ -11114,6 +11235,11 @@ function slaTooltip(status){
   // A ticket on Jira hold has no countdown to explain, so the tooltip says
   // what stopped the clock and what would start it again, rather than listing
   // shift hours that are not being counted against anything.
+  if(status.adminHold){
+    return['SLA is frozen'+(status.adminHold.by?' by '+status.adminHold.by:'')+' since '+new Date(Number(status.adminHold.at)).toLocaleString('en-GB')+'.',
+      'Wall clock when frozen: '+(status.wallText||''),
+      'An admin releasing the hold resumes the timer where it stopped.'].join('\n');
+  }
   if(status.jiraHold){
     return['SLA is not counting: this ticket is linked to '+status.jiraHold+'.',
       'Wall clock: '+(status.wallText||''),
@@ -11820,6 +11946,20 @@ document.getElementById('velma-unlink').addEventListener('click',async()=>{
 });
 document.getElementById('velma-input').addEventListener('keydown',e=>{if(e.key==='Enter')document.getElementById('velma-save').click();});
 
+/* Admin freeze of a ticket's SLA clock. The server owns it: it stores the hold,
+   moves the restart point forward on release and pushes both to every board,
+   so this only updates the local copy straight away. */
+async function setTicketSlaHold(id,hold){
+  if(!currentUserIsAdmin())return;
+  if(!hold&&!confirm('Release the hold? The SLA timer resumes where it stopped.'))return;
+  const res=await fetch(`/api/tickets/${encodeURIComponent(id)}/sla-hold`,{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify({hold})}).catch(()=>null);
+  const out=res?await res.json().catch(()=>({})):{};
+  if(!res||!res.ok){showToast(`SLA hold failed: ${out?.error||'network error'}`);return;}
+  if(out.hold)ticketSlaHold[id]=out.hold;else delete ticketSlaHold[id];
+  if(out.slaResetAt)ticketSlaResetAt[id]=Math.max(Number(ticketSlaResetAt[id]||0),Number(out.slaResetAt));
+  renderActiveView();
+  showToast(hold?'SLA frozen - the timer is stopped until an admin releases it':'Hold released - the SLA timer resumes where it stopped','ok');
+}
 /* Google access for the Velma bug sheet.
 
    The sheet is private, so the server reads it as somebody: a service account
@@ -14803,8 +14943,8 @@ async function renderKpiView(){
       kpiCard('At risk',sla.atRisk||0,{tone:(sla.atRisk||0)>0?'warn':'',hint:'Under 25% of target left',category:'atRisk'}),
       kpiCard('SLA met',compliance===null||compliance===undefined?'-':`${compliance}%`,{
         tone:compliance===null||compliance===undefined?'':(compliance>=90?'good':compliance>=75?'warn':'bad'),
-        // on time + late + no SLA = the Resolved card, ticket for ticket.
-        hint:`${sla.met||0} on time · ${sla.breached||0} late`+(sla.unmeasured?` · ${sla.unmeasured} no SLA`:''),category:'slaMeasured'}),
+        // on time + late + no SLA + before reset = the Resolved card, ticket for ticket.
+        hint:`${sla.met||0} on time · ${sla.breached||0} late`+(sla.unmeasured?` · ${sla.unmeasured} no SLA`:'')+(sla.reset?` · ${sla.reset} before SLA reset`:''),category:'slaMeasured'}),
       kpiCard('Avg resolve',(sla.met||0)+(sla.breached||0)?fmtHoursShort(sla.avgResolveShiftHours):'-',{hint:`Median ${fmtHours(sla.medianResolveShiftHours)}`,category:'slaMeasured'}),
       kpiCard('Oldest open',fmtHoursShort(sla.oldestOpenHours),{hint:'Working time',category:'oldestOpen'}),
       kpiCard('Created',flow.created||0,{hint:'In this range',category:'created'}),
@@ -16868,8 +17008,8 @@ function makeCard(ticket,isNew=false){
   const inlineDraft=String(inlineCommentDrafts[id]||'');
   const inlineTags=inlineSelectedTags(id);
   const inlineTagsHtml=[...SUPPORT_AGENTS,...CS_AGENTS].filter((v,i,a)=>a.indexOf(v)===i).map(tag=>`<button class="card-inline-tag${inlineTags.includes(tag)?' selected':''}" data-inline-tag="${esc(tag)}" style="${inlineTags.includes(tag)?`background:${agentColor(tag)};`:''}">@${esc(tag)}</button>`).join('');
-  const recentComments=comments.slice(-2).reverse();
-  const recentCommentsHtml=recentComments.length?recentComments.map(c=>{const tagHtml=(c.tags||[]).map(t=>`<span class="ctag" style="background:${t===CLIENT_TAG?'var(--slate-600)':agentColor(t)}">@${esc(t)}</span>`).join('');return`<div class="card-inline-comment"><div class="card-inline-head"><span class="card-inline-author">${esc(c.author||'SYSTEM')}</span><span class="card-inline-time">${fmtTime(c.ts)}</span>${tagHtml}</div><div class="card-inline-text">${esc(c.text||'')}</div></div>`;}).join(''):'<div class="card-inline-empty">No internal comments yet.</div>';
+  const recentComments=comments.map((c,ci)=>({c,ci})).slice(-2).reverse();
+  const recentCommentsHtml=recentComments.length?recentComments.map(({c,ci})=>{const tagHtml=(c.tags||[]).map(t=>`<span class="ctag" style="background:${t===CLIENT_TAG?'var(--slate-600)':agentColor(t)}">@${esc(t)}</span>`).join('');return`<div class="card-inline-comment"><div class="card-inline-head"><span class="card-inline-author">${esc(c.author||'SYSTEM')}</span><span class="card-inline-time">${fmtTime(c.ts)}</span>${c.editedAt?'<span class="comment-edited">(edited)</span>':''}${tagHtml}${canEditNote(c)?`<button type="button" class="comment-edit-btn" data-inline-edit="${ci}">Edit</button>`:''}</div><div class="card-inline-text">${noteTextHtml(c.text||'')}</div></div>`;}).join(''):'<div class="card-inline-empty">No internal comments yet.</div>';
   const inlineSectionHtml=inlineOpen?`<div class="card-inline-thread"><div class="card-inline-comments">${recentCommentsHtml}</div><div class="card-inline-compose"><textarea class="card-inline-textarea" data-inline-text="${id}" placeholder="Add an internal note or tag a teammate...">${esc(inlineDraft)}</textarea><div class="card-inline-tags">${inlineTagsHtml}</div><div class="card-inline-actions"><button class="btn-out" data-inline-modal="${id}" style="font-size:12px;padding:3px 8px;">Full thread</button><button class="btn-primary" data-inline-post="${id}" style="font-size:12px;padding:4px 10px;">Post comment</button></div></div></div>`:'';
   const subtype=ticketSubtype[id]||'';const catOpts=CATEGORIES.map(c=>`<option value="${esc(c)}"${c===cat?' selected':''}>${esc(c)}</option>`).join('');const subOpts=TICKET_SUBTYPES.filter(x=>x.type===cat).map(x=>`<option value="${x.id}"${x.id===subtype?' selected':''}>${x.id} – ${esc(x.label)}</option>`).join('');
   // Under "Other" the sub-category is typed rather than picked - see
@@ -16947,6 +17087,16 @@ function makeCard(ticket,isNew=false){
   const velmaBtn=velmaLink
     ?`<button class="velma-badge-card${velmaLink.done?' done':''}" data-velma-open="${id}" title="Velma bug ${esc(velmaLink.id)}${velmaLink.status?' - '+esc(velmaLink.status):''}${velmaLink.done?' - SLA running again':' - SLA on hold'} - click to change or remove">Velma ${esc(velmaLink.id)}${velmaStatusHtml}</button>`
     :`<button class="velma-link-btn" data-velma-open="${id}" title="Link to a Velma bug" aria-label="Link to a Velma bug">Velma</button>`;
+  // Admins freeze or release the SLA clock here; everyone else sees the chip
+  // while a ticket is frozen, so a stopped clock is never a mystery.
+  const slaHold=ticketSlaHold[id]||null;
+  const slaHoldTitle=slaHold?`SLA frozen${slaHold.by?' by '+esc(slaHold.by):''} since ${esc(new Date(Number(slaHold.at)).toLocaleString('en-GB'))}`:'';
+  const slaHoldBtn=normalizeTicketStage(ticketState[id]||'new')==='res'&&!slaHold?''
+    :currentUserIsAdmin()
+      ?(slaHold
+        ?`<button class="sla-hold-badge" data-sla-hold="${id}" data-hold="0" title="${slaHoldTitle} - click to release; the timer resumes where it stopped">Frozen</button>`
+        :`<button class="sla-hold-btn" data-sla-hold="${id}" data-hold="1" title="Freeze this ticket's SLA timer" aria-label="Hold the SLA">Hold</button>`)
+      :(slaHold?`<span class="sla-hold-badge" title="${slaHoldTitle}">Frozen</span>`:'');
   const velmaDetailsHtml=velmaLink?`<div class="velma-details${velmaLink.done?' done':''}"><div class="velma-details-head"><strong>Velma bug ${esc(velmaLink.id)}</strong>${velmaLink.status?`<span class="velma-status">${esc(velmaLink.status)}</span>`:''}${velmaLink.url?`<a href="${esc(velmaLink.url)}" target="_blank" rel="noopener">Open row</a>`:''}</div>${velmaLink.done?`<div class="velma-details-note">${esc(velmaDoneNote)}</div>`:''}${velmaFieldsHtml(velmaLink,4)}</div>`:'';
   const jiraLinkedQt=(jiraInfo?.linkedIssues||[]).filter(x=>String(x.key||'').startsWith('QT-'));
   const jiraLinkedHtml=jiraLinkedQt.length?jiraLinkedQt.slice(0,2).map(x=>`<span style="display:inline-flex;align-items:center;gap:4px;border:1px solid var(--indigo-200);border-radius:999px;padding:1px 7px;background:var(--indigo-50);color:var(--indigo-800);">${esc(x.key)} <span style="color:var(--slate-500);">${esc(x.status||'')}</span></span>`).join(' '):'<span style="color:var(--slate-400);">No QT linked</span>';
@@ -17031,6 +17181,7 @@ function makeCard(ticket,isNew=false){
         ${jiraBtn}
         ${jiraEditBtn}
         ${velmaBtn}
+        ${slaHoldBtn}
         ${trControlsHtml}
         ${canEditManual?`<button class="btn-out card-act" data-edit-manual="${id}" title="Edit this manual ticket">Edit</button>`:''}
         ${dupMasterId?'':`<button class="btn-out card-act" data-dup-open="${id}" title="Mark this ticket as a duplicate of another one">Duplicate</button>`}
@@ -17057,7 +17208,8 @@ function makeCard(ticket,isNew=false){
   // its own card mid-gesture leaves that armed drag with nothing to finish
   // against, and the board stops accepting clicks until a reload. Disarm the
   // drag for any gesture that starts on a control, and re-arm it after.
-  const armDrag=ev=>{div.draggable=!ev.target?.closest?.('button,select,a,textarea,input,label,.agent-assign-menu');};
+  // Note text is left out too, so it can be selected and copied.
+  const armDrag=ev=>{div.draggable=!ev.target?.closest?.('button,select,a,textarea,input,label,.agent-assign-menu,.card-inline-text');};
   const rearmDrag=()=>{div.draggable=true;};
   div.addEventListener('pointerdown',armDrag);
   div.addEventListener('mousedown',armDrag);
@@ -17180,6 +17332,7 @@ function makeCard(ticket,isNew=false){
   }
   div.querySelector('[data-jira-edit]')?.addEventListener('click',ev=>{ev.preventDefault();ev.stopPropagation();openJiraModal(id);});
   div.querySelector('[data-velma-open]')?.addEventListener('click',ev=>{ev.preventDefault();ev.stopPropagation();openVelmaModal(id);});
+  div.querySelector('[data-sla-hold]')?.addEventListener('click',ev=>{ev.preventDefault();ev.stopPropagation();setTicketSlaHold(id,ev.currentTarget.dataset.hold==='1');});
   div.querySelector('[data-jira-open]').addEventListener('click',ev=>{ev.preventDefault();ev.stopPropagation();if(jiraKey&&JIRA_URL){window.open(`${JIRA_URL}${encodeURIComponent(jiraKey)}`,'_blank');return;}openJiraModal(id);});
   div.querySelector('[data-hs-open]')?.addEventListener('click',ev=>{ev.preventDefault();ev.stopPropagation();const hsId=ticketHubspotId[id];if(!hsId){showToast('Ticket not synced to HubSpot yet');return;}window.open(`https://app.hubspot.com/contacts/25445053/record/0-5/${encodeURIComponent(hsId)}`,'_blank');});
   div.querySelector('[data-hs-retry]')?.addEventListener('click',async ev=>{ev.preventDefault();ev.stopPropagation();const rs=await syncTicketToHubspot(ticket);if(rs?.ok&&ticketHubspotId[id]){window.open(`https://app.hubspot.com/contacts/25445053/record/0-5/${encodeURIComponent(ticketHubspotId[id])}`,'_blank');showToast('Ticket synced to HubSpot','ok');}else{const reason=rs?.reason||'unknown';if(reason==='missing_company_mapping')showToast('Cannot sync yet: this ticket has no mapped HubSpot company.');else if(reason==='missing_client_email')showToast('Cannot sync yet: no client email found for this ticket.');else if(reason==='api_error')showToast(`HubSpot sync failed: ${rs?.error||'api error'}`);else if(reason==='network_error')showToast(`HubSpot sync network error: ${rs?.error||'unknown'}`);else showToast('Unable to sync this ticket yet.');}renderBoard();});
@@ -17212,6 +17365,10 @@ function makeCard(ticket,isNew=false){
   div.querySelector('[data-inline-toggle]')?.addEventListener('click',ev=>{ev.stopPropagation();inlineCommentOpen[id]=!inlineOpen;if(inlineCommentOpen[id]){markAlertFeedReadForTicket(id,currentUser());clearNewReplyGlow(id);}renderBoard();});
   div.querySelector('[data-inline-bell]')?.addEventListener('click',ev=>{ev.stopPropagation();inlineCommentOpen[id]=true;markAlertFeedReadForTicket(id,currentUser());clearNewReplyGlow(id);renderBoard();});
   div.querySelector('[data-inline-modal]')?.addEventListener('click',ev=>{ev.stopPropagation();clearNewReplyGlow(id);openComModal(ticket);});
+  div.querySelectorAll('[data-inline-edit]').forEach(btn=>btn.addEventListener('click',ev=>{ev.stopPropagation();clearNewReplyGlow(id);openComModal(ticket,{editIndex:Number(btn.dataset.inlineEdit)});}));
+  // Links in notes open in a new tab; the copy button next to each is handled
+  // by the page-wide [data-copy-text] listener. Neither should reach the card.
+  div.querySelector('.card-inline-comments')?.addEventListener('click',ev=>{if(ev.target.closest('.note-link'))ev.stopPropagation();});
   div.querySelector('[data-res-confirm]')?.addEventListener('click',ev=>{ev.stopPropagation();confirmTicketResolved(id);});
   div.querySelector('[data-res-sendback]')?.addEventListener('click',ev=>{ev.stopPropagation();sendResolvedTicketBack(id);});
   div.querySelector('[data-inline-text]')?.addEventListener('input',ev=>{inlineCommentDrafts[id]=ev.target.value;});
@@ -21005,8 +21162,91 @@ if(comTrState.undo||comTrState.lang){comTrState.undo=null;comTrState.lang=null;t
 // rather than patched into the DOM, so they survive this rewrite. A note posted
 // since the translation has no entry and shows as written.
 const trNotes=trTicketIsOn(id)?(trNotesCache.get(id)||{}):null;
-const cs=ticketComments[id]||[];const el=document.getElementById('com-thread');if(!cs.length){el.innerHTML='<div class="no-comments"> No comments yet.</div>';return;}el.innerHTML=cs.map((c,ci)=>{const tagHtml=(c.tags||[]).map(t=>{const bg=t===CLIENT_TAG?'var(--slate-600)':agentColor(t);return`<span class="ctag" style="background:${bg}">@${t}</span>`;}).join('');const bg=ALL_AGENTS.includes(c.author)?agentColor(c.author):'var(--slate-600)';const shown=trNotes&&typeof trNotes[ci]==='string'?trNotes[ci]:c.text;const trMark=trNotes&&typeof trNotes[ci]==='string'&&trNotes[ci]!==c.text?' tr-seg':'';return`<div class="comment-item"><div class="comment-avatar" style="background:${bg}">${esc(c.author)}</div><div class="comment-bubble"><div class="comment-header"><span class="comment-author">${esc(c.author)}</span><span class="comment-time">${fmtTime(c.ts)}</span>${tagHtml?`<div class="comment-tags">${tagHtml}</div>`:''}</div><div class="comment-text${trMark}">${esc(shown)}</div></div></div>`;}).join('');el.scrollTop=el.scrollHeight;}
-function openComModal(ticket){const{email,id}=ticket;comTicketId=id;trResetNotesState(id);trRenderNotesBar();trLoadCachedFor(id);const clientEmail=ticketClientEmail[id];const hs=clientEmail?hsCache[clientEmail]:null;const coStr=hs?.companyName?(hs.inferredVia?'   '+hs.companyName+' ~':'   '+hs.companyName):'';const who=isQuintaSender(email.sender)&&clientEmail?`Client: ${clientEmail}`:email.sender||'';const csOwner=ticketCSOwner[id]||null;const assignee=ticketAssignee[id]||'';const agInfo=csOwner?`${assignee} · CS:${csOwner}`:assignee;document.getElementById('com-title').textContent=email.subject||'(no subject)';document.getElementById('com-subtitle').textContent=`${who}${coStr} · ${agInfo} · ${fmtDate(email.receivedDateTime)}`;document.getElementById('com-input').value='';selectedTags.clear();document.querySelectorAll('.tag-chip').forEach(c=>c.classList.remove('selected'));renderThread(id);document.getElementById('com-modal').classList.add('open');}
+const cs=ticketComments[id]||[];const el=document.getElementById('com-thread');if(!cs.length){el.innerHTML='<div class="no-comments"> No comments yet.</div>';return;}
+// A live-sync redraw while a note is being edited must not throw the draft away.
+const editing=comEditing&&comEditing.ticketId===id?comEditing:null;
+const keepScroll=editing?el.scrollTop:null;
+el.innerHTML=cs.map((c,ci)=>{const tagHtml=(c.tags||[]).map(t=>{const bg=t===CLIENT_TAG?'var(--slate-600)':agentColor(t);return`<span class="ctag" style="background:${bg}">@${t}</span>`;}).join('');const bg=ALL_AGENTS.includes(c.author)?agentColor(c.author):'var(--slate-600)';const shown=trNotes&&typeof trNotes[ci]==='string'?trNotes[ci]:c.text;const trMark=trNotes&&typeof trNotes[ci]==='string'&&trNotes[ci]!==c.text?' tr-seg':'';
+  const isEditing=editing&&editing.ci===ci;
+  const editedHtml=c.editedAt?`<span class="comment-edited" title="Edited ${esc(fmtTime(c.editedAt))}${c.editedBy?' by '+esc(c.editedBy):''}">(edited)</span>`:'';
+  const editBtn=!isEditing&&canEditNote(c)?`<button type="button" class="comment-edit-btn" data-com-edit="${ci}">Edit</button>`:'';
+  const body=isEditing
+    ?`<div class="comment-edit"><textarea class="compose-textarea comment-edit-input" data-com-edit-input="${ci}">${esc(editing.draft)}</textarea><div class="comment-edit-actions"><button type="button" class="btn-out" data-com-edit-cancel="${ci}">Cancel</button><button type="button" class="btn-primary" data-com-edit-save="${ci}">Save</button></div></div>`
+    :`<div class="comment-text${trMark}">${noteTextHtml(shown)}</div>`;
+  return`<div class="comment-item"><div class="comment-avatar" style="background:${bg}">${esc(c.author)}</div><div class="comment-bubble"><div class="comment-header"><span class="comment-author">${esc(c.author)}</span><span class="comment-time">${fmtTime(c.ts)}</span>${editedHtml}${editBtn}${tagHtml?`<div class="comment-tags">${tagHtml}</div>`:''}</div>${body}</div></div>`;}).join('');
+if(editing){el.scrollTop=keepScroll;const input=el.querySelector('[data-com-edit-input]');if(input&&editing.focus){editing.focus=false;input.focus();input.setSelectionRange(input.value.length,input.value.length);input.scrollIntoView({block:'nearest'});}}
+else el.scrollTop=el.scrollHeight;}
+/* Notes are plain text. Links in them are made clickable, with a copy button
+   beside each, so a URL someone pasted can be opened or passed on without
+   having to select it by hand. Everything else is escaped as before. */
+const NOTE_URL_RE=/\bhttps?:\/\/[^\s<>"']+|\bwww\.[^\s<>"']+/gi;
+const NOTE_COPY_SVG='<svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><rect x="5" y="5" width="9" height="9" rx="2" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M11 3.5V3a1.5 1.5 0 0 0-1.5-1.5h-6A1.5 1.5 0 0 0 2 3v6.5A1.5 1.5 0 0 0 3.5 11H4" fill="none" stroke="currentColor" stroke-width="1.6"/></svg>';
+function noteTextHtml(text){
+  const s=String(text||'');
+  let out='',last=0;
+  s.replace(NOTE_URL_RE,(match,offset)=>{
+    let url=match,trail='';
+    // Sentence punctuation after a link is not part of it; a closing bracket
+    // is, when the link opened one (Wikipedia-style URLs).
+    while(/[.,;:!?)\]}]$/.test(url)){
+      const ch=url.slice(-1);
+      if(ch===')'&&(url.match(/\(/g)||[]).length>=(url.match(/\)/g)||[]).length)break;
+      trail=ch+trail;url=url.slice(0,-1);
+    }
+    const href=/^www\./i.test(url)?'https://'+url:url;
+    out+=esc(s.slice(last,offset))
+      +`<a class="note-link" href="${esc(href)}" target="_blank" rel="noopener noreferrer">${esc(url)}</a>`
+      +`<button type="button" class="note-link-copy" data-copy-text="${esc(href)}" title="Copy link" aria-label="Copy link">${NOTE_COPY_SVG}</button>`
+      +esc(trail);
+    last=offset+match.length;
+    return match;
+  });
+  return out+esc(s.slice(last));
+}
+// The author can correct their own note; admins can correct anyone's.
+function canEditNote(c){return !!c&&(currentUserIsAdmin()||(!!c.author&&agentIdentityCode(c.author)===agentIdentityCode(currentUser())));}
+// {ticketId, ci, draft, focus} while a note in the thread modal is being edited.
+let comEditing=null;
+function startNoteEdit(ticketId,ci){
+  const c=(ticketComments[ticketId]||[])[ci];
+  if(!canEditNote(c))return;
+  comEditing={ticketId,ci,draft:String(c.text||''),focus:true};
+  renderThread(ticketId);
+}
+function saveNoteEdit(){
+  if(!comEditing)return;
+  const{ticketId,ci,draft}=comEditing;
+  const c=(ticketComments[ticketId]||[])[ci];
+  if(!canEditNote(c)){comEditing=null;renderThread(ticketId);return;}
+  const text=String(draft||'').trim();
+  if(!text){showToast('A note cannot be empty','warn');return;}
+  comEditing=null;
+  if(text!==String(c.text||'').trim()){
+    c.text=text;
+    if('comment' in c)c.comment=text;
+    c.editedAt=Date.now();
+    c.editedBy=currentUser();
+    // The cached translation was of the old wording.
+    const tr=trNotesCache.get(ticketId);if(tr)delete tr[ci];
+    saveState('ticket_comment_edited');
+    renderBoard();
+    showToast('Note updated','ok');
+  }
+  renderThread(ticketId);
+}
+document.getElementById('com-thread').addEventListener('click',ev=>{
+  const edit=ev.target.closest('[data-com-edit]');
+  if(edit&&comTicketId){startNoteEdit(comTicketId,Number(edit.dataset.comEdit));return;}
+  if(ev.target.closest('[data-com-edit-cancel]')){const id=comEditing?.ticketId;comEditing=null;if(id)renderThread(id);return;}
+  if(ev.target.closest('[data-com-edit-save]'))saveNoteEdit();
+});
+document.getElementById('com-thread').addEventListener('input',ev=>{if(ev.target.matches('[data-com-edit-input]')&&comEditing)comEditing.draft=ev.target.value;});
+document.getElementById('com-thread').addEventListener('keydown',ev=>{
+  if(!ev.target.matches('[data-com-edit-input]'))return;
+  if(ev.key==='Enter'&&(ev.ctrlKey||ev.metaKey)){ev.preventDefault();saveNoteEdit();}
+  else if(ev.key==='Escape'){ev.preventDefault();ev.stopPropagation();const id=comEditing?.ticketId;comEditing=null;if(id)renderThread(id);}
+});
+function openComModal(ticket,opts){const{email,id}=ticket;comTicketId=id;comEditing=null;trResetNotesState(id);trRenderNotesBar();trLoadCachedFor(id);const clientEmail=ticketClientEmail[id];const hs=clientEmail?hsCache[clientEmail]:null;const coStr=hs?.companyName?(hs.inferredVia?'   '+hs.companyName+' ~':'   '+hs.companyName):'';const who=isQuintaSender(email.sender)&&clientEmail?`Client: ${clientEmail}`:email.sender||'';const csOwner=ticketCSOwner[id]||null;const assignee=ticketAssignee[id]||'';const agInfo=csOwner?`${assignee} · CS:${csOwner}`:assignee;document.getElementById('com-title').textContent=email.subject||'(no subject)';document.getElementById('com-subtitle').textContent=`${who}${coStr} · ${agInfo} · ${fmtDate(email.receivedDateTime)}`;document.getElementById('com-input').value='';selectedTags.clear();document.querySelectorAll('.tag-chip').forEach(c=>c.classList.remove('selected'));renderThread(id);document.getElementById('com-modal').classList.add('open');if(opts&&Number.isInteger(opts.editIndex))startNoteEdit(id,opts.editIndex);}
 function postTicketComment(ticketId,text,tags){if(!text||!ticketId)return false;if(!ticketComments[ticketId])ticketComments[ticketId]=[];const author=currentUser();const normalizedTags=[...new Set((Array.isArray(tags)?tags:[]).map(t=>t===CLIENT_TAG?CLIENT_TAG:agentIdentityCode(t)).filter(Boolean))];ticketComments[ticketId].push({author,text,tags:normalizedTags,ts:Date.now()});saveState('ticket_comment_added');renderBoard();if(comTicketId===ticketId)renderThread(ticketId);const at=normalizedTags.filter(t=>t!==CLIENT_TAG);if(at.length)showToast(`Bell alert sent to: ${at.join(', ')}`,'ok');else showToast('Comment posted','ok');return true;}
 function addInternalComment(ticketId,text,tags){if(!postTicketComment(ticketId,text,tags))return;if(comTicketId===ticketId)renderThread(ticketId);}
 document.getElementById('com-post').addEventListener('click',()=>{const text=document.getElementById('com-input').value.trim();if(!text||!comTicketId)return;const tags=[...selectedTags];if(!postTicketComment(comTicketId,text,tags))return;document.getElementById('com-input').value='';selectedTags.clear();document.querySelectorAll('.tag-chip').forEach(c=>c.classList.remove('selected'));if(comTicketId)renderThread(comTicketId);});
