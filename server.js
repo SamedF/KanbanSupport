@@ -996,7 +996,10 @@ function kpiResolvedDate(ticket) {
 /* SLA met % started over for these agents. A ticket they resolved before the
    moment still counts as resolved, and in the resolve times, but not as on
    time or late for them. */
-const SLA_COUNTED_FROM_BY_AGENT = { SFA: new Date('2026-10-15T16:55:00+01:00').getTime() };
+// SFA's reset of 2026-10-15 is covered by SLA_BASELINE_AT now: everything
+// resolved before the baseline counts as met, for everyone. Add
+// { CODE: <ms> } to start one agent's percentage over on top of that.
+const SLA_COUNTED_FROM_BY_AGENT = {};
 // True when every agent the figure is about has had their SLA reset since this
 // ticket was resolved, so it drops out of that figure's met/late count.
 function kpiSlaResetFor(ticket, agentKeys) {
@@ -2157,7 +2160,24 @@ function shiftElapsedMs(fromMs, toMs, agentCode) {
 // reported under its own heading and kept out of the percentage - the same
 // treatment no_clock already gets, and for the same reason.
 
+/* The SLA baseline. Everything resolved before this moment is counted as met
+   (the board's SLA history from launch was not measured reliably), and every
+   ticket still open at it had its clock restarted from it
+   (restartOpenSlaClocksAtBaselineOnce). From here on, every figure is live.
+   SLA_BASELINE_AT overrides; empty turns it off. */
+const SLA_BASELINE_AT = (() => {
+  const raw = String(process.env.SLA_BASELINE_AT ?? '2026-10-16T08:00:00+01:00').trim();
+  const ms = raw ? new Date(raw).getTime() : NaN;
+  return Number.isFinite(ms) ? ms : 0;
+})();
 function ticketSlaSnapshot(ticket, now = Date.now()) {
+  const snapshot = liveTicketSlaSnapshot(ticket, now);
+  if (snapshot.state === 'breached' && SLA_BASELINE_AT && (kpiResolvedDate(ticket)?.getTime() ?? Infinity) < SLA_BASELINE_AT) {
+    return { ...snapshot, state: 'met', overdueMs: 0, baseline: true };
+  }
+  return snapshot;
+}
+function liveTicketSlaSnapshot(ticket, now = Date.now()) {
   const arrivedMs = ticket?.createdAt ? new Date(ticket.createdAt).getTime() : NaN;
   const resetMs = ticket?.slaResetAt ? new Date(ticket.slaResetAt).getTime() : NaN;
   // The later of the two: a thread that has been replied to is measured from
@@ -2170,9 +2190,16 @@ function ticketSlaSnapshot(ticket, now = Date.now()) {
   const base = { targetHours, resolved, state: 'no_clock', shiftMs: 0, wallMs: 0, ageMs: 0, overdueMs: 0 };
   if (!Number.isFinite(createdMs)) return base;
 
-  const endMs = resolved
+  // Frozen by an admin: the clock stopped when the hold began. Released, the
+  // restart point moves forward by the hold (see /api/tickets/:id/sla-hold).
+  const holdMs = ticket?.slaHoldAt ? new Date(ticket.slaHoldAt).getTime() : NaN;
+  const held = Number.isFinite(holdMs);
+  const endMs = Math.min(resolved
     ? (kpiResolvedDate(ticket)?.getTime() ?? now)
-    : now;
+    : now, held ? Math.max(holdMs, createdMs) : Infinity);
+  if (held && !resolved) {
+    return { ...base, state: 'admin_hold', ageMs: businessMsInRange(createdMs, endMs), wallMs: Math.max(0, endMs - createdMs), heldBy: ticket.slaHoldBy || null };
+  }
   const wallMs = Math.max(0, (Number.isFinite(endMs) ? endMs : now) - createdMs);
   // The ticket's age in the hours the SLA runs: no nights, lunch or weekends.
   // What "oldest open" and "h open" report, so a Monday dashboard does not
@@ -2578,6 +2605,8 @@ async function safeWriteState(state, actor = null) {
   keepServerOwned('ticketJira');
   keepServerOwned('ticketDuplicateOf');
   keepServerOwned('ticketVelmaBug');
+  // Only the admin hold endpoint sets or clears a freeze.
+  keepServerOwned('ticketSlaHold');
 
   // The point each ticket's SLA clock counts from only ever moves forward: a
   // client reply, the end of a hold, or a reset all push it later, and nothing
@@ -2753,6 +2782,7 @@ async function hydrateStateFromDatabase(baseState = {}) {
   state.ticketHubspotId = (state.ticketHubspotId && typeof state.ticketHubspotId === 'object') ? state.ticketHubspotId : {};
   state.ticketDuplicateOf = (state.ticketDuplicateOf && typeof state.ticketDuplicateOf === 'object') ? state.ticketDuplicateOf : {};
   state.ticketVelmaBug = (state.ticketVelmaBug && typeof state.ticketVelmaBug === 'object') ? state.ticketVelmaBug : {};
+  state.ticketSlaHold = (state.ticketSlaHold && typeof state.ticketSlaHold === 'object') ? state.ticketSlaHold : {};
   state.ticketArchived = (state.ticketArchived && typeof state.ticketArchived === 'object') ? state.ticketArchived : {};
   state.manualCSOverride = (state.manualCSOverride && typeof state.manualCSOverride === 'object') ? state.manualCSOverride : {};
   state.ticketCreatedBy = (state.ticketCreatedBy && typeof state.ticketCreatedBy === 'object') ? state.ticketCreatedBy : {};
@@ -2824,6 +2854,9 @@ async function hydrateStateFromDatabase(baseState = {}) {
     if (ticket.duplicateOfExternalId) state.ticketDuplicateOf[externalId] = ticket.duplicateOfExternalId;
     if (ticket.velmaBugId && !state.ticketVelmaBug[externalId]) {
       state.ticketVelmaBug[externalId] = { id: ticket.velmaBugId, ...((ticket.velmaBugRow && typeof ticket.velmaBugRow === 'object') ? ticket.velmaBugRow : {}) };
+    }
+    if (ticket.slaHoldAt && !state.ticketSlaHold[externalId]) {
+      state.ticketSlaHold[externalId] = { at: new Date(ticket.slaHoldAt).getTime(), by: ticket.slaHoldBy || null };
     }
     if (ticket.hubspotTicketId) state.ticketHubspotId[externalId] = ticket.hubspotTicketId;
     if (ticket.displayNumber) state.ticketNumbers[externalId] = ticket.displayNumber;
@@ -4555,7 +4588,9 @@ app.get('/api/shift/state', requireAuth, (req, res) => {
   const me = shiftAgentFromRequest(req, req.query?.agent);
   const agents = {};
   Object.keys(shiftStore.agents).forEach((code) => { agents[code] = shiftSnapshotFor(code); });
-  return res.json({ me, agents, idleMs: SHIFT_IDLE_MS, serverNow: Date.now(), leave: activeAgentLeave() });
+  // slaTimeZone: the zone the SLA's working hours are read in, so every board
+  // counts 08:00-12:00 / 14:00-17:00 the same way the server does.
+  return res.json({ me, agents, idleMs: SHIFT_IDLE_MS, serverNow: Date.now(), slaTimeZone: process.env.TZ || null, leave: activeAgentLeave() });
 });
 
 // Re-run the rebuild of shift history from the activity log (admins). Safe to
@@ -5473,6 +5508,109 @@ app.delete('/api/velma-bug/link/:kanbanTicketId', requireAuth, async (req, res) 
   }
 });
 
+/* Admin freeze of a ticket's SLA clock. Body: { hold: true | false }.
+
+   Held, the clock stops where it is: the badge says who froze it, and the
+   ticket drops out of overdue and at risk (admin_hold in ticketSlaSnapshot).
+   Released, it resumes from where it stopped - the restart point moves
+   forward by the working time the hold lasted, like the end of any other
+   hold - so the freeze neither counts against the agent nor gives time back. */
+app.post('/api/tickets/:externalId/sla-hold', requireAdmin, async (req, res) => {
+  try {
+    const externalId = String(req.params.externalId || '').trim();
+    if (!externalId) return res.status(400).json({ error: 'missing_ticket' });
+    const hold = req.body?.hold === true;
+    const actor = String(req.session.username || '').trim().toUpperCase() || null;
+    const now = Date.now();
+    const state = safeReadState();
+    const current = state.ticketSlaHold?.[externalId] || null;
+    if (hold && current) return res.json({ ok: true, hold: current });
+    if (!hold && !current) return res.json({ ok: true, hold: null });
+
+    const value = hold ? { at: now, by: actor } : null;
+    const entries = [{ field: 'ticketSlaHold', id: externalId, value }];
+    const resumeAt = hold ? null : slaResumePointAfterHold(state, externalId, Number(current.at || 0), now);
+    if (resumeAt) entries.push({ field: 'ticketSlaResetAt', id: externalId, value: resumeAt });
+    writeServerFieldsIntoState(entries);
+
+    const ticket = await findTicketRecordByKanbanId(externalId).catch(() => null);
+    if (ticket) {
+      await prisma.ticket.update({
+        where: { id: ticket.id },
+        data: {
+          slaHoldAt: hold ? new Date(now) : null,
+          slaHoldBy: hold ? actor : null,
+          ...(resumeAt ? { slaResetAt: new Date(resumeAt) } : {})
+        }
+      });
+      await createTicketAuditEvent({
+        ticketId: ticket.id,
+        userId: req.session.userId || null,
+        eventType: hold ? 'ticket_sla_hold' : 'ticket_sla_released',
+        oldValue: hold ? null : new Date(Number(current.at || now)).toISOString(),
+        newValue: hold ? new Date(now).toISOString() : null,
+        metadata: { actor, ...(resumeAt ? { slaResetAt: new Date(resumeAt).toISOString() } : {}) }
+      }).catch(() => null);
+    }
+    return res.json({ ok: true, hold: value, slaResetAt: resumeAt || null });
+  } catch (error) {
+    console.error('SLA hold failed:', error);
+    return res.status(500).json({ error: String(error.message || error) });
+  }
+});
+
+/* One-off at the SLA baseline: every ticket still open restarts its clock
+   from SLA_BASELINE_AT, so the backlog is measured live from there instead
+   of carrying time from before it. The restart point only ever moves
+   forward, so a ticket replied to after the baseline keeps its later point.
+   Run by an admin (POST /api/admin/sla/restart-at-baseline, the button in
+   Manage Users), once per database - a SyncLog row records it. */
+const SLA_BASELINE_SYNC_TYPE = 'sla_baseline_restart_v1';
+async function restartOpenSlaClocksAtBaselineOnce() {
+  if (!SLA_BASELINE_AT) return { ok: false, error: 'no_baseline' };
+  const done = await prisma.syncLog.findFirst({ where: { provider: 'kanban', syncType: SLA_BASELINE_SYNC_TYPE, status: 'success' } });
+  if (done) return { ok: true, alreadyDone: true, at: done.createdAt, message: done.message };
+  const state = safeReadState();
+  const stages = (state.ticketState && typeof state.ticketState === 'object') ? state.ticketState : {};
+  const resetAt = (state.ticketSlaResetAt && typeof state.ticketSlaResetAt === 'object') ? state.ticketSlaResetAt : {};
+  const createdAt = (state.ticketCreatedAt && typeof state.ticketCreatedAt === 'object') ? state.ticketCreatedAt : {};
+  const ids = Object.keys(stages).filter((id) => {
+    if (normalizeDbStatusForBoard(stages[id]) === 'res' || stages[id] === 'res') return false;
+    const base = Math.max(new Date(createdAt[id] || 0).getTime() || 0, Number(resetAt[id] || 0));
+    return base < SLA_BASELINE_AT;
+  });
+  if (ids.length) writeServerFieldsIntoState(ids.map(id => ({ field: 'ticketSlaResetAt', id, value: SLA_BASELINE_AT })));
+  await prisma.syncLog.create({
+    data: {
+      provider: 'kanban',
+      syncType: SLA_BASELINE_SYNC_TYPE,
+      status: 'success',
+      message: `SLA clock restarted at the baseline for ${ids.length} open ticket(s).`,
+      metadata: { baselineAt: new Date(SLA_BASELINE_AT).toISOString(), tickets: ids }
+    }
+  }).catch((error) => console.error('SLA baseline marker write failed:', error?.message || error));
+  // The database copy too, for tickets whose row is open - by status rather
+  // than by the state's ids alone, so a row the state does not hold is included.
+  const rows = await prisma.ticket.updateMany({
+    where: {
+      NOT: [{ status: 'Resolved' }],
+      OR: [{ slaResetAt: null }, { slaResetAt: { lt: new Date(SLA_BASELINE_AT) } }],
+      createdAt: { lt: new Date(SLA_BASELINE_AT) }
+    },
+    data: { slaResetAt: new Date(SLA_BASELINE_AT) }
+  }).catch((error) => { console.error('SLA baseline database update failed:', error?.message || error); return { count: 0 }; });
+  console.log(`SLA baseline: clock restarted for ${ids.length} open ticket(s) on the board, ${rows.count} row(s) in the database.`);
+  return { ok: true, board: ids.length, database: rows.count, baselineAt: new Date(SLA_BASELINE_AT).toISOString() };
+}
+app.post('/api/admin/sla/restart-at-baseline', requireAdmin, async (req, res) => {
+  try {
+    return res.json(await restartOpenSlaClocksAtBaselineOnce());
+  } catch (error) {
+    console.error('SLA baseline restart failed:', error);
+    return res.status(500).json({ error: String(error.message || error) });
+  }
+});
+
 /* Keeping linked bugs in step with the sheet.
 
    Every few minutes the sheet is read once and each linked ticket's row is
@@ -6249,6 +6387,9 @@ const KPI_TICKET_SELECT = {
   velmaBugId: true,
   // The bug's copied row, for its status: a DONE bug no longer holds the SLA.
   velmaBugRow: true,
+  // Frozen by an admin: the clock stopped at slaHoldAt.
+  slaHoldAt: true,
+  slaHoldBy: true,
   duplicateOfExternalId: true,
   createdAt: true,
   updatedAt: true,
@@ -6447,9 +6588,9 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
     const BACKLOG_KEY_BY_STATE = {
       overdue: 'overdue', at_risk: 'atRisk', on_track: 'onTrack',
       no_clock: 'noClock', jira_hold: 'jiraHold', velma_hold: 'velmaHold', contact_hold: 'contactHold',
-      leave_hold: 'leaveHold'
+      leave_hold: 'leaveHold', admin_hold: 'adminHold'
     };
-    const backlog = { overdue: 0, atRisk: 0, onTrack: 0, noClock: 0, jiraHold: 0, velmaHold: 0, contactHold: 0, leaveHold: 0 };
+    const backlog = { overdue: 0, atRisk: 0, onTrack: 0, noClock: 0, jiraHold: 0, velmaHold: 0, contactHold: 0, leaveHold: 0, adminHold: 0 };
     const overdueRows = [];
     let oldestOpenMs = 0;
 
@@ -6621,6 +6762,10 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
         // Reported so they are visibly parked rather than just missing from
         // the other three figures.
         jiraHold: backlog.jiraHold,
+        // Open tickets an admin has frozen.
+        adminHold: backlog.adminHold,
+        // Resolved before this moment counts as met; measured live after it.
+        baselineAt: SLA_BASELINE_AT ? new Date(SLA_BASELINE_AT).toISOString() : null,
         // Same, for tickets waiting on a Velma bug.
         velmaHold: backlog.velmaHold,
         // Open tickets whose clock is frozen while they wait on the client.
@@ -10277,6 +10422,8 @@ const LIVE_SYNC_FIELDS = [
   'ticketDuplicateOf', 'ticketSnooze', 'ticketSlaResetAt',
   // A Velma bug link puts the SLA on hold, so every board has to show it.
   'ticketVelmaBug',
+  // So does an admin freeze.
+  'ticketSlaHold',
   // A CS send-back lands in the support agent's My Alerts, so it has to reach
   // their open board now rather than on their next reload.
   'ticketSendBackAlerts',
