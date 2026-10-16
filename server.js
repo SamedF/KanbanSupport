@@ -5734,6 +5734,38 @@ async function restartOpenSlaClocksAtBaselineOnce() {
   console.log(`SLA baseline: clock restarted for ${ids.length} open ticket(s) on the board, ${rows.count} row(s) in the database.`);
   return { ok: true, board: ids.length, database: rows.count, baselineAt: new Date(SLA_BASELINE_AT).toISOString() };
 }
+/* One-off: a fresh SLA for #13661 and #20500, from the moment this runs.
+   Found by their board number, in the state and in the database. Once per
+   database, recorded as a SyncLog row, like the baseline restart above. */
+const SLA_MANUAL_RESET_SYNC_TYPE = 'sla_manual_reset_13661_20500_v1';
+const SLA_MANUAL_RESET_NUMBERS = [13661, 20500];
+async function resetSlaOfNamedTicketsOnce() {
+  const done = await prisma.syncLog.findFirst({ where: { provider: 'kanban', syncType: SLA_MANUAL_RESET_SYNC_TYPE, status: 'success' } });
+  if (done) return;
+  const now = Date.now();
+  const state = safeReadState();
+  const numbers = (state.ticketNumbers && typeof state.ticketNumbers === 'object') ? state.ticketNumbers : {};
+  const rows = await prisma.ticket.findMany({ where: { displayNumber: { in: SLA_MANUAL_RESET_NUMBERS } }, select: { externalId: true } });
+  const ids = [...new Set([
+    ...Object.keys(numbers).filter(id => SLA_MANUAL_RESET_NUMBERS.includes(Number(numbers[id]))),
+    ...rows.map(row => row.externalId).filter(Boolean)
+  ])];
+  if (ids.length) writeServerFieldsIntoState(ids.map(id => ({ field: 'ticketSlaResetAt', id, value: now })));
+  await prisma.syncLog.create({
+    data: {
+      provider: 'kanban',
+      syncType: SLA_MANUAL_RESET_SYNC_TYPE,
+      status: 'success',
+      message: `SLA reset for ${ids.length} ticket(s) (#${SLA_MANUAL_RESET_NUMBERS.join(', #')}).`,
+      metadata: { at: new Date(now).toISOString(), tickets: ids }
+    }
+  }).catch((error) => console.error('SLA manual reset marker write failed:', error?.message || error));
+  if (ids.length) {
+    await prisma.ticket.updateMany({ where: { externalId: { in: ids } }, data: { slaResetAt: new Date(now) } })
+      .catch((error) => console.error('SLA manual reset database update failed:', error?.message || error));
+  }
+  console.log(`SLA reset for ${ids.length} ticket(s) of #${SLA_MANUAL_RESET_NUMBERS.join(', #')}.`);
+}
 app.post('/api/admin/sla/restart-at-baseline', requireAdmin, async (req, res) => {
   try {
     const out = await restartOpenSlaClocksAtBaselineOnce();
@@ -15022,6 +15054,8 @@ const server = app.listen(PORT, () => {
   setInterval(() => { releaseExpiredSnoozes().catch(error => console.error('Snooze release failed:', error?.message || error)); }, 60000).unref?.();
   restartOpenSlaClocksAtBaselineOnce()
     .catch((error) => console.error('SLA baseline restart failed:', error?.message || error))
+    .then(() => resetSlaOfNamedTicketsOnce())
+    .catch((error) => console.error('SLA manual reset failed:', error?.message || error))
     .then(() => currentKpiSnapshot())
     .catch((error) => console.error('KPI snapshot failed:', error?.message || error))
     .finally(scheduleKpiSnapshots);
