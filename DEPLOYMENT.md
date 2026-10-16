@@ -821,6 +821,23 @@ timer or on board changes; its header says what time the figures are from and
 when they next update. The snapshot is kept in memory, so a server that starts
 between checkpoints takes one at start-up, and the header shows that time.
 
+### Snoozed tickets
+
+A snoozed ticket's SLA is **held**: the badge reads "SLA on hold - snoozed" and
+the KPI dashboard counts it as `snoozeHold`, out of overdue and at risk. When
+the snooze ends (woken by hand, by a client reply, by moving the ticket, or by
+running out), the restart point moves forward so the clock resumes with the
+working time it had when the ticket was snoozed, like the admin hold.
+Re-snoozing a ticket that is already snoozed keeps it as one hold. A snooze
+that runs out while no board is open is ended by the server within a minute.
+
+A support agent can have at most **5** snoozed tickets at once
+(`SNOOZE_MAX_PER_AGENT`), counted on the ticket's assignee, whoever pressed
+Snooze. The board refuses the sixth up front, and the server drops it from any
+save that gets through anyway. Snoozes already there when the limit shipped are
+left alone; no new one is accepted until that agent is back under 5.
+Unassigned tickets, and tickets held by CS, are not limited.
+
 ## One-time SLA reset for Waiting on Contact
 
 On its first start after this deploy, the server restarts the SLA clock of every

@@ -2201,6 +2201,15 @@ function liveTicketSlaSnapshot(ticket, now = Date.now()) {
   if (held && !resolved) {
     return { ...base, state: 'admin_hold', ageMs: businessMsInRange(createdMs, endMs), wallMs: Math.max(0, endMs - createdMs), heldBy: ticket.slaHoldBy || null };
   }
+  // Snoozed: held the same way, from the moment it was snoozed. When the
+  // snooze ends the restart point moves forward (applySnoozeRules), so the
+  // clock resumes where it stopped. ticket.snooze is the board's entry, laid
+  // on the row by the KPI snapshot.
+  const snoozeAt = Number(ticket?.snooze?.at || 0);
+  if (!resolved && snoozeAt && Number(ticket.snooze.until) > now) {
+    const frozenAt = Math.min(now, Math.max(snoozeAt, createdMs));
+    return { ...base, state: 'snooze_hold', ageMs: businessMsInRange(createdMs, frozenAt), wallMs: Math.max(0, frozenAt - createdMs) };
+  }
   const wallMs = Math.max(0, (Number.isFinite(endMs) ? endMs : now) - createdMs);
   // The ticket's age in the hours the SLA runs: no nights, lunch or weekends.
   // What "oldest open" and "h open" report, so a Monday dashboard does not
@@ -2621,6 +2630,10 @@ async function safeWriteState(state, actor = null) {
       if (Number(at || 0) > Number(mergedSlaReset[ticketId] || 0)) mergedSlaReset[ticketId] = Number(at);
     });
   nextState.ticketSlaResetAt = mergedSlaReset;
+  // After the restart points are merged, so the end of a snooze moves them on
+  // from the latest one. A stale save keeps the stored snoozes (ticketSnooze
+  // is not one of its reconciled fields), so there is nothing to apply.
+  if (!isStale) refusedChanges.push(...applySnoozeRules(currentState, nextState));
 
   nextState.ticketHubspotId = mergeTicketMap('ticketHubspotId');
   nextState.manualCSOverride = mergeTicketMap('manualCSOverride');
@@ -5431,6 +5444,100 @@ function slaResumePointAfterHold(state, externalId, since, now) {
   return businessPointBefore(now, businessMsInRange(base, since));
 }
 
+/* Snoozes. The board writes them, but two rules are kept here, where every
+   save passes, rather than trusted to each tab:
+   - a support agent has at most SNOOZE_MAX_PER_AGENT snoozed tickets at once,
+     counted on the ticket's assignee whoever pressed Snooze. A snooze over the
+     limit is dropped from the save and reported back as refused; snoozes that
+     were already there when the limit came in are left alone.
+   - a snoozed ticket's SLA is held: it counts as snooze_hold while snoozed,
+     and when the snooze ends - cleared, replaced, or run out - the restart
+     point moves forward so the clock resumes with exactly the working time it
+     had when the ticket was snoozed, like the admin hold. */
+const SNOOZE_MAX_PER_AGENT = Math.max(1, Number(process.env.SNOOZE_MAX_PER_AGENT || 5) || 5);
+function snoozeIsActive(entry, now) { return !!entry && Number(entry.at) > 0 && Number(entry.until) > now; }
+// The support agent a snoozed ticket counts against, or null for a ticket with
+// none (unassigned, or held by someone outside the support team).
+function snoozeLimitAgent(state, id) {
+  const code = String(state.ticketAssignee?.[id] || '').trim().toUpperCase();
+  return SUPPORT_AGENT_CODES.has(code) ? code : null;
+}
+// The restart point a snooze held since `since` and ended at `endedAt` leaves.
+function snoozeResumePoint(state, id, since, endedAt) {
+  const resumeAt = slaResumePointAfterHold(state, id, since, endedAt);
+  return resumeAt && resumeAt > Number(state.ticketSlaResetAt?.[id] || 0) ? resumeAt : null;
+}
+// Applied to a save's merged state, after ticketSlaResetAt is merged. Mutates
+// nextState.ticketSnooze and nextState.ticketSlaResetAt; returns what it refused.
+function applySnoozeRules(currentState, nextState, now = Date.now()) {
+  const prev = (currentState.ticketSnooze && typeof currentState.ticketSnooze === 'object') ? currentState.ticketSnooze : {};
+  const next = { ...((nextState.ticketSnooze && typeof nextState.ticketSnooze === 'object') ? nextState.ticketSnooze : {}) };
+  nextState.ticketSlaResetAt = (nextState.ticketSlaResetAt && typeof nextState.ticketSlaResetAt === 'object') ? nextState.ticketSlaResetAt : {};
+  // A snooze that ran out stays out: a tab that has not swept it yet must not
+  // bring it back.
+  for (const [id, entry] of Object.entries(next)) if (!snoozeIsActive(entry, now)) delete next[id];
+
+  // Every snooze that ended since the last save gives its held time back.
+  for (const [id, entry] of Object.entries(prev)) {
+    const since = Number(entry?.at || 0);
+    if (!since) continue;
+    const after = next[id];
+    const replaced = !!after && Number(after.at) !== since;
+    if (after && !replaced) continue;
+    const endedAt = Math.min(now, Number(entry.until) || now, replaced ? (Number(after.at) || now) : now);
+    const resumeAt = snoozeResumePoint(nextState, id, since, endedAt);
+    if (resumeAt) nextState.ticketSlaResetAt[id] = resumeAt;
+  }
+
+  // The limit, on snoozes this save adds. Kept ones count first; new ones are
+  // let in oldest first while there is room.
+  const counts = new Map();
+  const added = [];
+  for (const [id, entry] of Object.entries(next)) {
+    const agent = snoozeLimitAgent(nextState, id);
+    if (!agent) continue;
+    const kept = prev[id] && Number(prev[id].at) === Number(entry.at) && snoozeIsActive(prev[id], now);
+    if (kept) counts.set(agent, (counts.get(agent) || 0) + 1);
+    else added.push({ id, entry, agent });
+  }
+  const refused = [];
+  added.sort((a, b) => Number(a.entry.at) - Number(b.entry.at));
+  for (const { id, agent } of added) {
+    const count = counts.get(agent) || 0;
+    if (count >= SNOOZE_MAX_PER_AGENT) {
+      delete next[id];
+      refused.push({ field: 'ticketSnooze', id, claims: [agent], limit: SNOOZE_MAX_PER_AGENT });
+    } else counts.set(agent, count + 1);
+  }
+  nextState.ticketSnooze = next;
+  if (refused.length) console.warn(`[snooze] refused ${refused.length} snooze(s) over the limit of ${SNOOZE_MAX_PER_AGENT}: ${refused.slice(0, 5).map(r => `${r.id} (${r.claims[0]})`).join(', ')}`);
+  return refused;
+}
+// A snooze that runs out while no board is open still has to give its held
+// time back, and leave the board, without waiting for someone to save.
+async function releaseExpiredSnoozes() {
+  const state = safeReadState();
+  const now = Date.now();
+  const entries = [];
+  const resumed = [];
+  for (const [id, entry] of Object.entries(state.ticketSnooze || {})) {
+    if (!entry || Number(entry.until) > now) continue;
+    entries.push({ field: 'ticketSnooze', id, value: null });
+    const since = Number(entry.at || 0);
+    const resumeAt = since ? snoozeResumePoint(state, id, since, Math.min(now, Number(entry.until) || now)) : null;
+    if (resumeAt) {
+      entries.push({ field: 'ticketSlaResetAt', id, value: resumeAt });
+      resumed.push({ id, resumeAt });
+    }
+  }
+  if (!entries.length) return;
+  writeServerFieldsIntoState(entries);
+  for (const { id, resumeAt } of resumed) {
+    await prisma.ticket.updateMany({ where: { externalId: id }, data: { slaResetAt: new Date(resumeAt) } })
+      .catch(error => console.error('Snooze SLA resume write failed:', error?.message || error));
+  }
+}
+
 // Write several server-owned values into the board state in one synchronous
 // read-modify-write, so no board save can land in between, and push them to
 // every open board. Each entry is { field, id, value }; null removes.
@@ -6457,6 +6564,12 @@ async function takeKpiSnapshot(checkpoint) {
     prisma.ticket.findMany({ where: { NOT: [{ category: { equals: 'Spam', mode: 'insensitive' } }] }, select: KPI_TICKET_SELECT, orderBy: [{ createdAt: 'desc' }] }),
     prisma.ticket.findMany({ where: { category: { equals: 'Spam', mode: 'insensitive' } }, select: KPI_TICKET_SELECT })
   ]);
+  // Snoozes live in the board state, not on the row.
+  const snoozes = safeReadState().ticketSnooze || {};
+  for (const t of tickets) {
+    const entry = snoozes[t.externalId];
+    if (entry && Number(entry.at) > 0) t.snooze = { at: Number(entry.at), until: Number(entry.until) || 0 };
+  }
   kpiSnapshot = { checkpoint, takenAt: Date.now(), tickets, spam };
   console.log(`KPI snapshot for ${new Date(checkpoint).toISOString()}: ${tickets.length} ticket(s), ${spam.length} spam.`);
   return kpiSnapshot;
@@ -6695,9 +6808,9 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
     const BACKLOG_KEY_BY_STATE = {
       overdue: 'overdue', at_risk: 'atRisk', on_track: 'onTrack',
       no_clock: 'noClock', jira_hold: 'jiraHold', velma_hold: 'velmaHold', contact_hold: 'contactHold',
-      leave_hold: 'leaveHold', admin_hold: 'adminHold'
+      leave_hold: 'leaveHold', admin_hold: 'adminHold', snooze_hold: 'snoozeHold'
     };
-    const backlog = { overdue: 0, atRisk: 0, onTrack: 0, noClock: 0, jiraHold: 0, velmaHold: 0, contactHold: 0, leaveHold: 0, adminHold: 0 };
+    const backlog = { overdue: 0, atRisk: 0, onTrack: 0, noClock: 0, jiraHold: 0, velmaHold: 0, contactHold: 0, leaveHold: 0, adminHold: 0, snoozeHold: 0 };
     const overdueRows = [];
     let oldestOpenMs = 0;
 
@@ -6869,6 +6982,8 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
         jiraHold: backlog.jiraHold,
         // Open tickets an admin has frozen.
         adminHold: backlog.adminHold,
+        // Open tickets that are snoozed, so held.
+        snoozeHold: backlog.snoozeHold,
         // Resolved before this moment counts as met; measured live after it.
         baselineAt: SLA_BASELINE_AT ? new Date(SLA_BASELINE_AT).toISOString() : null,
         // Same, for tickets waiting on a Velma bug.
@@ -14903,6 +15018,8 @@ const server = app.listen(PORT, () => {
   // counts as met, and what was still open is measured from it. Once per
   // database, so it no longer waits on an admin pressing the button. The first
   // KPI snapshot comes after it, so it sees the restarted clocks.
+  // Snoozes that run out give their held SLA time back even with no board open.
+  setInterval(() => { releaseExpiredSnoozes().catch(error => console.error('Snooze release failed:', error?.message || error)); }, 60000).unref?.();
   restartOpenSlaClocksAtBaselineOnce()
     .catch((error) => console.error('SLA baseline restart failed:', error?.message || error))
     .then(() => currentKpiSnapshot())

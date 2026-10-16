@@ -10033,7 +10033,9 @@ async function apiSaveState(payload){
       const refused=Array.isArray(out?.refused)?out.refused:[];
       if(refused.length){
         const fields=[...new Set(refused.map(r=>String(r?.field||'')))];
-        const what=fields.includes('ticketAssignee')&&fields.length===1
+        const what=fields.includes('ticketSnooze')&&fields.length===1
+          ?`At most ${SNOOZE_MAX_PER_AGENT} snoozed tickets per support agent - that snooze was not saved`
+          :fields.includes('ticketAssignee')&&fields.length===1
           ?'Support assignment is CS-only - that change was not saved'
           :fields.includes('ticketCSOwner')&&fields.length===1
             ?'Changing the CS owner is admin-only - that change was not saved'
@@ -11166,6 +11168,15 @@ function getSLAStatus(id){
     const frozenWall=fmtDuration(Math.max(0,frozenAt-createdMs))+(resetAt?' since the client\'s last reply':' since received');
     return{text:`SLA frozen${adminHold.by?' by '+adminHold.by:''}`,cls:'sla-warn',overdue:false,wallText:frozenWall,shiftMs:0,noClock:true,adminHold};
   }
+  /* Snoozed: held from the moment it was snoozed. When the snooze ends the
+     server moves the restart point forward (applySnoozeRules), so the clock
+     resumes where it stopped. Mirrors snooze_hold in ticketSlaSnapshot. */
+  if(isSnoozed(id,slaNow)){
+    const snoozeHold=snoozeEntry(id);
+    const frozenAt=Math.min(slaNow,Math.max(Number(snoozeHold.at)||slaNow,createdMs));
+    const frozenWall=fmtDuration(Math.max(0,frozenAt-createdMs))+(resetAt?' since the client\'s last reply':' since received');
+    return{text:'SLA on hold - snoozed',cls:'sla-warn',overdue:false,wallText:frozenWall,shiftMs:0,noClock:true,snoozeHold};
+  }
   const jiraHoldKey=canonicalJiraKey(ticketJira[id]);
   if(jiraHoldKey)return{text:`SLA on hold - ${jiraHoldKey}`,cls:'sla-warn',overdue:false,wallText,shiftMs:0,noClock:true,jiraHold:jiraHoldKey};
   // Waiting on a Velma bug: the same hold, for the same reason - until the
@@ -11230,6 +11241,11 @@ function slaTooltip(status){
     return['SLA is not counting: this ticket is linked to Velma bug '+status.velmaHold+'.',
       'Wall clock: '+(status.wallText||''),
       'Unlinking the bug resumes the clock where it stopped.'].join('\n');
+  }
+  if(status.snoozeHold){
+    return['SLA is on hold: this ticket is snoozed until '+new Date(Number(status.snoozeHold.until)).toLocaleString('en-GB')+'.',
+      'Wall clock when snoozed: '+(status.wallText||''),
+      'When the snooze ends the timer resumes where it stopped.'].join('\n');
   }
   if(status.leaveHold){
     return['SLA is on hold: '+status.leaveHold+' is off'+(agentLeaveText(status.leaveHold).replace(/^Off/,'')||'')+'.',
@@ -17469,10 +17485,32 @@ function snoozeOptions(){
   );
   return opts;
 }
-function snoozeTicket(id,until,note){
+/* At most SNOOZE_MAX_PER_AGENT snoozed tickets per support agent, counted on
+   the ticket's assignee. The server enforces it (applySnoozeRules); this is
+   the same check up front, so the agent is told before the save. */
+const SNOOZE_MAX_PER_AGENT=5;
+function snoozeLimitAgent(id){
+  const agent=normalizeSupportAgent(ticketAssignee[id]||'');
+  return agent&&SUPPORT_AGENTS.includes(agent)?agent:'';
+}
+function snoozedCountFor(agent,exceptId){
+  return Object.keys(ticketSnooze).filter(x=>x!==exceptId&&isSnoozed(x)&&snoozeLimitAgent(x)===agent).length;
+}
+function snoozeLimitMessage(agent){
+  return `${agent===normalizeAgentCode(currentUser())?'You already have':agent+' already has'} ${SNOOZE_MAX_PER_AGENT} snoozed tickets - wake one before snoozing another`;
+}
+// opts.quiet: the caller reports a refusal itself (bulk snooze).
+function snoozeTicket(id,until,note,opts){
   const ms=Number(until)||0;
   if(!(ms>boardNow()))return false;
-  ticketSnooze[id]={until:ms,by:currentUser(),note:String(note||''),at:boardNow()};
+  const agent=snoozeLimitAgent(id);
+  if(agent&&!isSnoozed(id)&&snoozedCountFor(agent,id)>=SNOOZE_MAX_PER_AGENT){
+    if(!opts?.quiet)showToast(snoozeLimitMessage(agent),'warn');
+    return false;
+  }
+  // Re-snoozing keeps the original start, so the SLA hold stays one hold.
+  const at=isSnoozed(id)?(Number(ticketSnooze[id].at)||boardNow()):boardNow();
+  ticketSnooze[id]={until:ms,by:currentUser(),note:String(note||''),at};
   return true;
 }
 function unsnoozeTicket(id){
@@ -18055,8 +18093,10 @@ async function bulkSnooze(until){
   const ids=selectionList();
   if(!ids.length)return;
   const before=captureTicketState(ids,['snooze']);
-  ids.forEach(id=>snoozeTicket(id,until));
-  pushUndo(`Snoozed ${ids.length} ticket${ids.length===1?'':'s'}`,()=>restoreTicketState(before,['snooze']));
+  const done=ids.filter(id=>snoozeTicket(id,until,'',{quiet:true}));
+  if(done.length<ids.length)showToast(`${ids.length-done.length} not snoozed - at most ${SNOOZE_MAX_PER_AGENT} snoozed tickets per support agent`,'warn');
+  if(!done.length){clearSelection();renderActiveView();return;}
+  pushUndo(`Snoozed ${done.length} ticket${done.length===1?'':'s'}`,()=>restoreTicketState(before,['snooze']));
   clearSelection();renderActiveView();
   await saveState('bulk_snooze');
 }
