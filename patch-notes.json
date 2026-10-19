@@ -4,7 +4,10 @@
       "date": "2026-10-19",
       "title": "Patch Notes",
       "notes": [
-        { "type": "new", "text": "Patch notes! Every board update now shows up here in the Feedback bubble, so you always know what changed." }
+        { "type": "new", "text": "Patch notes! Every board update now shows up here in the Feedback bubble, so you always know what changed." },
+        { "type": "fixed", "commit": "0967403", "text": "A manual ticket created by an admin who is also a CS agent now gets them as its CS owner instead of Unassigned." },
+        { "type": "fixed", "commit": "519646d", "text": "The board recognises your CS code wherever it appears on your account, not just in the first field it checks." },
+        { "type": "improved", "commit": "85c8adc", "text": "CS owner changes are sturdier: only agents on the CS roster can be picked, \"No CS\" sticks when chosen on purpose, and changing the CS owner no longer undoes a newer Support reassignment." }
       ]
     },
     {
