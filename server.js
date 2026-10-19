@@ -2275,6 +2275,20 @@ function medianOf(values) {
    - taking a ticket for themselves. Picking up work is not the decision this
      guard exists to protect; passing work to somebody else is. So a support
      agent may reassign a ticket to their own code and to no other. */
+/* A refused CS-owner change has to take its companions back with it: the
+   "a person chose this" flag and the CS clock describe the choice that was just
+   refused, and left behind they would protect a value nobody decided. */
+function revertCsFlags(nextState, currentState, ticketId) {
+  const isMap = (value) => !!value && typeof value === 'object';
+  ['manualCSOverride', 'ticketCSTouchedAt'].forEach((field) => {
+    const incoming = isMap(nextState[field]) ? nextState[field] : null;
+    if (!incoming) return;
+    const current = isMap(currentState[field]) ? currentState[field] : {};
+    if (Object.prototype.hasOwnProperty.call(current, ticketId)) incoming[ticketId] = current[ticketId];
+    else delete incoming[ticketId];
+  });
+}
+
 function applyRolePermissionsToStateWrite(currentState, nextState, actor) {
   const role = normalizeRole(actor?.role) || 'support';
   const username = actor?.username || '';
@@ -2378,26 +2392,25 @@ function applyRolePermissionsToStateWrite(currentState, nextState, actor) {
     const currentOverride = isMap(currentState.manualCSOverride) ? currentState.manualCSOverride : {};
     const incomingOverride = isMap(nextState.manualCSOverride) ? nextState.manualCSOverride : {};
 
-    /* Stale carry-back, for every role. The owner is merged on the same
-       per-ticket clock as the support assignee, so a tab that never heard about
-       a person's CS choice and then does something ordinary - a support
-       reassignment - stamps that clock newer and drags its OLD owner in with
-       it, silently undoing the choice. Once a person has set the owner
-       (override already true in the stored state), an automatic path will not
-       write it again, so an incoming change that does not itself carry the
-       flag cannot be a decision: it is a stale copy, and is put back. Not a
-       refusal - nobody did anything wrong, so no toast.
+    /* Only someone on the CS roster can be put on a ticket, whoever asks.
 
-       Residual: a stale tab that itself still holds an older override=true for
-       the same ticket looks like a fresh decision and is not caught. That needs
-       the ticket's owner to have been set by hand at least twice and a tab to
-       miss the live-sync push, and would take a dedicated owner clock to close. */
+       The board a person is looking at can be a couple of minutes behind the
+       roster (admins move people between teams), so a stale picker can offer
+       somebody who has just left CS. Saved as it stands, the write looks fine
+       and then the database upsert quietly nulls the owner. Put the previous
+       owner back instead, and say so when a person was the one choosing. An
+       owner the ticket already has is left alone: leaving the roster does not
+       take tickets away. */
     Object.keys(incomingCs).forEach((ticketId) => {
       const before = String(currentCs[ticketId] || '').trim();
       const after = String(incomingCs[ticketId] || '').trim();
-      if (!before || before === after) return;
-      if (currentOverride[ticketId] !== true || incomingOverride[ticketId] === true) return;
-      incomingCs[ticketId] = currentCs[ticketId];
+      if (!after || before === after || CS_AGENT_CODES.has(after.toUpperCase())) return;
+      const chosen = incomingOverride[ticketId] === true;
+      if (Object.prototype.hasOwnProperty.call(currentCs, ticketId)) incomingCs[ticketId] = currentCs[ticketId];
+      else delete incomingCs[ticketId];
+      if (!chosen) return;
+      revertCsFlags(nextState, currentState, ticketId);
+      refused.push({ field: 'ticketCSOwner', id: ticketId, claims: [after], reason: 'roster' });
     });
   }
 
@@ -2406,21 +2419,33 @@ function applyRolePermissionsToStateWrite(currentState, nextState, actor) {
     const incomingCs = isMap(nextState.ticketCSOwner) ? nextState.ticketCSOwner : {};
     const currentOverride = isMap(currentState.manualCSOverride) ? currentState.manualCSOverride : {};
     const incomingOverride = isMap(nextState.manualCSOverride) ? nextState.manualCSOverride : {};
+    const currentTouched = isMap(currentState.ticketCSTouchedAt) ? currentState.ticketCSTouchedAt : {};
+    const incomingTouched = isMap(nextState.ticketCSTouchedAt) ? nextState.ticketCSTouchedAt : {};
     const manualTicketIds = new Set((Array.isArray(currentState.allTickets) ? currentState.allTickets : [])
       .filter(t => t && (t.isManual || t.email?.isManual))
       .map(t => String(t.id)));
     Object.keys(incomingCs).forEach((ticketId) => {
       const before = String(currentCs[ticketId] || '').trim();
       const after = String(incomingCs[ticketId] || '').trim();
-      if (!before || before === after) return;
-      if (incomingOverride[ticketId] !== true) return;
+      if (before === after) return;
+      // A first assignment of an unowned ticket is left alone, unless a person
+      // decided it was unowned: "No CS" chosen on purpose is as much the
+      // admin's call as a name is, and a stale tab must not fill it back in.
+      if (!before && currentOverride[ticketId] !== true) return;
+      // A person choosing, as far as the request says: the flag, or a CS clock
+      // newer than the stored one. Either alone is enough, so leaving the flag
+      // off does not turn a decision into automation.
+      const stamped = Number(incomingTouched[ticketId] || 0);
+      const chosen = incomingOverride[ticketId] === true
+        || (stamped > 0 && stamped >= Number(currentTouched[ticketId] || 0));
+      if (!chosen) return;
       if (manualTicketIds.has(ticketId)) return;
-      incomingCs[ticketId] = currentCs[ticketId];
-      // The flag describes the choice that was just refused, so it goes back
-      // too - left behind it would stop the automatic CS default from ever
-      // correcting this ticket again.
-      if (Object.prototype.hasOwnProperty.call(currentOverride, ticketId)) incomingOverride[ticketId] = currentOverride[ticketId];
-      else delete incomingOverride[ticketId];
+      if (Object.prototype.hasOwnProperty.call(currentCs, ticketId)) incomingCs[ticketId] = currentCs[ticketId];
+      else delete incomingCs[ticketId];
+      // The flag and the clock describe the choice that was just refused, so
+      // they go back too - left behind they would stop the automatic CS
+      // default from ever correcting this ticket again.
+      revertCsFlags(nextState, currentState, ticketId);
       refused.push({ field: 'ticketCSOwner', id: ticketId, claims: [after || '(cleared)'] });
     });
   }
@@ -2572,6 +2597,16 @@ async function safeWriteState(state, actor = null) {
   // they describe the assignment and must not be split from it.
   const currentAssignTouched = (currentState.ticketAssigneeTouchedAt && typeof currentState.ticketAssigneeTouchedAt === 'object') ? currentState.ticketAssigneeTouchedAt : {};
   const incomingAssignTouched = (nextState.ticketAssigneeTouchedAt && typeof nextState.ticketAssigneeTouchedAt === 'object') ? nextState.ticketAssigneeTouchedAt : {};
+  /* What the request itself says about the CS owner, kept before the
+     assignment merge below replaces it. The owner rides that merge's clock
+     for automatic writes, but a person's choice has a clock of its own
+     (ticketCSTouchedAt): sharing the support assignee's meant an admin changing
+     only the CS owner had to re-stamp - and so re-send - a support assignee
+     the tab may not have heard was changed, undoing it. */
+  const asMap = (value) => (value && typeof value === 'object') ? value : {};
+  const incomingCsOwner = { ...asMap(nextState.ticketCSOwner) };
+  const incomingCsOverride = { ...asMap(nextState.manualCSOverride) };
+  const incomingCsTouched = { ...asMap(nextState.ticketCSTouchedAt) };
   const assignFields = ['ticketAssignee', 'ticketCSOwner', 'ticketAssignmentMode', 'manualSupportOverride'];
   const mergedAssign = {};
   assignFields.forEach((field) => {
@@ -2598,6 +2633,59 @@ async function safeWriteState(state, actor = null) {
   });
   assignFields.forEach((field) => { nextState[field] = mergedAssign[field]; });
   nextState.ticketAssigneeTouchedAt = mergedAssignTouched;
+
+  /* The CS owner, decided per ticket.
+
+     Once a person has set it (manualCSOverride in the stored state - "No CS"
+     included, an empty owner is a decision too) only a newer decision replaces
+     it: one that carries a CS clock at least as new as the stored one. Anything
+     else - a stale tab doing something ordinary and dragging its old owner
+     along with a fresh support-assignment stamp, or an automatic write - is
+     put back. A first decision on a ticket nobody has decided yet is taken as
+     it comes, whatever the assignment clock says. Unflagged, unstamped writes
+     (HubSpot's company default, the auto-assign every tab runs) keep going
+     through the assignment merge above, as before. */
+  {
+    const curCs = asMap(currentState.ticketCSOwner);
+    const curOv = asMap(currentState.manualCSOverride);
+    const curTouched = asMap(currentState.ticketCSTouchedAt);
+    const mergedCsTouched = { ...curTouched };
+    const keepFlag = [];
+    const ids = new Set([...Object.keys(incomingCsOwner), ...Object.keys(incomingCsTouched)]);
+    ids.forEach((ticketId) => {
+      const hasIncoming = Object.prototype.hasOwnProperty.call(incomingCsOwner, ticketId);
+      const stamp = Number(incomingCsTouched[ticketId] || 0);
+      const stored = Number(curTouched[ticketId] || 0);
+      const accept = () => {
+        nextState.ticketCSOwner[ticketId] = incomingCsOwner[ticketId];
+        mergedCsTouched[ticketId] = stamp;
+      };
+      if (curOv[ticketId] === true) {
+        keepFlag.push(ticketId);
+        // Strictly newer: an equal stamp with another owner is not a later
+        // decision, it is somebody replaying the stored one.
+        if (hasIncoming && stamp > 0 && stamp > stored) accept();
+        else {
+          if (Object.prototype.hasOwnProperty.call(curCs, ticketId)) nextState.ticketCSOwner[ticketId] = curCs[ticketId];
+          else delete nextState.ticketCSOwner[ticketId];
+          // A flagged change with no clock is a person on a board loaded
+          // before the CS clock existed (or one that has not reloaded). Not
+          // silently: tell them, or the card just snaps back.
+          if (hasIncoming && incomingCsOverride[ticketId] === true && stamp === 0
+            && String(incomingCsOwner[ticketId] || '') !== String(curCs[ticketId] || '')) {
+            refusedChanges.push({ field: 'ticketCSOwner', id: ticketId, claims: [String(incomingCsOwner[ticketId] || '') || '(cleared)'], reason: 'stale' });
+          }
+        }
+      } else if (hasIncoming && incomingCsOverride[ticketId] === true && stamp > 0) {
+        accept();
+      }
+    });
+    nextState.ticketCSTouchedAt = mergedCsTouched;
+    if (keepFlag.length) {
+      nextState.manualCSOverride = { ...asMap(nextState.manualCSOverride) };
+      keepFlag.forEach((ticketId) => { nextState.manualCSOverride[ticketId] = true; });
+    }
+  }
 
   // Jira links and duplicate markings are server-owned: their endpoints are the
   // only writers, because a board snapshot cannot distinguish "this ticket has
@@ -2686,7 +2774,7 @@ async function safeWriteState(state, actor = null) {
   // A stale snapshot (e.g. from a lagging tab) must not blindly overwrite
   // fields it didn't correctly merge - keep the current state as the base and
   // only layer in the fields we've safely reconciled above by id/timestamp.
-  const reconciledFields = ['ticketState', 'ticketStageTouchedAt', 'ticketAssigneeTouchedAt', 'ticketNumbers', 'ticketNumberCounter', 'allTickets', 'seenIds', 'ticketAssignee', 'ticketCSOwner', 'ticketAssignmentMode', 'manualSupportOverride', 'manualCSOverride', 'ticketResolutionMeta', 'ticketArchived', 'ticketSendBackAlerts', 'ticketReopenedAt', 'ticketReopenRequests', 'ticketCreatedBy', 'ticketJira', 'ticketHubspotId', 'ticketDuplicateOf', 'ticketVelmaBug', 'ticketSlaResetAt'];
+  const reconciledFields = ['ticketState', 'ticketStageTouchedAt', 'ticketAssigneeTouchedAt', 'ticketNumbers', 'ticketNumberCounter', 'allTickets', 'seenIds', 'ticketAssignee', 'ticketCSOwner', 'ticketAssignmentMode', 'manualSupportOverride', 'manualCSOverride', 'ticketCSTouchedAt', 'ticketResolutionMeta', 'ticketArchived', 'ticketSendBackAlerts', 'ticketReopenedAt', 'ticketReopenRequests', 'ticketCreatedBy', 'ticketJira', 'ticketHubspotId', 'ticketDuplicateOf', 'ticketVelmaBug', 'ticketSlaResetAt'];
   const finalState = isStale
     ? { ...currentState, ...Object.fromEntries(reconciledFields.map(key => [key, nextState[key]])), _meta: enrichedMeta }
     : { ...nextState, _meta: enrichedMeta };
@@ -2799,6 +2887,7 @@ async function hydrateStateFromDatabase(baseState = {}) {
   state.ticketSlaHold = (state.ticketSlaHold && typeof state.ticketSlaHold === 'object') ? state.ticketSlaHold : {};
   state.ticketArchived = (state.ticketArchived && typeof state.ticketArchived === 'object') ? state.ticketArchived : {};
   state.manualCSOverride = (state.manualCSOverride && typeof state.manualCSOverride === 'object') ? state.manualCSOverride : {};
+  state.ticketCSTouchedAt = (state.ticketCSTouchedAt && typeof state.ticketCSTouchedAt === 'object') ? state.ticketCSTouchedAt : {};
   state.ticketCreatedBy = (state.ticketCreatedBy && typeof state.ticketCreatedBy === 'object') ? state.ticketCreatedBy : {};
   // Postgres (Ticket.displayNumber) is the source of truth for this, not
   // whatever the client last sent - always overwritten below so the board
@@ -2854,7 +2943,13 @@ async function hydrateStateFromDatabase(baseState = {}) {
     const dbAssignedAt = lastAssignChangeAt.get(ticket.id) || createdAtMs;
     if (dbAssignedAt >= assignTouchedAt) {
       if (ticket.assignedAgent) state.ticketAssignee[externalId] = ticket.assignedAgent;
-      if (ticket.csAgent) state.ticketCSOwner[externalId] = ticket.csAgent;
+      // The CS owner of a ticket nobody has put a CS clock on yet. One that has
+      // one is a person's decision held in the board state, and the database
+      // row only ever trails it (the save is still on its way, or its audit
+      // event lands later than the decision it records), so the row never
+      // replaces it: updates through the API write straight into the state, on
+      // that same clock.
+      if (ticket.csAgent && !Number(state.ticketCSTouchedAt[externalId] || 0)) state.ticketCSOwner[externalId] = ticket.csAgent;
       // The assignment's own clock, not the row's. Stamping the JSON with the
       // row modification time inflated it - it is always >= the real
       // assignment time - which then made the board's copy look newer than it
@@ -4718,6 +4813,35 @@ app.get('/healthz', async (req, res) => {
   } catch (error) {
     res.status(500).json({ ok: false, app: 'support-kanban', database: 'error', build: APP_BUILD_VERSION, message: error.message });
   }
+});
+
+/* Patch notes, shown in the Feedback bubble. patch-notes.json is written by
+   hand with every commit - one plain-English line per commit, grouped into a
+   patch per day - because the commit messages are written for the people who
+   maintain the board, not the people who use it. Read per request rather than
+   once at boot so an edit on a running dev server shows up without a restart;
+   it is a few KB. A missing or broken file is an empty list, never a 500: the
+   bubble still has to work for feedback. */
+const PATCH_NOTE_TYPES = new Set(['new', 'improved', 'fixed', 'maintenance']);
+app.get('/api/patch-notes', requireAuth, async (req, res) => {
+  let patches = [];
+  try {
+    const raw = JSON.parse(await fs.promises.readFile(path.join(__dirname, 'patch-notes.json'), 'utf8'));
+    patches = (Array.isArray(raw?.patches) ? raw.patches : [])
+      .filter(p => /^\d{4}-\d{2}-\d{2}$/.test(String(p?.date || '')) && Array.isArray(p.notes))
+      .map(p => ({
+        date: p.date,
+        title: String(p.title || '').slice(0, 60),
+        notes: p.notes
+          .filter(n => n && String(n.text || '').trim())
+          .map(n => ({ type: PATCH_NOTE_TYPES.has(n.type) ? n.type : 'improved', text: String(n.text).trim().slice(0, 400) }))
+      }))
+      .filter(p => p.notes.length)
+      .sort((a, b) => b.date.localeCompare(a.date));
+  } catch (error) {
+    if (error.code !== 'ENOENT') console.warn('[patch-notes] could not read patch-notes.json:', error.message);
+  }
+  res.json({ build: APP_BUILD_VERSION, patches });
 });
 
 // The support roster's display names, so the board can recognise an agent
@@ -6649,6 +6773,22 @@ function kpiTicketMatchesAccess(t, access) {
   if (access.either) return t.csAgent === access.either || t.assignedAgent === access.either;
   return true;
 }
+/* Resolved work credited to an agent by hand, for tickets closed outside the
+   board. Each credit is counted as that many resolved tickets assigned to the
+   agent on its date, so the team, agent and range filters treat it like a
+   ticket; it has no company or Jira link, so those filters leave it out. It
+   adds to Resolved only - never to the SLA figures or the drilldowns, which
+   are about real tickets. */
+// board: the one deployment (BOARD_LABEL) a credit belongs to.
+const KPI_RESOLVED_CREDITS = [
+  { agent: 'MEZ', count: 6, at: '2026-10-16T10:00:00Z', board: 'prod' }
+];
+function kpiResolvedCreditTickets() {
+  return KPI_RESOLVED_CREDITS.filter(c => c.board === BOARD_LABEL).map(c => ({
+    assignedAgent: c.agent, csAgent: null, count: c.count,
+    createdAt: new Date(c.at), resolvedAt: new Date(c.at)
+  }));
+}
 async function loadKpiWorkingSet(req) {  const bounds = kpiDateBounds(req.query.range, req.query.tzOffset);
   const username = actorAgentCode(req);
   /* The KPI dashboard is the one view where "see all tickets" does not carry
@@ -6727,7 +6867,9 @@ async function loadKpiWorkingSet(req) {  const bounds = kpiDateBounds(req.query.
   // The one agent the figures are pinned to, if any - whose SLA reset applies
   // to the headline SLA met.
   const slaAgent = (myTeam === 'cs' || myTeam === 'support') ? username : (agent && agent !== 'ALL' ? agent : null);
-  return { bounds, myTeam, team, agent, slaAgent, company, jiraOnly, baseWhere, accessWhere, tickets, scopedTickets, workTickets, duplicatesOpen, duplicatesInRange, snapshot, spamCount };
+  const creditsAll = kpiResolvedCreditTickets().filter(c => kpiTicketMatchesBase(c, baseFilter) && kpiTicketMatchesAccess(c, access));
+  const creditsInRange = creditsAll.filter(c => inBounds(c.resolvedAt));
+  return { bounds, myTeam, team, agent, slaAgent, company, jiraOnly, baseWhere, accessWhere, tickets, scopedTickets, workTickets, duplicatesOpen, duplicatesInRange, snapshot, spamCount, creditsAll, creditsInRange };
 }
 function kpiDrilldownRow(t, detail) {
   return {
@@ -6744,7 +6886,9 @@ function kpiDrilldownRow(t, detail) {
 }
 app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
   try {
-    const { bounds, myTeam, team, agent, slaAgent, company, jiraOnly, baseWhere, accessWhere, tickets, scopedTickets, workTickets, duplicatesOpen, duplicatesInRange, snapshot, spamCount } = await loadKpiWorkingSet(req);
+    const { bounds, myTeam, team, agent, slaAgent, company, jiraOnly, baseWhere, accessWhere, tickets, scopedTickets, workTickets, duplicatesOpen, duplicatesInRange, snapshot, spamCount, creditsAll, creditsInRange } = await loadKpiWorkingSet(req);
+    const sumCredits = list => list.reduce((sum, c) => sum + c.count, 0);
+    const resolvedCredit = sumCredits(creditsInRange);
 
     const statusKeys = ['new', 'inp', 'wus', 'dft', 'wct', 'res'];
     const statusCounts = Object.fromEntries(statusKeys.map(k => [k, 0]));
@@ -6797,7 +6941,14 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
       const statusKey = normalizeDbStatusForBoard(ticket.status);
       if (statusKey !== 'res' && statusKey in statusCounts) statusCounts[statusKey]++;
     }
-    statusCounts.res = scopedTickets.filter(t => normalizeDbStatusForBoard(t.status) === 'res').length;
+    statusCounts.res = scopedTickets.filter(t => normalizeDbStatusForBoard(t.status) === 'res').length + resolvedCredit;
+    for (const credit of creditsInRange) {
+      for (const key of rowKeysForTicket(credit)) {
+        const row = ensureAgentRow(key);
+        row.total += credit.count;
+        row.res += credit.count;
+      }
+    }
 
     for (const ticket of scopedTickets) {
       const statusKey = normalizeDbStatusForBoard(ticket.status);
@@ -6967,14 +7118,15 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
     if (myTeam === 'admin') {
       const since = kpiLaunchAt || await refreshKpiLaunchAt();
       const created = workTickets.length;
-      const resolved = workTickets.filter(t => normalizeDbStatusForBoard(t.status) === 'res').length;
+      const resolvedTickets = workTickets.filter(t => normalizeDbStatusForBoard(t.status) === 'res').length;
+      const resolved = resolvedTickets + sumCredits(creditsAll);
       const spam = spamCount;
       const scope = [
         agent && agent !== 'ALL' ? agent : team === 'cs' ? 'CS only' : team === 'support' ? 'Support only' : '',
         company && company !== 'all' ? company : '',
         jiraOnly ? 'Jira-linked' : ''
       ].filter(Boolean).join(' · ');
-      allTime = { since: since ? since.toISOString() : null, scope: scope || 'whole board', created, resolved, open: created - resolved, duplicates: duplicatesOpen.length, spam };
+      allTime = { since: since ? since.toISOString() : null, scope: scope || 'whole board', created, resolved, open: created - resolvedTickets, duplicates: duplicatesOpen.length, spam };
     }
 
     return res.json({
@@ -7001,7 +7153,9 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
         // other number on this dashboard.
         duplicates: duplicatesOpen.length,
         duplicatesInRange: duplicatesInRange.length,
-        duplicatesResolvedInRange: duplicatesInRange.filter(t => normalizeDbStatusForBoard(t.status) === 'res').length
+        duplicatesResolvedInRange: duplicatesInRange.filter(t => normalizeDbStatusForBoard(t.status) === 'res').length,
+        // Of Resolved, the part credited by hand (KPI_RESOLVED_CREDITS).
+        resolvedCredit
       },
       sla: {
         targetsByPriority: SLA_HOURS_BY_PRIORITY,
@@ -7047,9 +7201,9 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
       },
       throughput: {
         created: createdInRange,
-        resolved: resolvedInRange.length,
+        resolved: resolvedInRange.length + resolvedCredit,
         reopened,
-        net: createdInRange - resolvedInRange.length,
+        net: createdInRange - resolvedInRange.length - resolvedCredit,
         backlogOpen: openWorkTickets.length
       },
       overdueRows: overdueRows.slice(0, 25),
@@ -9570,7 +9724,13 @@ async function mcpUpdateTicket(apiUser, id, fields) {
       entries.push({ field: 'ticketAssignee', id: key, value: updated.assignedAgent || null });
       entries.push({ field: 'ticketAssigneeTouchedAt', id: key, value: now });
     }
-    if (data.csAgent !== undefined && updated.csAgent !== existingTicket.csAgent) entries.push({ field: 'ticketCSOwner', id: key, value: updated.csAgent || null });
+    if (data.csAgent !== undefined && updated.csAgent !== existingTicket.csAgent) {
+      // A decision like any other: stamped on the CS clock and flagged, so
+      // open boards take it and a stale tab cannot put the old owner back.
+      entries.push({ field: 'ticketCSOwner', id: key, value: updated.csAgent || null });
+      entries.push({ field: 'manualCSOverride', id: key, value: true });
+      entries.push({ field: 'ticketCSTouchedAt', id: key, value: now });
+    }
     if (data.priority !== undefined && updated.priority !== existingTicket.priority) entries.push({ field: 'ticketPriority', id: key, value: updated.priority });
     if (entries.length) writeServerFieldsIntoState(entries);
   }
@@ -10662,7 +10822,7 @@ let sseRev = 0;
 // session-local (caches, read-receipts) and deliberately not broadcast.
 const LIVE_SYNC_FIELDS = [
   'ticketState', 'ticketStageTouchedAt', 'ticketAssigneeTouchedAt', 'ticketAssignee', 'ticketCSOwner',
-  'ticketAssignmentMode', 'manualSupportOverride', 'manualCSOverride',
+  'ticketAssignmentMode', 'manualSupportOverride', 'manualCSOverride', 'ticketCSTouchedAt',
   'ticketPriority', 'ticketCategory', 'ticketSubtype', 'ticketJira',
   'ticketHubspotId', 'ticketArchived', 'ticketResolutionMeta',
   'ticketHasNewReply', 'ticketNumbers', 'ticketComments', 'ticketCreatedBy',
