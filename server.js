@@ -4720,6 +4720,35 @@ app.get('/healthz', async (req, res) => {
   }
 });
 
+/* Patch notes, shown in the Feedback bubble. patch-notes.json is written by
+   hand with every commit - one plain-English line per commit, grouped into a
+   patch per day - because the commit messages are written for the people who
+   maintain the board, not the people who use it. Read per request rather than
+   once at boot so an edit on a running dev server shows up without a restart;
+   it is a few KB. A missing or broken file is an empty list, never a 500: the
+   bubble still has to work for feedback. */
+const PATCH_NOTE_TYPES = new Set(['new', 'improved', 'fixed', 'maintenance']);
+app.get('/api/patch-notes', requireAuth, async (req, res) => {
+  let patches = [];
+  try {
+    const raw = JSON.parse(await fs.promises.readFile(path.join(__dirname, 'patch-notes.json'), 'utf8'));
+    patches = (Array.isArray(raw?.patches) ? raw.patches : [])
+      .filter(p => /^\d{4}-\d{2}-\d{2}$/.test(String(p?.date || '')) && Array.isArray(p.notes))
+      .map(p => ({
+        date: p.date,
+        title: String(p.title || '').slice(0, 60),
+        notes: p.notes
+          .filter(n => n && String(n.text || '').trim())
+          .map(n => ({ type: PATCH_NOTE_TYPES.has(n.type) ? n.type : 'improved', text: String(n.text).trim().slice(0, 400) }))
+      }))
+      .filter(p => p.notes.length)
+      .sort((a, b) => b.date.localeCompare(a.date));
+  } catch (error) {
+    if (error.code !== 'ENOENT') console.warn('[patch-notes] could not read patch-notes.json:', error.message);
+  }
+  res.json({ build: APP_BUILD_VERSION, patches });
+});
+
 // The support roster's display names, so the board can recognise an agent
 // named in an email ("Hi Zied, ...") and give them the ticket. Keyed by roster
 // code, matched from the account's username or its email's local part - the
