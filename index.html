@@ -6645,6 +6645,27 @@ input.ticket-number-filter:focus {
 
 .col-header.wip-over { box-shadow: inset 0 -2px 0 var(--st-inp); }
 
+/* Select-all box for a column, drawn like the cards' own select box so it reads
+   as "the same thing, for all of them". */
+.col-select {
+  position: relative; flex: 0 0 16px; width: 16px; height: 16px; padding: 0;
+  border: 1.5px solid color-mix(in srgb, var(--stage) 45%, var(--border-strong));
+  border-radius: 5px; background: var(--surface); cursor: pointer;
+  transition: background .12s ease, border-color .12s ease;
+}
+.col-select:hover { border-color: var(--primary); }
+.col-select:focus-visible { outline: 2px solid var(--focus-ring, var(--primary)); outline-offset: 2px; }
+.col-select[aria-checked="true"],
+.col-select[aria-checked="mixed"] { background: var(--primary); border-color: var(--primary); }
+.col-select[aria-checked="true"]::after {
+  content: ""; position: absolute; left: 4.5px; top: 1px;
+  width: 4px; height: 8px; border: solid #fff; border-width: 0 2px 2px 0; transform: rotate(45deg);
+}
+.col-select[aria-checked="mixed"]::after {
+  content: ""; position: absolute; left: 3px; right: 3px; top: 50%; height: 2px;
+  margin-top: -1px; border-radius: 2px; background: #fff;
+}
+
 .col-body {
   background: transparent;
   backdrop-filter: none;
@@ -18040,13 +18061,43 @@ function ticketLaneKey(t){
   return domain?domain.toLowerCase():'Unknown';
 }
 
-function renderColumnHeader(col,count,headerEl){
+/* Select a whole column at once. The box in the header is checked when every
+   card in the column is selected, a dash when some are, and empty when none;
+   pressing it selects them all, or unselects them all when they already are.
+   It works on the cards the column is showing, so the filters decide what
+   "all" means, the same way the A shortcut does for the whole board. */
+function colSelectButtonHtml(col,ids){
+  if(!ids.length)return '';
+  const picked=ids.filter(id=>selectedTickets.has(id)).length;
+  const state=picked===0?'false':picked===ids.length?'true':'mixed';
+  const label=`${state==='true'?'Unselect':'Select'} all ${ids.length} in ${COL_NAMES[col]||col}`;
+  return `<button class="col-select" type="button" data-col-select="${esc(col)}" role="checkbox" aria-checked="${state}" title="${esc(label)}" aria-label="${esc(label)}"></button>`;
+}
+function toggleColumnSelection(columnEl){
+  const ids=[...(columnEl?.querySelectorAll('.card[data-id]')||[])].map(el=>el.dataset.id);
+  if(!ids.length)return;
+  const all=ids.every(id=>selectedTickets.has(id));
+  ids.forEach(id=>all?selectedTickets.delete(id):selectedTickets.add(id));
+  lastSelectedId=all?null:ids[ids.length-1];
+  renderActiveView();
+}
+document.addEventListener('click',ev=>{
+  const btn=ev.target.closest?.('[data-col-select]');
+  if(!btn)return;
+  ev.preventDefault();ev.stopPropagation();
+  toggleColumnSelection(btn.closest('.column'));
+});
+
+function renderColumnHeader(col,count,headerEl,ids=[]){
   if(!headerEl)return;
   const limit=columnWipLimit(col);
   const over=limit&&count>limit;
   headerEl.classList.toggle('wip-over',!!over);
   const badge=headerEl.querySelector('.col-badge');
   if(badge)badge.textContent=limit?`${count}/${limit}`:count;
+  headerEl.querySelector('.col-select')?.remove();
+  const select=colSelectButtonHtml(col,ids);
+  if(select)(badge||headerEl.lastElementChild||headerEl).insertAdjacentHTML(badge?'afterend':'beforeend',select);
   headerEl.title=limit
     ?(over?`Over the WIP limit: ${count} in this column, limit ${limit}. Nothing is blocked - this is a nudge.`:`${count} of a ${limit} WIP limit`)
     :'';
@@ -18642,7 +18693,7 @@ function renderBoard(){
       el.innerHTML='';
       if(!tickets.length)el.innerHTML=`<div class="empty"><div class="empty-icon">${COL_EMPTY_ICONS[col]}</div>No tickets</div>`;
       else tickets.forEach(t=>{const card=safeCard(t);if(card)el.appendChild(card);});
-      renderColumnHeader(col,tickets.length,column.querySelector('.col-header'));
+      renderColumnHeader(col,tickets.length,column.querySelector('.col-header'),tickets.map(t=>t.id));
     });
   }
 
@@ -18693,7 +18744,7 @@ function renderLaneBoard(visible){
         const column=document.createElement('div');
         column.className='column col-'+col+' swimlane-col';
         const limit=columnWipLimit(col);
-        column.innerHTML=`<div class="col-header${limit&&colTickets.length>limit?' wip-over':''}">${esc(COL_NAMES[col])} <span class="col-badge">${colTickets.length}</span></div>`;
+        column.innerHTML=`<div class="col-header${limit&&colTickets.length>limit?' wip-over':''}">${esc(COL_NAMES[col])} <span class="col-badge">${colTickets.length}</span>${colSelectButtonHtml(col,colTickets.map(t=>t.id))}</div>`;
         const bodyEl=document.createElement('div');
         bodyEl.className='col-body';
         bodyEl.dataset.col=col;
