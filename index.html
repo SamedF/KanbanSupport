@@ -9752,7 +9752,7 @@ function resolveUserAgentCode(user){
   for(const candidate of candidates){
     const code=normalizeAgentCode(candidate);
     if(code)return code;
-    const mapped=COOWNER_NAME_MAP[String(candidate||'').trim().toLowerCase()];
+    const mapped=DEFAULT_COOWNER_NAME_MAPPINGS[String(candidate||'').trim().toLowerCase()];
     if(mapped&&normalizeAgentCode(mapped))return mapped;
   }
   return '';
@@ -10866,7 +10866,7 @@ function fillCreateTicketCSSelect(){
     const off=isAgentOff(a);
     return `<option value="${esc(a)}"${off?' disabled':''}>${esc(a)}${off?` - ${esc(agentLeaveText(a))}`:''}</option>`;
   }).join('')+'</optgroup>';
-  const mine=currentUserCSAgent();
+  const mine=currentUserOwnCSAgent();
   ctCS.value=(mine&&!isAgentOff(mine))?mine:'';
 }
 const SHIFT_HEARTBEAT_MS=60000;
@@ -14681,6 +14681,12 @@ function ticketFilterAgentValues(ticket){
 function normalizeSupportAgent(value){const code=normalizeAgentCode(value);return isKnownSupportAgent(code)?code:'';}
 function normalizeCSAgent(value){const code=normalizeAgentCode(value);return isKnownCSAgent(code)?code:'';}
 function currentUserCSAgent(){return normalizeCSAgent(currentUser());}
+/* The CS agent this login IS, even when it is signed in as an admin. An admin
+   account that is also a CS agent (VGU) reports currentUser() as 'ADMIN' - the
+   board treats every privileged login as one identity - so currentUserCSAgent()
+   is empty for them. Anything asking "is the person doing this a CS agent" and
+   meaning the human rather than the permission level reads this instead. */
+function currentUserOwnCSAgent(){return currentUserCSAgent()||normalizeCSAgent(resolveUserAgentCode(currentSessionUser));}
 function ticketMatchesAgentFilter(ticket,agentCode){
   if(agentCode==='all')return true;
   if(agentCode==='tagged')return taggedTickets.has(ticket.id);
