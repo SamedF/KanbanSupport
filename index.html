@@ -9533,6 +9533,7 @@ const seen={};
 let ticketState={},ticketPriority={},ticketCategory={},ticketSubtype={},ticketAssignee={},ticketComments={},ticketClientEmail={};
 let ticketAssignmentMode={};
 let manualSupportOverride={};
+let ticketCSTouchedAt={}; // ticketId -> when a person last set the CS owner (board clock). Its own clock, not the support assignee's: the server decides a CS change on this one, so changing only the owner can no longer re-send - and undo - a support reassignment this tab has not heard about
 let manualCSOverride={}; // ticketId -> true once CS owner was set by an explicit human action (manual ticket creation, or the manual-ticket edit modal) - protects it from being silently overwritten by the HubSpot-company-derived default the same way manualSupportOverride protects the support agent
 let ticketCSOwner={};
 let ticketCreatedAt={};
@@ -9879,7 +9880,7 @@ function resolveUserAgentCode(user){
   for(const candidate of candidates){
     const code=normalizeAgentCode(candidate);
     if(code)return code;
-    const mapped=COOWNER_NAME_MAP[String(candidate||'').trim().toLowerCase()];
+    const mapped=DEFAULT_COOWNER_NAME_MAPPINGS[String(candidate||'').trim().toLowerCase()];
     if(mapped&&normalizeAgentCode(mapped))return mapped;
   }
   return '';
@@ -10165,11 +10166,23 @@ async function apiSaveState(payload){
           :fields.includes('ticketAssignee')&&fields.length===1
           ?'Support assignment is CS-only - that change was not saved'
           :fields.includes('ticketCSOwner')&&fields.length===1
-            ?'Changing the CS owner is admin-only - that change was not saved'
+            ?(refused.some(r=>r?.reason==='stale')
+              ?'Your board is out of date - reload the page and make that change again'
+              :refused.every(r=>r?.reason==='roster')
+                ?'That person is no longer on the CS roster - that change was not saved'
+                :'Changing the CS owner is admin-only - that change was not saved')
             :'Confirming a resolved ticket is CS-only - that change was not saved';
         showToast(what,'warn');
         // Take the board back to what was actually stored rather than leaving
-        // the refused value on screen.
+        // the refused value on screen. A refused CS choice has to give up its
+        // clock first, or the newer local stamp would keep it on screen.
+        refused.filter(r=>r?.field==='ticketCSOwner').forEach(r=>{
+          const key=String(r.id);
+          // The server put the previous values back, or none at all for a
+          // ticket that never had any - and a reload only copies what the
+          // server has, so what is left here has to go first.
+          delete ticketCSTouchedAt[key];delete ticketCSOwner[key];delete manualCSOverride[key];
+        });
         loadState().then(()=>renderActiveView()).catch(()=>{});
       }
     }
@@ -10248,7 +10261,7 @@ function buildStatePayload(reason){
   const snapshot={
     allTickets,
     seenIds:Object.keys(seen),
-    ticketState,ticketStageTouchedAt,ticketAssigneeTouchedAt,ticketAssigneeBy,ticketHasNewReply,ticketResolutionMeta,ticketArchived,ticketPriority,ticketCategory,ticketSubtype,ticketAssignee,ticketAssignmentMode,manualSupportOverride,manualCSOverride,ticketCSOwner,ticketComments,ticketClientEmail,ticketCreatedAt,ticketCreatedBy,ticketNumbers,ticketNumberCounter,ticketJira,ticketDuplicateOf,ticketHubspotId,
+    ticketState,ticketStageTouchedAt,ticketAssigneeTouchedAt,ticketAssigneeBy,ticketHasNewReply,ticketResolutionMeta,ticketArchived,ticketPriority,ticketCategory,ticketSubtype,ticketAssignee,ticketAssignmentMode,manualSupportOverride,manualCSOverride,ticketCSTouchedAt,ticketCSOwner,ticketComments,ticketClientEmail,ticketCreatedAt,ticketCreatedBy,ticketNumbers,ticketNumberCounter,ticketJira,ticketDuplicateOf,ticketHubspotId,
     ticketSnooze,ticketSlaResetAt,ticketSendBackAlerts,ticketReopenedAt,ticketReopenRequests,wipLimits,savedViews,
     spamSenders:[...spamSenders],hsCache,domainCompanyCache,readMentions:[...readMentions],jiraAlerts,readJiraAlerts:[...readJiraAlerts],jiraStatusSnapshot,companyCustomProps,companyProfiles,companiesViewType,companyNetworkCache,companyFilters,coOwnerMappings,actionHistory,
     _meta:{clientSavedAt:now,clientVersion:stateVersion,clientId:LIVE_CLIENT_ID}
@@ -10511,7 +10524,9 @@ function mergeDatabaseTickets(dbTickets){
     if(row.assignedAgent&&dbAssignAt>=Number(ticketAssigneeTouchedAt[id]||0)){
       setTicketAssignee(id,normalizeSupportAgent(row.assignedAgent)||row.assignedAgent,dbAssignAt);
     }
-    if(row.csAgent)ticketCSOwner[id]=normalizeCSAgent(row.csAgent)||row.csAgent;
+    // A CS owner somebody chose on this board outranks the row until the
+    // server says otherwise (its state and live patches carry API changes).
+    if(row.csAgent&&!(Number(ticketCSTouchedAt[id]||0)>0&&manualCSOverride[id]))ticketCSOwner[id]=normalizeCSAgent(row.csAgent)||row.csAgent;
     if(row.assignedAgent||row.csAgent)ticketAssignmentMode[id]='support';
     if(row.senderEmail)ticketClientEmail[id]=String(row.senderEmail).toLowerCase();
     if(row.createdAt)ticketCreatedAt[id]=row.createdAt;
@@ -10558,7 +10573,7 @@ let liveRev=0,liveSource=null,liveReloadTimer=null;
 // (never reassigned), so holding references here stays valid for the session.
 function liveSyncTargets(){
   return {ticketState,ticketStageTouchedAt,ticketAssigneeTouchedAt,ticketAssignee,ticketCSOwner,ticketAssignmentMode,
-    manualSupportOverride,manualCSOverride,ticketPriority,ticketCategory,ticketSubtype,
+    manualSupportOverride,manualCSOverride,ticketCSTouchedAt,ticketPriority,ticketCategory,ticketSubtype,
     ticketJira,ticketDuplicateOf,ticketHubspotId,ticketArchived,ticketResolutionMeta,ticketHasNewReply,
     ticketNumbers,ticketComments,ticketCreatedBy,ticketSnooze,ticketSlaResetAt,ticketSendBackAlerts,ticketReopenedAt,ticketVelmaBug,ticketSlaHold,ticketReopenRequests};
 }
@@ -10600,16 +10615,26 @@ function applyBoardPatch(p){
   // broadcast could arrive carrying the OLD agent. Applied blindly it
   // overwrote the fresh choice in place - visibly reverting the card, and
   // poisoning the next save with the stale value.
-  const ASSIGN_CLUSTER=['ticketAssignee','ticketCSOwner','ticketAssignmentMode','manualSupportOverride'];
+  const ASSIGN_CLUSTER=['ticketAssignee','ticketAssignmentMode','manualSupportOverride'];
   const incomingAssignTs={};
+  const incomingCsTs={};
   (p.changes||[]).forEach(c=>{
     if(c&&c.field==='ticketAssigneeTouchedAt')incomingAssignTs[String(c.id)]=Number(c.value||0);
+    if(c&&c.field==='ticketCSTouchedAt')incomingCsTs[String(c.id)]=Number(c.value||0);
   });
   (p.changes||[]).forEach(c=>{
     if(!c||!c.field)return;
     const map=targets[c.field];
     if(!map)return;
     const id=String(c.id);
+    // The CS owner (and the flag and clock that go with it) has a clock of its
+    // own: a person's choice made here and not yet saved outranks an older
+    // broadcast, exactly as an assignment does.
+    if(c.field==='ticketCSOwner'||c.field==='manualCSOverride'||c.field==='ticketCSTouchedAt'){
+      const localCs=Number(ticketCSTouchedAt[id]||0);
+      const remoteCs=c.field==='ticketCSTouchedAt'?Number(c.value||0):Number(incomingCsTs[id]||0);
+      if(localCs>0&&remoteCs<localCs)return;
+    }
     if(ASSIGN_CLUSTER.includes(c.field)){
       const localTs=Number(ticketAssigneeTouchedAt[id]||0);
       const remoteTs=Number(incomingAssignTs[id]||0);
@@ -10791,6 +10816,28 @@ function mergeAssignmentFromServerState(s){
     if(remoteTs>0)ticketAssigneeTouchedAt[id]=remoteTs;
   });
 }
+// The CS owner from the server, per ticket, on the CS clock. The server's copy
+// used to be written over ours unconditionally, which was fine on first load
+// and wrong on a live-sync replay: a choice made here and still on its way to
+// the server was thrown away. Ours is kept when its clock is newer.
+function mergeCSFromServerState(s){
+  if(!s||typeof s!=='object')return;
+  const obj=v=>(v&&typeof v==='object')?v:{};
+  const owner=obj(s.ticketCSOwner),flag=obj(s.manualCSOverride),touched=obj(s.ticketCSTouchedAt);
+  const ids=new Set([...Object.keys(owner),...Object.keys(flag),...Object.keys(touched)]);
+  ids.forEach(id=>{
+    const localTs=Number(ticketCSTouchedAt[id]||0);
+    const remoteTs=Number(touched[id]||0);
+    if(localTs>0&&remoteTs<localTs)return;
+    if(Object.prototype.hasOwnProperty.call(owner,id))ticketCSOwner[id]=owner[id];
+    // A newer clock with no owner behind it is the owner having been cleared
+    // (through the API, or by an admin): taking only the keys the server has
+    // would keep showing the one that is gone.
+    else if(remoteTs>localTs&&id in ticketCSOwner)delete ticketCSOwner[id];
+    if(Object.prototype.hasOwnProperty.call(flag,id))manualCSOverride[id]=flag[id];
+    if(remoteTs>0)ticketCSTouchedAt[id]=remoteTs;
+  });
+}
 async function loadState(){
   const s=await apiGetState();
   if(!s)return;
@@ -10816,8 +10863,7 @@ async function loadState(){
   if(s.ticketPriority)Object.assign(ticketPriority,s.ticketPriority);
   if(s.ticketCategory)Object.assign(ticketCategory,s.ticketCategory);if(s.ticketSubtype)Object.assign(ticketSubtype,s.ticketSubtype);
   mergeAssignmentFromServerState(s);
-  if(s.manualCSOverride&&typeof s.manualCSOverride==='object')Object.assign(manualCSOverride,s.manualCSOverride);
-  if(s.ticketCSOwner&&typeof s.ticketCSOwner==='object')Object.assign(ticketCSOwner,s.ticketCSOwner);
+  mergeCSFromServerState(s);
   if(s.ticketComments)Object.assign(ticketComments,s.ticketComments);
   if(s.ticketClientEmail)Object.assign(ticketClientEmail,s.ticketClientEmail);
   if(s.ticketCreatedAt)Object.assign(ticketCreatedAt,s.ticketCreatedAt);
@@ -10993,7 +11039,7 @@ function fillCreateTicketCSSelect(){
     const off=isAgentOff(a);
     return `<option value="${esc(a)}"${off?' disabled':''}>${esc(a)}${off?` - ${esc(agentLeaveText(a))}`:''}</option>`;
   }).join('')+'</optgroup>';
-  const mine=currentUserCSAgent();
+  const mine=currentUserOwnCSAgent();
   ctCS.value=(mine&&!isAgentOff(mine))?mine:'';
 }
 const SHIFT_HEARTBEAT_MS=60000;
@@ -13050,6 +13096,7 @@ document.getElementById('ct-submit').addEventListener('click',async()=>{
   // auto-assign would fill in a CS the creator deliberately left empty.
   ticketCSOwner[id]=chosenCS||null;
   manualCSOverride[id]=true;
+  ticketCSTouchedAt[id]=boardNow();
   if(jiraKey)ticketJira[id]=jiraKey;
   allTickets.unshift(ticket);
   saveState();renderBoard();updateJiraBadge();
@@ -13109,6 +13156,7 @@ document.getElementById('emt-submit').addEventListener('click',async()=>{
   if(newClientEmail)ticketClientEmail[id]=newClientEmail;else delete ticketClientEmail[id];
   ticketCSOwner[id]=newCS||null;
   manualCSOverride[id]=true;
+  ticketCSTouchedAt[id]=boardNow();
   saveState('manual_ticket_edited');
   renderBoard();
   document.getElementById('edit-manual-modal').classList.remove('open');
@@ -14808,6 +14856,24 @@ function ticketFilterAgentValues(ticket){
 function normalizeSupportAgent(value){const code=normalizeAgentCode(value);return isKnownSupportAgent(code)?code:'';}
 function normalizeCSAgent(value){const code=normalizeAgentCode(value);return isKnownCSAgent(code)?code:'';}
 function currentUserCSAgent(){return normalizeCSAgent(currentUser());}
+/* The CS agent this login IS, even when it is signed in as an admin. An admin
+   account that is also a CS agent (VGU) reports currentUser() as 'ADMIN' - the
+   board treats every privileged login as one identity - so currentUserCSAgent()
+   is empty for them. Anything asking "is the person doing this a CS agent" and
+   meaning the human rather than the permission level reads this instead. */
+function currentUserOwnCSAgent(){
+  const mine=currentUserCSAgent();
+  if(mine)return mine;
+  // Every candidate is tried for a CS code of its own: resolveUserAgentCode
+  // stops at the first recognised code, and 'admin' is one, so an account
+  // named admin with a CS e-mail would never get as far as the e-mail.
+  const user=currentSessionUser||{};
+  for(const candidate of [user.username,user.displayName,String(user.email||'').split('@')[0]]){
+    const cs=normalizeCSAgent(candidate)||normalizeCSAgent(DEFAULT_COOWNER_NAME_MAPPINGS[String(candidate||'').trim().toLowerCase()]);
+    if(cs)return cs;
+  }
+  return '';
+}
 function ticketMatchesAgentFilter(ticket,agentCode){
   if(agentCode==='all')return true;
   if(agentCode==='tagged')return taggedTickets.has(ticket.id);
@@ -15809,15 +15875,22 @@ function resolveSiblingCSOwner(ticketId,clientEmail,companyId,companyName){
 function resolveDefaultCSForTicket(id,emailObj){
   const ce=ticketClientEmail[id]||getClientEmail(emailObj);
   const hs=ce?hsCache[ce]:null;
-  const direct=resolveCSAgentFromCoOwner(hs?.coOwner);
+  /* Only someone on today's CS roster can be a default. The co-owner mappings
+     (and a sender's e-mail) name people whether or not they are on a team, and
+     the board used to show such a name while the database - which only keeps
+     rostered owners - stored none, so the card, the KPIs and the Teams DM
+     disagreed. A tickets's existing owner is untouched by this: it only
+     decides what a NEW default can be. */
+  const onRoster=code=>(code&&CS_AGENTS.includes(code))?code:null;
+  const direct=onRoster(resolveCSAgentFromCoOwner(hs?.coOwner));
   if(direct)return direct;
   const companyId=String(hs?.companyId||'').trim();
   const companyName=String(hs?.companyName||'').trim().toLowerCase();
-  const fromNetwork=resolveNetworkCSOwner(companyId,companyName);
+  const fromNetwork=onRoster(resolveNetworkCSOwner(companyId,companyName));
   if(fromNetwork)return fromNetwork;
-  const fromProfile=resolveProfileCSOwner(companyId,companyName);
+  const fromProfile=onRoster(resolveProfileCSOwner(companyId,companyName));
   if(fromProfile)return fromProfile;
-  const fromSibling=resolveSiblingCSOwner(id,ce,companyId,companyName);
+  const fromSibling=onRoster(resolveSiblingCSOwner(id,ce,companyId,companyName));
   if(fromSibling)return fromSibling;
   return null;
 }
@@ -16262,11 +16335,9 @@ function applyTicketCSSelection(id,selected){
   ticketCSOwner[id]=next||null;
   // A person chose this: stops the HubSpot company default from putting it back.
   manualCSOverride[id]=true;
-  // The CS owner is merged on the assignment's clock (server safeWriteState),
-  // so it has to be stamped like a support reassignment or a tab saving an
-  // older snapshot can overwrite it. Re-stating the unchanged support agent is
-  // what stamps that clock without touching the assignment itself.
-  setTicketAssignee(id,ticketAssignee[id]||'',boardNow(),'manual_cs_dropdown');
+  // The server decides a CS change on this ticket's CS clock. It is not the
+  // support assignee's, so nothing about the assignment is re-sent or touched.
+  ticketCSTouchedAt[id]=boardNow();
   saveState('manual_cs_dropdown');
   renderBoard();
 }
