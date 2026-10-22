@@ -8295,7 +8295,7 @@ th {
   <div class="sep"></div>
   <button class="chip" id="snooze-filter-btn" title="Show only snoozed tickets" style="display:none">Snoozed <span class="jira-ct" id="snooze-count" style="display:none">0</span></button>
   <div class="sep"></div>
-  <button class="chip my-resolved-control" id="my-resolved-filter-btn" title="Every ticket you resolved, including ones CS has confirmed and taken off the board" style="display:none">My resolved <span class="jira-ct" id="my-resolved-count" style="display:none">0</span></button>
+  <button class="chip my-resolved-control" id="my-resolved-filter-btn" title="Every ticket you resolved, including ones CS has confirmed and taken off the board" style="display:none"><span class="my-resolved-label">My resolved</span> <span class="jira-ct" id="my-resolved-count" style="display:none">0</span></button>
   <div class="sep my-resolved-control" style="display:none"></div>
   <span class="filter-label language-filter-control" style="display:none">Language:</span>
   <select class="filter-sel language-filter-control" id="language-filter" style="display:none"><option value="all">All languages</option></select>
@@ -11738,6 +11738,7 @@ function syncRoleRestrictedControls(){
   const hasMyResolved=currentUserHasMyResolved();
   document.querySelectorAll('.my-resolved-control').forEach(el=>{el.style.display=hasMyResolved?'':'none';});
   if(!hasMyResolved)showMyResolved=false;
+  else void loadMyResolved();
   // Admin-only tools. Hiding the entry point is presentation only - the
   // endpoints behind them are requireAdmin server-side.
   const isAdmin=currentUserIsAdmin();
@@ -18752,28 +18753,61 @@ function renderLaneBoard(visible){
   });
 }
 
-function ticketIsMyResolved(t){
-  if(String(ticketCategory[t.id]||'').toLowerCase()==='spam')return false;
-  // The KPI leaves duplicates out of every resolved figure; this count has to
-  // too, or an agent's badge and their KPI can never agree.
-  if(isDuplicateTicket(t.id))return false;
-  if(normalizeTicketStage(ticketState[t.id]||'new')!=='res')return false;
-  const me=supportIdentityCode();
-  return !!me&&ticketFilterAgentValues(t).assignee===me;
+/* The set behind "My resolved" comes from the server, from the KPI
+   dashboard's own working set (Resolved on "Since launch", scoped like the
+   dashboard: CS by CS owner, support by assignee, admins the whole team).
+   Counted here from the board state it ran a few tickets off the KPI - the
+   board's own assignee and stage, no launch cut-off, no hand credits, live
+   where the dashboard is a checkpoint snapshot. It moves when the KPIs do. */
+let myResolvedIds=new Set();
+let myResolvedTotal=0;
+let myResolvedAsOf='';
+let myResolvedLoadedAt=0;
+let myResolvedLoading=null;
+const MY_RESOLVED_REFRESH_MS=5*60*1000;
+function loadMyResolved(force){
+  if(!currentUserHasMyResolved())return Promise.resolve();
+  if(myResolvedLoading)return myResolvedLoading;
+  if(!force&&Date.now()-myResolvedLoadedAt<MY_RESOLVED_REFRESH_MS)return Promise.resolve();
+  myResolvedLoading=fetch('/api/tickets/my-resolved?tzOffset='+new Date().getTimezoneOffset(),{credentials:'include'})
+    .then(r=>r.ok?r.json():null)
+    .then(data=>{
+      if(!data?.ok)return;
+      myResolvedIds=new Set((data.externalIds||[]).map(String));
+      myResolvedTotal=Number(data.total)||0;
+      myResolvedAsOf=data.asOf||'';
+      myResolvedLoadedAt=Date.now();
+      updateMyResolvedBadge();
+      if(showMyResolved)renderBoard();
+    })
+    .catch(()=>{})
+    .finally(()=>{myResolvedLoading=null;});
+  return myResolvedLoading;
 }
-// Anyone who resolves tickets under a support code - an admin who is also on
-// the support roster included. Gating it on the support team left those
-// admins with no way to find their own resolved tickets once they left the
-// board.
+setInterval(()=>{void loadMyResolved();},MY_RESOLVED_REFRESH_MS);
+function ticketIsMyResolved(t){
+  return myResolvedIds.has(String(t.id));
+}
+// Everyone who has a KPI dashboard has a Resolved figure on it, so everyone
+// gets the chip: support, CS and admins alike.
 function currentUserHasMyResolved(){
-  const me=supportIdentityCode();
-  if(currentUserIsAdmin())return SUPPORT_AGENTS.includes(me);
-  return currentUserTeam()==='support';
+  return !!currentSessionUser;
 }
 function updateMyResolvedBadge(){
+  const btn=document.getElementById('my-resolved-filter-btn');
   const badge=document.getElementById('my-resolved-count');
   if(!badge)return;
-  const count=currentUserHasMyResolved()?allTickets.filter(ticketIsMyResolved).length:0;
+  const admin=currentUserIsAdmin();
+  const label=btn?.querySelector('.my-resolved-label');
+  if(label)label.textContent=admin?'Resolved':'My resolved';
+  if(btn){
+    const asOf=myResolvedAsOf?` As of ${new Date(myResolvedAsOf).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})}, the same figure as the KPIs.`:'';
+    const team=currentUserTeam();
+    btn.title=(admin?'Every ticket the team resolved since launch, including ones taken off the board.'
+      :team==='cs'?'Every resolved ticket you are the CS owner of since launch, including ones you confirmed and took off the board.'
+      :'Every ticket you resolved since launch, including ones CS has confirmed and taken off the board.')+asOf;
+  }
+  const count=currentUserHasMyResolved()?myResolvedTotal:0;
   badge.textContent=count>999?'999+':count;
   badge.style.display=count?'inline-flex':'none';
 }
@@ -18906,7 +18940,7 @@ document.getElementById('sla-filter-btn').addEventListener('click',()=>{activeSL
 document.getElementById('group-filter')?.addEventListener('change',e=>{boardGrouping=e.target.value==='company'?'company':'none';saveLastWorkspaceSession();renderBoard();});
 document.getElementById('language-filter')?.addEventListener('change',e=>{activeLanguage=e.target.value||'all';saveLastWorkspaceSession();renderBoard();});
 document.getElementById('snooze-filter-btn')?.addEventListener('click',()=>{showSnoozed=!showSnoozed;document.getElementById('snooze-filter-btn').classList.toggle('active',showSnoozed);renderBoard();});
-document.getElementById('my-resolved-filter-btn')?.addEventListener('click',()=>{showMyResolved=!showMyResolved;document.getElementById('my-resolved-filter-btn').classList.toggle('active',showMyResolved);renderBoard();});
+document.getElementById('my-resolved-filter-btn')?.addEventListener('click',()=>{showMyResolved=!showMyResolved;document.getElementById('my-resolved-filter-btn').classList.toggle('active',showMyResolved);renderBoard();if(showMyResolved)void loadMyResolved();});
 document.getElementById('save-view-btn')?.addEventListener('click',saveCurrentView);
 document.getElementById('copy-view-btn')?.addEventListener('click',copyViewLink);
 document.getElementById('saved-views')?.addEventListener('change',e=>{const v=e.target.value;e.target.value='';if(v!=='')applySavedView(v);});

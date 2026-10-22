@@ -1,6 +1,13 @@
 {
   "patches": [
     {
+      "date": "2026-10-22",
+      "title": "Counts Line Up",
+      "notes": [
+        { "type": "fixed", "text": "The My resolved count now matches the Resolved figure in your KPIs exactly, and updates at the same times. CS agents get it too, and admins get a Resolved chip for the whole team." }
+      ]
+    },
+    {
       "date": "2026-10-19",
       "title": "Patch Notes",
       "notes": [
