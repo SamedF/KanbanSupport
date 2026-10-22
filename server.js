@@ -7329,6 +7329,30 @@ app.get('/api/tickets/kpis/drilldown', requireAuth, async (req, res) => {
     return res.status(500).json({ error: 'read_kpi_drilldown_failed' });
   }
 });
+/* The board's "My resolved" chip, read from the KPI's own working set rather
+   than counted again from the board state. Counted on the board it disagreed
+   with the dashboard by a few tickets: the board went by its own assignee and
+   stage, skipped the launch cut-off and the hand credits, and was live where
+   the dashboard is a checkpoint snapshot. This is the dashboard's Resolved
+   card on "Since launch", scoped the way the dashboard scopes the person
+   asking - CS by CS owner, support by assignee, admins the whole team. */
+app.get('/api/tickets/my-resolved', requireAuth, async (req, res) => {
+  try {
+    const { myTeam, scopedTickets, creditsInRange, snapshot } = await loadKpiWorkingSet({
+      session: req.session,
+      query: { range: 'since_launch', team: 'all', agent: 'all', company: 'all', tzOffset: req.query.tzOffset }
+    });
+    // Counted the same way as statusCounts.res, a row with no externalId
+    // included, so the badge is the dashboard's figure to the ticket.
+    const resolved = scopedTickets.filter(t => normalizeDbStatusForBoard(t.status) === 'res');
+    const externalIds = resolved.filter(t => t.externalId).map(t => String(t.externalId));
+    const credits = creditsInRange.reduce((sum, c) => sum + c.count, 0);
+    return res.json({ ok: true, scope: myTeam, total: resolved.length + credits, credits, externalIds, ...kpiSnapshotInfo(snapshot) });
+  } catch (error) {
+    console.error('Read my resolved failed:', error);
+    return res.status(500).json({ error: 'read_my_resolved_failed' });
+  }
+});
 // ---------------------------------------------------------------------------
 // Insights
 //
