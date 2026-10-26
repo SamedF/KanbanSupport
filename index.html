@@ -9714,6 +9714,11 @@ function setTicketAssignee(id,agent,ts,source){
       :/^liveSync\//.test(why)?why.split('/')[1]
       :currentUser();
     ticketAssigneeBy[id]={by:actor,source:why,at:stamp,from:prev||''};
+    // Handed from one agent to another: the new owner starts with a full SLA.
+    // Not the first assignment, and not a resolved ticket, whose met/breached
+    // is already settled. A live-sync or reconciled change was reset on the
+    // board (or server) that made it, and the restart point syncs with it.
+    if(prev&&next&&!/^(liveSync|reconciled)\//.test(why)&&normalizeTicketStage(ticketState[id]||'new')!=='res'&&stamp>Number(ticketSlaResetAt[id]||0))ticketSlaResetAt[id]=stamp;
     logAssignChange({id:String(id),from:prev||'(none)',to:next||'(none)',result:'applied',ts:stamp,prevTs,by:why,actor,at:Date.now()});
   }
   return true;
@@ -11334,7 +11339,9 @@ function getSLAStatus(id){
   const slaNow=boardNow();
   const wallElapsed=slaNow-createdMs;
   const resetAt=Number(ticketSlaResetAt[id]||0)>new Date(createdAt).getTime()?Number(ticketSlaResetAt[id]):0;
-  const wallText=fmtDuration(wallElapsed)+(resetAt?' since the client\'s last reply':' since received');
+  // A restart stamped at the last handover came from the reassignment.
+  const resetWhy=!resetAt?' since received':resetAt===Number(ticketAssigneeBy[id]?.at||0)?' since reassigned':' since the client\'s last reply';
+  const wallText=fmtDuration(wallElapsed)+resetWhy;
   /* Linked to Jira, so the clock is off. The commitment is a response time
      from us, and once the ticket is with engineering the turnaround is not
      ours to make - telling the agent holding it that they are late asks them
@@ -11352,7 +11359,7 @@ function getSLAStatus(id){
   const adminHold=ticketSlaHold[id];
   if(adminHold&&adminHold.at){
     const frozenAt=Math.max(Number(adminHold.at),createdMs);
-    const frozenWall=fmtDuration(Math.max(0,frozenAt-createdMs))+(resetAt?' since the client\'s last reply':' since received');
+    const frozenWall=fmtDuration(Math.max(0,frozenAt-createdMs))+resetWhy;
     return{text:`SLA frozen${adminHold.by?' by '+adminHold.by:''}`,cls:'sla-warn',overdue:false,wallText:frozenWall,shiftMs:0,noClock:true,adminHold};
   }
   /* Snoozed: held from the moment it was snoozed. When the snooze ends the
@@ -11361,7 +11368,7 @@ function getSLAStatus(id){
   if(isSnoozed(id,slaNow)){
     const snoozeHold=snoozeEntry(id);
     const frozenAt=Math.min(slaNow,Math.max(Number(snoozeHold.at)||slaNow,createdMs));
-    const frozenWall=fmtDuration(Math.max(0,frozenAt-createdMs))+(resetAt?' since the client\'s last reply':' since received');
+    const frozenWall=fmtDuration(Math.max(0,frozenAt-createdMs))+resetWhy;
     return{text:'SLA on hold - snoozed',cls:'sla-warn',overdue:false,wallText:frozenWall,shiftMs:0,noClock:true,snoozeHold};
   }
   const jiraHoldKey=canonicalJiraKey(ticketJira[id]);

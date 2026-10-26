@@ -9747,6 +9747,14 @@ async function mcpUpdateTicket(apiUser, id, fields) {
     if (data.assignedAgent !== undefined && updated.assignedAgent !== existingTicket.assignedAgent) {
       entries.push({ field: 'ticketAssignee', id: key, value: updated.assignedAgent || null });
       entries.push({ field: 'ticketAssigneeTouchedAt', id: key, value: now });
+      // Handed from one agent to another: a full SLA for the new owner, the
+      // same rule as setTicketAssignee on the board.
+      if (existingTicket.assignedAgent && updated.assignedAgent && normalizeDbStatusForBoard(updated.status) !== 'res') {
+        entries.push({ field: 'ticketAssigneeBy', id: key, value: { by: null, source: 'api/update_ticket', at: now, from: existingTicket.assignedAgent } });
+        entries.push({ field: 'ticketSlaResetAt', id: key, value: now });
+        await prisma.ticket.update({ where: { id }, data: { slaResetAt: new Date(now) } })
+          .catch(error => console.error('Reassignment SLA reset write failed:', error?.message || error));
+      }
     }
     if (data.csAgent !== undefined && updated.csAgent !== existingTicket.csAgent) {
       // A decision like any other: stamped on the CS clock and flagged, so
