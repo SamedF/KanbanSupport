@@ -13991,13 +13991,13 @@ function projectThreadHtml(slug){
     const head=working
       ?`<strong>Claude is working on it</strong>${t.claimedBy?` (${esc(String(t.claimedBy).replace(/^mcp:/,''))})`:''}`
       :t.status==='collecting'?'<strong>The board is collecting the data for this run</strong>'
-      :t.status==='queued'?'<strong>Waiting for Claude to pick this up</strong>':'<strong>Sending…</strong>';
+      :t.status==='queued'?`<strong>${t.runner==='yours'?'Claude on your PC is picking this up':t.runner==='shared'?'Waiting for the shared runner to pick this up':'Waiting for Claude to pick this up'}</strong>`:'<strong>Sending…</strong>';
     parts.push(`<div class="pj-result pj-running pj-progress">
     <span class="spinner"></span>
     <span class="pj-progress-text">${head} <span data-pj-elapsed="${esc(slug)}">${esc(projectElapsedText(t.startedAt))}</span> &middot; You can leave this page &mdash; the answer is saved under Results when it lands.</span>
     <span class="pj-progress-bar"></span>
   </div>`);
-    if(t.status==='queued')parts.push(projectHandoffHtml(p,t.handoff));
+    if(t.status==='queued')parts.push(projectHandoffHtml(p,t.handoff,t.runner));
   }
   if(t.error)parts.push(`<div class="pj-result pj-error">${esc(t.error)}</div>`);
   // Nothing to follow up on until the project has answered once.
@@ -14244,16 +14244,23 @@ function projectClaudeUrl(p){
   return p?.claudeProjectId?`https://claude.ai/project/${encodeURIComponent(p.claudeProjectId)}`:'https://claude.ai/new';
 }
 /* What a queued run shows while it waits: the one line that hands it to Claude,
-   with Copy and Open Claude beside it. A runner PC takes it without anyone
-   doing this; the line is for when there is no runner, or it is off. */
-function projectHandoffHtml(p,handoff){
+   with Copy and Open Claude beside it. A runner (on your PC, or the shared one)
+   takes it without anyone doing this; the line is for when no runner is on.
+   runner is 'yours', 'shared' or 'none' - who the board saw listening. */
+function projectHandoffHtml(p,handoff,runner){
   if(!handoff)return'';
+  if(runner==='yours')return`<div class="pj-help">Your PC is connected and will take this run by itself. If it is busy with another run, the shared runner steps in after a few minutes.</div>`;
+  const help=runner==='shared'
+    ?'The shared runner will take it. To run it on your own Claude instead, paste this in a Claude chat that has the support board connector switched on.'
+    :runner==='none'
+    ?'No runner is connected, so nobody will take this by themselves. Paste it in a Claude chat that has the support board connector switched on, or start the runner on your PC.'
+    :'Paste it in a Claude chat that has the support board connector switched on.';
   return `<div class="pj-handoff">
     <code>${esc(handoff)}</code>
     <div class="pj-handoff-actions">
       <button class="btn-primary pj-copy" type="button" data-pj-clip="${esc(handoff)}">Copy for Claude</button>
       <a class="btn-out pj-copy" href="${esc(projectClaudeUrl(p))}" target="_blank" rel="noopener">Open Claude</a>
-      <span class="pj-help" style="margin:0;">Paste it in a Claude chat that has the support board connector switched on.</span>
+      <span class="pj-help" style="margin:0;">${help}</span>
     </div>
   </div>`;
 }
@@ -14279,7 +14286,7 @@ async function startAndAwaitProjectRun(slug,p,url,body,t){
     const data=await res.json().catch(()=>({}));
     if(!res.ok||data.ok===false||!data.runId){t.error=data?.message||data?.error||`HTTP ${res.status}`;return null;}
     runId=data.runId;
-    t.runId=runId;t.status=data.status||'queued';t.handoff=data.handoff||'';t.claimedBy='';
+    t.runId=runId;t.status=data.status||'queued';t.handoff=data.handoff||'';t.claimedBy='';t.runner=data.runner||'';
     renderProjectsView();
   }catch(error){
     t.error=String(error?.message||error);
@@ -14302,8 +14309,8 @@ async function startAndAwaitProjectRun(slug,p,url,body,t){
       }
       // Redrawn only when the state actually moves, so the form under it is
       // not rebuilt every few seconds.
-      if(res.ok&&run&&run.status!==t.status){
-        t.status=run.status;t.claimedBy=run.claimedBy||'';t.handoff=run.handoff||'';
+      if(res.ok&&run&&(run.status!==t.status||(run.runner||'')!==(t.runner||''))){
+        t.status=run.status;t.claimedBy=run.claimedBy||'';t.handoff=run.handoff||'';t.runner=run.runner||'';
         renderProjectsView();
       }
     }catch(_){/* one dropped check is not a failed run - try again next tick */}

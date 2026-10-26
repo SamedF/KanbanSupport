@@ -634,6 +634,27 @@ signed in on that PC, and use that account's skill versions - update skills
 (e.g. `q-data-audit`) there. Without a runner, runs wait for someone to paste
 the hand-off line.
 
+### A runner on your own PC
+
+The same script on an agent's own PC, with their own connector tokens and
+`-Mine`, makes Run go straight to that PC — no tab, nothing to paste — and does
+the run on that agent's own Claude account:
+
+    .\scripts\project-runner.ps1 -Install -Mine -ProdToken <your prod token> -PreprodToken <your preprod token>
+
+A `-Mine` runner asks for `/api/mcp/project-runs/queued?mine=1` and gets only
+the runs its token's owner queued. Every queue check is a check-in
+(`ClaudeProjectRunner`, created on first use), so the board knows whose PC is
+listening: the shared runner leaves a run alone while its owner's PC has
+checked in within the last 90 seconds, and takes it anyway once it has waited
+past the grace period (the PC is busy with another run, or asleep). While a run
+waits, the panel says who is picking it up — your PC, the shared runner, or
+nobody, in which case the hand-off line is the way.
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `PROJECT_LOCAL_RUNNER_GRACE_SECONDS` | `180` | How long the shared runner leaves a run to its owner's own PC before taking it. |
+
 ### Why the catalogue lives here and not in Claude
 
 **There is no API for claude.ai Projects.** The Admin API covers members,

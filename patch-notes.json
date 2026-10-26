@@ -2,9 +2,10 @@
   "patches": [
     {
       "date": "2026-10-26",
-      "title": "Fresh Handover",
+      "title": "Handover & Home Runs",
       "notes": [
-        { "type": "improved", "text": "When a ticket is reassigned to someone else, its SLA starts over, so the new owner gets the full time to answer. The badge says \"since reassigned\" when that is why the clock restarted." }
+        { "type": "improved", "text": "When a ticket is reassigned to someone else, its SLA starts over, so the new owner gets the full time to answer. The badge says \"since reassigned\" when that is why the clock restarted." },
+        { "type": "new", "text": "Projects can now run on your own PC: once the runner is set up there, pressing Run hands the job straight to your Claude, with no tab to open and nothing to paste. While a run waits, the card tells you who is picking it up." }
       ]
     },
     {

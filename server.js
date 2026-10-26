@@ -8382,6 +8382,50 @@ async function expireStaleProjectRuns() {
   `;
 }
 
+/* Runners, and whose runs they take.
+   scripts/project-runner.ps1 runs either on a shared always-on PC or, with
+   -Mine, on a person's own PC, where it takes only the runs that person queued
+   and does them on their own Claude account. Each queue check is a check-in, so
+   the board knows whose PC is listening. The shared runner leaves a run alone
+   while its owner's PC is listening, and takes it anyway once it has waited
+   past the grace period - the PC is busy with another run, or went to sleep. */
+const PROJECT_RUNNER_FRESH_MS = 90 * 1000;
+const PROJECT_LOCAL_GRACE_MS = Math.max(30, Number(process.env.PROJECT_LOCAL_RUNNER_GRACE_SECONDS || 180)) * 1000;
+
+async function ensureProjectRunnerTable() {
+  await prisma.$executeRaw`
+    CREATE TABLE IF NOT EXISTS "ClaudeProjectRunner" (
+      "username" TEXT NOT NULL,
+      "mode" TEXT NOT NULL,
+      "lastSeen" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY ("username", "mode")
+    )
+  `;
+}
+
+async function noteProjectRunnerCheckIn(username, mode) {
+  await ensureProjectRunnerTable();
+  await prisma.$executeRaw`
+    INSERT INTO "ClaudeProjectRunner" ("username","mode","lastSeen")
+    VALUES (${String(username || '').toLowerCase()}, ${mode}, CURRENT_TIMESTAMP)
+    ON CONFLICT ("username","mode") DO UPDATE SET "lastSeen" = CURRENT_TIMESTAMP
+  `;
+}
+
+// Who will pick up a queued run for this person: 'yours' when their own PC is
+// listening, 'shared' when only the shared runner is, 'none' when nobody is and
+// the run waits for someone to paste the hand-off line.
+async function projectRunnerFor(username) {
+  await ensureProjectRunnerTable();
+  const fresh = new Date(Date.now() - PROJECT_RUNNER_FRESH_MS);
+  const rows = await prisma.$queryRaw`
+    SELECT "mode" FROM "ClaudeProjectRunner"
+    WHERE "lastSeen" > ${fresh}
+      AND (("mode" = 'mine' AND "username" = ${String(username || '').toLowerCase()}) OR "mode" = 'shared')`;
+  const modes = new Set((Array.isArray(rows) ? rows : []).map(r => r.mode));
+  return modes.has('mine') ? 'yours' : modes.has('shared') ? 'shared' : 'none';
+}
+
 // Which board this deployment is. Prod and preprod are separate databases with
 // their own run ids, and a Claude often has both connectors switched on - run 12
 // on one is not run 12 on the other - so every hand-off names its board.
@@ -9132,7 +9176,8 @@ async function handleProjectRun(req, res, { withHistory }) {
       collectAuditCorpus(runId, collection.teamId);
       return res.status(202).json({ ok: true, runId, status: 'collecting', handoff: '' });
     }
-    return res.status(202).json({ ok: true, runId, status: 'queued', handoff: projectRunHandoffPrompt(runId) });
+    const runner = await projectRunnerFor(req.session?.username).catch(() => 'none');
+    return res.status(202).json({ ok: true, runId, status: 'queued', handoff: projectRunHandoffPrompt(runId), runner });
   } catch (error) {
     console.error('Project run could not be queued:', String(error?.message || error));
     return res.status(500).json({ error: 'project_run_failed', message: 'Could not queue the run.' });
@@ -9168,7 +9213,9 @@ app.get('/api/projects/:id/runs/:runId', requireAuth, async (req, res) => {
       SELECT * FROM "ClaudeProjectRun" WHERE "id" = ${runId} AND "projectId" = ${id} LIMIT 1`;
     const row = Array.isArray(rows) ? rows[0] : null;
     if (!row) return res.status(404).json({ error: 'run_not_found' });
-    return res.json({ ok: true, run: projectRunRow(row) });
+    const run = projectRunRow(row);
+    if (run.status === 'queued') run.runner = await projectRunnerFor(row.createdBy).catch(() => 'none');
+    return res.json({ ok: true, run });
   } catch (error) {
     console.error('Project run lookup failed:', error?.message || error);
     return res.status(500).json({ error: 'project_run_lookup_failed' });
@@ -10290,14 +10337,31 @@ async function mcpShiftHandover(hours) {
 // For scripts/project-runner.ps1: is there anything to do? Answered with a
 // connector token, so the runner can check the queue every few seconds without
 // starting Claude - and without spending anyone's usage - when it is empty.
+// ?mine=1 is a runner on someone's own PC: it gets only the runs its token's
+// owner queued. Without it, the shared runner gets everyone else's, plus any of
+// theirs that a personal runner left waiting past the grace period.
 app.get('/api/mcp/project-runs/queued', requireApiToken, mcpApiLimiter, async (req, res) => {
   try {
     await ensureProjectRunTable();
     await expireStaleProjectRuns();
-    const rows = await prisma.$queryRaw`
-      SELECT r."id", p."name" AS "project", r."createdBy", r."createdAt"
-      FROM "ClaudeProjectRun" r JOIN "ClaudeProject" p ON p."id" = r."projectId"
-      WHERE r."status" = 'queued' ORDER BY r."createdAt" ASC, r."id" ASC LIMIT 20`;
+    const mine = req.query.mine === '1' || req.query.mine === 'true';
+    await noteProjectRunnerCheckIn(req.apiUser.username, mine ? 'mine' : 'shared');
+    const fresh = new Date(Date.now() - PROJECT_RUNNER_FRESH_MS);
+    const graceCutoff = new Date(Date.now() - PROJECT_LOCAL_GRACE_MS);
+    const rows = mine
+      ? await prisma.$queryRaw`
+          SELECT r."id", p."name" AS "project", r."createdBy", r."createdAt"
+          FROM "ClaudeProjectRun" r JOIN "ClaudeProject" p ON p."id" = r."projectId"
+          WHERE r."status" = 'queued' AND LOWER(r."createdBy") = ${String(req.apiUser.username || '').toLowerCase()}
+          ORDER BY r."createdAt" ASC, r."id" ASC LIMIT 20`
+      : await prisma.$queryRaw`
+          SELECT r."id", p."name" AS "project", r."createdBy", r."createdAt"
+          FROM "ClaudeProjectRun" r JOIN "ClaudeProject" p ON p."id" = r."projectId"
+          WHERE r."status" = 'queued'
+            AND (r."createdAt" < ${graceCutoff} OR NOT EXISTS (
+              SELECT 1 FROM "ClaudeProjectRunner" w
+              WHERE w."mode" = 'mine' AND w."username" = LOWER(r."createdBy") AND w."lastSeen" > ${fresh}))
+          ORDER BY r."createdAt" ASC, r."id" ASC LIMIT 20`;
     const runs = (Array.isArray(rows) ? rows : []).map(r => ({
       runId: r.id, project: r.project, requestedBy: r.createdBy || '', queuedAt: r.createdAt, prompt: projectRunHandoffPrompt(r.id)
     }));
