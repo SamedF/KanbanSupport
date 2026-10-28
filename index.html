@@ -11471,6 +11471,9 @@ async function syncTicketStatusToHubspot(ticketId,newCol){const hsId=ticketHubsp
 
 //  Spam 
 function recordSpamSender(spamEmail){if(!spamEmail||isQuintaSender(spamEmail)||spamSenders.has(spamEmail))return 0;spamSenders.add(spamEmail);let count=0;allTickets.forEach(t=>{const te=ticketClientEmail[t.id]||t.email.sender?.toLowerCase();if(te===spamEmail){ticketCategory[t.id]='Spam';count++;}});return count;}
+// Records the ticket's sender as spam, so their other tickets and new mail
+// follow it. Quinta senders are never recorded. True when a toast was shown.
+function recordTicketSenderAsSpam(id,email){const spamEmail=ticketClientEmail[id]||email?.sender?.toLowerCase();if(!spamEmail||isQuintaSender(spamEmail))return false;const rc=recordSpamSender(spamEmail);showToast(rc>1?` Spam recorded · ${rc} tickets marked`:' Spam sender recorded','spam-t');return true;}
 function getSpamTickets(){return allTickets.filter(t=>ticketCategory[t.id]==='Spam'&&normalizeTicketStage(ticketState[t.id]||'new')!=='res'&&ticketVisibleToCurrentUser(t)).sort((a,b)=>new Date(b.email.receivedDateTime||0)-new Date(a.email.receivedDateTime||0));}
 function updateSpamBadge(){const cnt=getSpamTickets().length;const badge=document.getElementById('spam-count');const btn=document.getElementById('spam-view-btn');if(cnt>0){badge.textContent=cnt>99?'99+':cnt;badge.style.display='inline-flex';}else{badge.style.display='none';}(cnt>0&&!btn.classList.contains('active'))&&(btn.style.fontWeight='700');}
 function getArchivedTickets(){return allTickets.filter(t=>isArchivedTicket(t.id)&&ticketVisibleToCurrentUser(t)).sort((a,b)=>(ticketArchived[b.id]?.archivedAt||0)-(ticketArchived[a.id]?.archivedAt||0));}
@@ -14829,6 +14832,7 @@ function renderKpiAllTime(all){
       <span><strong>${n(all.open)}</strong> still open</span>
       <span><strong>${n(all.duplicates)}</strong> duplicate${all.duplicates===1?'':'s'} (not counted)</span>
       <span><strong>${n(all.spam)}</strong> spam (not counted)</span>
+      <span><strong>${n(all.archived)}</strong> archived unresolved (not counted)</span>
     </div>
     <button class="btn-out kpi-alltime-btn" type="button" data-kpi-range="since_launch">Show all of it below</button>`;
   el.hidden=false;
@@ -17424,6 +17428,7 @@ function makeCard(ticket,isNew=false){
         ${dupMasterId?'':`<button class="btn-out card-act" data-dup-open="${id}" title="Mark this ticket as a duplicate of another one">Duplicate</button>`}
         <button class="btn-out card-act" data-snooze-open="${id}" title="Hide this ticket until later - a client reply wakes it early">${snooze?'Snoozed':'Snooze'}</button>
         <button class="btn-out card-act" data-archive="${id}" title="Archive this ticket">Archive</button>
+        <button class="btn-out card-act" data-spam="${id}" title="Send this ticket to the Spam Inbox">Spam</button>
         ${hsTicketBtn}
       </div>
       <div class="card-people">
@@ -17529,7 +17534,23 @@ function makeCard(ticket,isNew=false){
        below redraws the control as a text field or a select to match. */
     if(ticketSubtype[id])delete ticketSubtype[id];
     delete subtypeDrafts[id];
-    if(newCat==='Spam'){const spamEmail=ticketClientEmail[id]||email.sender?.toLowerCase();if(spamEmail&&!isQuintaSender(spamEmail)){const rc=recordSpamSender(spamEmail);showToast(rc>1?` Spam recorded · ${rc} tickets marked`:' Spam sender recorded','spam-t');}}saveState();renderBoard();updateSpamBadge();});
+    if(newCat==='Spam')recordTicketSenderAsSpam(id,email);saveState();renderBoard();updateSpamBadge();});
+  div.querySelector('[data-spam]')?.addEventListener('click',async ev=>{
+    ev.stopPropagation();
+    const answer=await confirmAction('Send this ticket to the Spam Inbox? Other tickets and new mail from the same sender go there too. It can be restored from the Spam Inbox.',
+      {title:'Mark as spam',confirmLabel:'Spam',danger:true});
+    if(!answer||ticketCategory[id]==='Spam')return;
+    ticketCategory[id]='Spam';
+    if(ticketSubtype[id])delete ticketSubtype[id];
+    delete subtypeDrafts[id];
+    if(!recordTicketSenderAsSpam(id,email))showToast(' Moved to Spam Inbox','spam-t');
+    // Leaving the board, so it leaves the selection too, as Archive does.
+    selectedTickets.delete(id);
+    if(lastSelectedId===id)lastSelectedId=null;
+    if(focusedCardId===id)focusedCardId=null;
+    saveState('ticket_marked_spam');
+    renderBoard();updateSpamBadge();
+  });
   /* The numbered sub-category picker. This had no listener at all before, so
      changing it on a card looked like it worked and was gone on the next
      render - worth wiring while the free-text field next to it is being

@@ -6716,18 +6716,25 @@ function kpiNextCheckpointAfter(ms = Date.now()) {
 let kpiSnapshot = null;
 let kpiSnapshotLoading = null;
 async function takeKpiSnapshot(checkpoint) {
-  const [tickets, spam] = await Promise.all([
+  const [allTickets, spam] = await Promise.all([
     prisma.ticket.findMany({ where: { NOT: [{ category: { equals: 'Spam', mode: 'insensitive' } }] }, select: KPI_TICKET_SELECT, orderBy: [{ createdAt: 'desc' }] }),
     prisma.ticket.findMany({ where: { category: { equals: 'Spam', mode: 'insensitive' } }, select: KPI_TICKET_SELECT })
   ]);
-  // Snoozes live in the board state, not on the row.
-  const snoozes = safeReadState().ticketSnooze || {};
+  // Snoozes and archives live in the board state, not on the row.
+  const state = safeReadState();
+  const snoozes = state.ticketSnooze || {};
+  const archives = state.ticketArchived || {};
+  // A ticket archived without being resolved was put away, not worked: it is
+  // left out of every figure, like spam. Archived after resolving still counts.
+  const archivedOpen = allTickets.filter(t => archives[t.externalId] && normalizeDbStatusForBoard(t.status) !== 'res');
+  const archivedOpenIds = new Set(archivedOpen.map(t => t.externalId));
+  const tickets = allTickets.filter(t => !archivedOpenIds.has(t.externalId));
   for (const t of tickets) {
     const entry = snoozes[t.externalId];
     if (entry && Number(entry.at) > 0) t.snooze = { at: Number(entry.at), until: Number(entry.until) || 0 };
   }
-  kpiSnapshot = { checkpoint, takenAt: Date.now(), tickets, spam };
-  console.log(`KPI snapshot for ${new Date(checkpoint).toISOString()}: ${tickets.length} ticket(s), ${spam.length} spam.`);
+  kpiSnapshot = { checkpoint, takenAt: Date.now(), tickets, spam, archivedOpen };
+  console.log(`KPI snapshot for ${new Date(checkpoint).toISOString()}: ${tickets.length} ticket(s), ${spam.length} spam, ${archivedOpen.length} archived unresolved.`);
   return kpiSnapshot;
 }
 async function currentKpiSnapshot() {
@@ -6842,11 +6849,15 @@ async function loadKpiWorkingSet(req) {  const bounds = kpiDateBounds(req.query.
   };
 
   const snapshot = await currentKpiSnapshot();
+  // The queries over ticket events leave out the same archived tickets the
+  // snapshot does.
+  if (snapshot.archivedOpen.length) baseWhere.externalId = { notIn: snapshot.archivedOpen.map(t => t.externalId) };
   const baseFilter = { launchStart, company, jiraOnly };
   const statusTickets = snapshot.tickets.filter(t => kpiTicketMatchesBase(t, baseFilter) && kpiTicketMatchesAccess(t, access));
   const tickets = statusTickets.filter(t => inBounds(t.createdAt) || inBounds(t.updatedAt) || inBounds(t.resolvedAt));
   // The admin banner's spam figure, from the same snapshot.
   const spamCount = snapshot.spam.filter(t => kpiTicketMatchesBase(t, baseFilter) && kpiTicketMatchesAccess(t, access)).length;
+  const archivedOpenCount = snapshot.archivedOpen.filter(t => kpiTicketMatchesBase(t, baseFilter) && kpiTicketMatchesAccess(t, access)).length;
   const scopedTicketsAll = tickets.filter(ticket => kpiTicketInRange(ticket, bounds));
 
   // Duplicates are held back from every figure that counts work. They are
@@ -6869,7 +6880,7 @@ async function loadKpiWorkingSet(req) {  const bounds = kpiDateBounds(req.query.
   const slaAgent = (myTeam === 'cs' || myTeam === 'support') ? username : (agent && agent !== 'ALL' ? agent : null);
   const creditsAll = kpiResolvedCreditTickets().filter(c => kpiTicketMatchesBase(c, baseFilter) && kpiTicketMatchesAccess(c, access));
   const creditsInRange = creditsAll.filter(c => inBounds(c.resolvedAt));
-  return { bounds, myTeam, team, agent, slaAgent, company, jiraOnly, baseWhere, accessWhere, tickets, scopedTickets, workTickets, duplicatesOpen, duplicatesInRange, snapshot, spamCount, creditsAll, creditsInRange };
+  return { bounds, myTeam, team, agent, slaAgent, company, jiraOnly, baseWhere, accessWhere, tickets, scopedTickets, workTickets, duplicatesOpen, duplicatesInRange, snapshot, spamCount, archivedOpenCount, creditsAll, creditsInRange };
 }
 function kpiDrilldownRow(t, detail) {
   return {
@@ -6886,7 +6897,7 @@ function kpiDrilldownRow(t, detail) {
 }
 app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
   try {
-    const { bounds, myTeam, team, agent, slaAgent, company, jiraOnly, baseWhere, accessWhere, tickets, scopedTickets, workTickets, duplicatesOpen, duplicatesInRange, snapshot, spamCount, creditsAll, creditsInRange } = await loadKpiWorkingSet(req);
+    const { bounds, myTeam, team, agent, slaAgent, company, jiraOnly, baseWhere, accessWhere, tickets, scopedTickets, workTickets, duplicatesOpen, duplicatesInRange, snapshot, spamCount, archivedOpenCount, creditsAll, creditsInRange } = await loadKpiWorkingSet(req);
     const sumCredits = list => list.reduce((sum, c) => sum + c.count, 0);
     const resolvedCredit = sumCredits(creditsInRange);
 
@@ -7126,7 +7137,7 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
         company && company !== 'all' ? company : '',
         jiraOnly ? 'Jira-linked' : ''
       ].filter(Boolean).join(' · ');
-      allTime = { since: since ? since.toISOString() : null, scope: scope || 'whole board', created, resolved, open: created - resolvedTickets, duplicates: duplicatesOpen.length, spam };
+      allTime = { since: since ? since.toISOString() : null, scope: scope || 'whole board', created, resolved, open: created - resolvedTickets, duplicates: duplicatesOpen.length, spam, archived: archivedOpenCount };
     }
 
     return res.json({
