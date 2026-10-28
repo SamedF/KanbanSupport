@@ -5,7 +5,9 @@
       "title": "Clean Sweep",
       "notes": [
         { "type": "new", "text": "Every card now has a Spam button that sends the ticket straight to the Spam Inbox, along with other mail from the same sender. Restore it from the Spam Inbox if it was a mistake." },
-        { "type": "improved", "text": "Tickets archived without being resolved no longer count in the KPIs. Tickets archived after being resolved still count as resolved work." }
+        { "type": "improved", "text": "Tickets archived without being resolved no longer count in the KPIs. Tickets archived after being resolved still count as resolved work." },
+        { "type": "fixed", "text": "KPIs now update on time at 00:00, 09:00, 12:00 and 16:00 Tunisia time, and the page picks up each update even if your PC was asleep." },
+        { "type": "new", "text": "Admins have a Day report on the KPI page: every ticket resolved on a chosen day, by agent, with SLA met or missed." }
       ]
     },
     {

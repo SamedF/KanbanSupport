@@ -760,8 +760,10 @@ so both sides of the app agree. Change one and change the other.
 
 Those hours are the team's local time. The board reads them in the browser's
 timezone; the server sets its own at startup from `SLA_TIMEZONE` (an IANA name,
-default `Africa/Casablanca`, or `TZ` if that is set). Without it the container
-counted in UTC, an hour off the board.
+default `Africa/Tunis`, GMT+1 with no daylight saving). A generic `TZ` is
+ignored on purpose: a cluster-wide `TZ=UTC` put every KPI checkpoint an hour
+after the time the page showed. Without this the container counted in UTC, an
+hour off the board.
 
 A hold (Waiting on Contact, a Jira link, an open Velma bug) carries the clock
 over in working time: when it ends, the ticket resumes with exactly the working
@@ -833,7 +835,7 @@ measured from there too. That runs once per database (a `SyncLog` row of type
 it ran.
 
 From the baseline on, the SLA is measured live, and the **KPI dashboard updates
-at 00:00, 09:00, 12:00 and 16:00** in the SLA's time zone. At each checkpoint the
+at 00:00, 09:00, 12:00 and 16:00** in the SLA's time zone (Tunisia time). At each checkpoint the
 server takes one snapshot of the tickets, and every KPI figure and drilldown
 comes from it, with SLA positions judged as of that moment, until the next
 checkpoint. A change made in between reaches the dashboard at the next one, and

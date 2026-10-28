@@ -3,8 +3,10 @@ require('dotenv').config();
 // the team's hours, not the container's. The image ships with no timezone, so
 // without this the server counted in UTC: its "weekend" began an hour early
 // and its windows sat an hour off the board's. Set before anything reads a
-// date. SLA_TIMEZONE overrides; an explicit TZ is kept.
-process.env.TZ = String(process.env.SLA_TIMEZONE || process.env.TZ || 'Africa/Casablanca').trim();
+// date. The team works on Tunisia time (GMT+1, no daylight saving). Only
+// SLA_TIMEZONE overrides it: a generic TZ (often UTC on a cluster) used to win
+// here, which put every KPI checkpoint an hour after the time the page showed.
+process.env.TZ = String(process.env.SLA_TIMEZONE || 'Africa/Tunis').trim();
 const prisma = require('./prismaClient');
 const { Prisma } = require('@prisma/client');
 const express = require('express');
@@ -7362,6 +7364,63 @@ app.get('/api/tickets/my-resolved', requireAuth, async (req, res) => {
   } catch (error) {
     console.error('Read my resolved failed:', error);
     return res.status(500).json({ error: 'read_my_resolved_failed' });
+  }
+});
+/* Admins' day report: every ticket resolved on one calendar day (the SLA's
+   zone, Tunisia time), by agent. Read live from the database rather than the
+   KPI snapshot, so a day that has just ended reads complete without waiting
+   for the next checkpoint. Spam is left out; duplicates are listed but not
+   counted, as on the dashboard. Hand credits dated that day are added to the
+   agent's count. */
+app.get('/api/tickets/kpis/day-report', requireAdmin, async (req, res) => {
+  try {
+    const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(req.query.date || ''));
+    const now = new Date();
+    const start = match ? new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3])) : new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    if (Number.isNaN(start.getTime())) return res.status(400).json({ error: 'invalid_date' });
+    const end = new Date(start.getFullYear(), start.getMonth(), start.getDate() + 1);
+    const pad = n => String(n).padStart(2, '0');
+    const date = `${start.getFullYear()}-${pad(start.getMonth() + 1)}-${pad(start.getDate())}`;
+    const rows = await prisma.ticket.findMany({
+      where: {
+        resolvedAt: { gte: start, lt: end },
+        NOT: [{ category: { equals: 'Spam', mode: 'insensitive' } }]
+      },
+      select: KPI_TICKET_SELECT,
+      orderBy: [{ resolvedAt: 'asc' }]
+    });
+    const resolved = rows.filter(t => normalizeDbStatusForBoard(t.status) === 'res');
+    const byAgent = {};
+    const agentRow = code => (byAgent[code] ||= { agent: code, resolved: 0, credits: 0, slaMet: 0, slaBreached: 0, duplicates: 0 });
+    const tickets = resolved.map(t => {
+      const agent = String(t.assignedAgent || '').trim().toUpperCase() || 'Unassigned';
+      const row = agentRow(agent);
+      const duplicate = !!t.duplicateOfExternalId;
+      const sla = ticketSlaSnapshot(t);
+      if (duplicate) row.duplicates++;
+      else {
+        row.resolved++;
+        if (sla.state === 'met') row.slaMet++;
+        else if (sla.state === 'breached') row.slaBreached++;
+      }
+      return {
+        ...kpiDrilldownRow(t),
+        agent,
+        csAgent: t.csAgent || null,
+        resolvedAt: kpiResolvedDate(t)?.toISOString() || null,
+        sla: sla.state,
+        duplicate
+      };
+    });
+    for (const c of kpiResolvedCreditTickets()) {
+      if (c.resolvedAt >= start && c.resolvedAt < end) agentRow(c.assignedAgent).credits += c.count;
+    }
+    const agents = Object.values(byAgent).sort((a, b) => (b.resolved + b.credits) - (a.resolved + a.credits) || a.agent.localeCompare(b.agent));
+    const total = agents.reduce((sum, a) => sum + a.resolved + a.credits, 0);
+    return res.json({ ok: true, date, timeZone: process.env.TZ || null, total, agents, tickets, generatedAt: new Date().toISOString() });
+  } catch (error) {
+    console.error('Read day report failed:', error);
+    return res.status(500).json({ error: 'read_day_report_failed' });
   }
 });
 // ---------------------------------------------------------------------------

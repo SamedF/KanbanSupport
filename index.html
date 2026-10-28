@@ -8512,7 +8512,8 @@ th {
     <div id="kpi-range-label" style="font-size:14px;color:var(--legacy-666);">Loading</div>
     <div style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--legacy-666);">
       <span id="kpi-freshness">-</span>
-      <button class="btn-out" id="kpi-refresh-now" type="button" style="font-size:13px;padding:3px 9px;" title="Pulls again - the figures themselves only change at 00:00, 09:00, 12:00 and 16:00">Refresh</button>
+      <button class="btn-out" id="kpi-refresh-now" type="button" style="font-size:13px;padding:3px 9px;" title="Pulls again - the figures themselves only change at 00:00, 09:00, 12:00 and 16:00 (Tunisia time)">Refresh</button>
+      <button class="btn-out" id="kpi-day-report-btn" type="button" style="font-size:13px;padding:3px 9px;" title="Every ticket resolved on a day, by agent (Tunisia time)" hidden>Day report</button>
     </div>
   </div>
   <!-- Admins only: every ticket since the board went live. Filled by the KPI
@@ -8788,6 +8789,17 @@ th {
 <!-- Intern com modal -->
 <div class="modal-bg" id="com-modal"><div class="modal" style="max-width:560px;"><div class="modal-head"><div style="flex:1;min-width:0;"><h2 id="com-title"></h2><div style="font-size:13px;color:var(--slate-400);margin-top:3px;" id="com-subtitle"></div></div><button class="modal-close-x" data-close="com-modal"></button></div><div class="tr-bar" id="com-tr-bar"></div><div class="com-thread" id="com-thread"></div><div class="compose-area"><div class="compose-label">Add internal comment</div><textarea class="compose-textarea" id="com-input" placeholder="e.g. Client needs to provide API credentials before we can proceed."></textarea><div class="compose-footer"><div class="tag-section"><label>Tag people:</label><div class="tag-grid" id="tag-grid"></div></div><div style="display:flex;gap:8px;align-self:flex-end;"><button class="btn-out" id="com-debug-expert">Debug Expert</button><button class="btn-primary" id="com-post">Post</button></div></div></div></div></div>
 <!-- KPI drilldown: the tickets behind a red ("bad" tone) KPI card -->
+<!-- Admins: tickets resolved on one day, by agent. Read live, not from the KPI checkpoint. -->
+<div class="modal-bg" id="kpi-day-report-modal"><div class="modal" style="max-width:760px;"><div class="modal-head"><h2 id="kpi-day-report-title">Day report</h2><button class="modal-close-x" data-close="kpi-day-report-modal"></button></div>
+  <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px;font-size:14px;">
+    <label for="kpi-day-report-date">Day</label>
+    <input type="date" id="kpi-day-report-date" class="filter-sel" style="max-width:170px;">
+    <button class="btn-out" id="kpi-day-report-prev" type="button" style="font-size:13px;padding:3px 9px;">&larr; Previous</button>
+    <button class="btn-out" id="kpi-day-report-next" type="button" style="font-size:13px;padding:3px 9px;">Next &rarr;</button>
+    <span id="kpi-day-report-meta" style="color:var(--legacy-666);font-size:13px;"></span>
+  </div>
+  <div class="modal-body-scroll" id="kpi-day-report-body"></div>
+  <div class="modal-actions"><button class="btn-out" id="kpi-day-report-copy" type="button">Copy summary</button><button class="btn-out" data-close="kpi-day-report-modal">Close</button></div></div></div>
 <div class="modal-bg" id="kpi-tickets-modal"><div class="modal" style="max-width:640px;"><div class="modal-head"><h2 id="kpi-tickets-title"></h2><button class="modal-close-x" data-close="kpi-tickets-modal"></button></div><div class="modal-body-scroll" id="kpi-tickets-list"></div><div class="modal-actions"><button class="btn-out" data-close="kpi-tickets-modal">Close</button></div></div></div>
 <!-- Bulk triage: appears only when something is selected. -->
 <div class="selection-bar" id="selection-bar"></div>
@@ -11081,7 +11093,7 @@ const BUSINESS_MS_PER_DAY = BUSINESS_WINDOWS.reduce((total, [sh, sm, eh, em]) =>
    agent abroad or on a PC set to another zone saw 08:00-12:00 land on the
    wrong hours, and their badges disagreed with the dashboard. Offsets are
    cached per hour, since they only change on the hour. */
-let slaTimeZone='Africa/Casablanca';
+let slaTimeZone='Africa/Tunis';
 let slaZoneFmt=null;
 let slaZoneOffsetCache=new Map();
 function setSlaTimeZone(tz){
@@ -11107,6 +11119,10 @@ function slaZoneOffsetMs(ms){
 }
 // A wall-clock time in the SLA zone, written as if it were UTC, to the instant.
 function slaZoneToUtc(wall){return wall-slaZoneOffsetMs(wall-slaZoneOffsetMs(wall));}
+// The tzOffset the KPI endpoints take (minutes, UTC minus local), for the SLA
+// zone rather than the PC's, so "Today" starts at midnight Tunisia time
+// whatever zone the viewer's machine is set to.
+function slaZoneTzOffset(){return String(-Math.round(slaZoneOffsetMs(Date.now())/60000));}
 function slaZoneDayStart(ms){return Math.floor((ms+slaZoneOffsetMs(ms))/86400000)*86400000;}
 function slaZoneIsWeekend(day){const d=new Date(day).getUTCDay();return d===0||d===6;}
 function businessMsInRange(from, to) {
@@ -14941,13 +14957,13 @@ function kpiZoneTime(iso){
 }
 function kpiFreshnessText(){
   if(!kpiLastLoadedAt||!kpiSnapshotInfo)return'Not loaded yet';
-  return`Figures as of ${kpiZoneTime(kpiSnapshotInfo.asOf)} · next update ${kpiZoneTime(kpiSnapshotInfo.nextUpdateAt)}`;
+  return`Figures as of ${kpiZoneTime(kpiSnapshotInfo.asOf)} · next update ${kpiZoneTime(kpiSnapshotInfo.nextUpdateAt)} (Tunisia time)`;
 }
 function updateKpiFreshnessLabel(){
   const el=document.getElementById('kpi-freshness');
   if(el){
     el.textContent=kpiFreshnessText();
-    el.title='The KPI figures update at '+(kpiSnapshotInfo?.checkpointHours||[0,9,12,16]).map(h=>String(h).padStart(2,'0')+':00').join(', ')+'. Changes made in between show at the next update.';
+    el.title='The KPI figures update at '+(kpiSnapshotInfo?.checkpointHours||[0,9,12,16]).map(h=>String(h).padStart(2,'0')+':00').join(', ')+' Tunisia time. Changes made in between show at the next update.';
   }
 }
 // Pulls a few seconds after the next checkpoint, by the server's clock.
@@ -14961,6 +14977,14 @@ function startKpiAutoRefresh(){
     if(viewMode!=='kpi'||document.visibilityState!=='visible')return;
     void renderKpiView({force:true});
   },Math.min(Math.max(1000,next-boardNow()+3000),2**31-1));
+  // A timer hours long does not count while the PC sleeps and is held back in
+  // a throttled tab, so it could fire long after the checkpoint and the page
+  // sat on the old figures. This check catches any checkpoint the timer missed.
+  kpiFreshnessTimer=setInterval(()=>{
+    if(viewMode!=='kpi'||document.visibilityState!=='visible'||kpiFetchInFlight)return;
+    const due=kpiNextUpdateMs();
+    if(due&&boardNow()>=due+3000)void renderKpiView({force:true});
+  },30000);
 }
 function stopKpiAutoRefresh(){
   clearTimeout(kpiRefreshTimer);kpiRefreshTimer=null;
@@ -15061,7 +15085,7 @@ async function openKpiDrilldown(key){
   const requestId=++kpiDrilldownRequestSeq;
   showKpiTicketsPopup(entry.title,[],{loading:true});
   try{
-    const params=new URLSearchParams({category:entry.category,range:kpiTimeFilter,team:kpiTeamFilter,agent:kpiAgentFilter,company:activeCompany||'all',jiraOnly:activeJira?'true':'false',tzOffset:String(new Date().getTimezoneOffset())});
+    const params=new URLSearchParams({category:entry.category,range:kpiTimeFilter,team:kpiTeamFilter,agent:kpiAgentFilter,company:activeCompany||'all',jiraOnly:activeJira?'true':'false',tzOffset:slaZoneTzOffset()});
     const res=await fetch('/api/tickets/kpis/drilldown?'+params.toString(),{credentials:'include'});
     const data=await res.json().catch(()=>({}));
     if(!res.ok)throw new Error(data?.error||'drilldown_fetch_failed');
@@ -15107,6 +15131,7 @@ async function renderKpiView(opts){
     kpiAgentFilter=enforcedAgentFilter();
   }
   const canViewAllTickets=canViewAllKpis;
+  document.getElementById('kpi-day-report-btn').hidden=!canViewAllKpis;
   const agentFilterEl=document.getElementById('kpi-agent-filter');
   const teamFilterEl=document.getElementById('kpi-team-filter');
   populateKpiRangeOptions();
@@ -15114,7 +15139,7 @@ async function renderKpiView(opts){
   document.getElementById('kpi-team-filter').value=kpiTeamFilter;
   // Only announce loading on the first pull - a timed refresh that blanked the
   // header every 45 seconds would read as the dashboard breaking.
-  const params=new URLSearchParams({range:kpiTimeFilter,team:kpiTeamFilter,agent:kpiAgentFilter,company:activeCompany||'all',jiraOnly:activeJira?'true':'false',tzOffset:String(new Date().getTimezoneOffset())});
+  const params=new URLSearchParams({range:kpiTimeFilter,team:kpiTeamFilter,agent:kpiAgentFilter,company:activeCompany||'all',jiraOnly:activeJira?'true':'false',tzOffset:slaZoneTzOffset()});
   // The figures on screen stand until the next checkpoint: a board patch or a
   // return to this view does not pull again unless a filter changed.
   if(!opts?.force&&kpiLastLoadedAt&&kpiLoadedKey===params.toString()&&boardNow()<kpiNextUpdateMs())return;
@@ -15679,6 +15704,70 @@ document.getElementById('qt-detect-clear').addEventListener('click',()=>{
   qtDetectRows=[];qtDetectRender();qtDetectSetStatus('Paste URLs to begin.');
 });
 document.getElementById('kpi-refresh-now').addEventListener('click',()=>{if(viewMode==='kpi')void renderKpiView({force:true});});
+// ---------------------------------------------------------------------------
+// Day report (admins): the tickets resolved on one day, Tunisia time, by
+// agent. Read live from the server, not from the KPI checkpoint, so a day
+// that has just ended reads complete.
+// ---------------------------------------------------------------------------
+let kpiDayReport=null,kpiDayReportSeq=0;
+function slaZoneDateKey(ms){return new Date(slaZoneDayStart(ms)).toISOString().slice(0,10);}
+function shiftDateKey(key,days){const d=new Date(key+'T00:00:00Z');d.setUTCDate(d.getUTCDate()+days);return d.toISOString().slice(0,10);}
+async function loadKpiDayReport(date){
+  const body=document.getElementById('kpi-day-report-body');
+  const meta=document.getElementById('kpi-day-report-meta');
+  document.getElementById('kpi-day-report-date').value=date;
+  document.getElementById('kpi-day-report-next').disabled=date>=slaZoneDateKey(boardNow());
+  body.innerHTML='<div style="padding:20px 0;color:var(--muted);font-size:15px;">Loading...</div>';
+  meta.textContent='';
+  const seq=++kpiDayReportSeq;
+  try{
+    const res=await fetch('/api/tickets/kpis/day-report?date='+encodeURIComponent(date),{credentials:'include'});
+    const data=await res.json().catch(()=>({}));
+    if(!res.ok)throw new Error(data?.error||'day_report_failed');
+    if(seq!==kpiDayReportSeq)return;
+    kpiDayReport=data;
+    const day=new Date(data.date+'T12:00:00Z').toLocaleDateString('en-GB',{weekday:'long',day:'2-digit',month:'short',year:'numeric',timeZone:'UTC'});
+    document.getElementById('kpi-day-report-title').textContent=`Resolved on ${day} (${data.total})`;
+    meta.textContent=`Live · ${kpiZoneTime(data.generatedAt)} Tunisia time`;
+    const cell='padding:6px 10px;';
+    const agentTable=data.agents.length?`<table style="width:100%;border-collapse:collapse;font-size:14px;margin-bottom:14px;">
+      <thead><tr style="text-align:left;border-bottom:1px solid var(--legacy-d7d7d7);"><th style="${cell}">Agent</th><th style="${cell}">Resolved</th><th style="${cell}">SLA met</th><th style="${cell}">SLA missed</th><th style="${cell}">Duplicates</th></tr></thead>
+      <tbody>${data.agents.map(a=>`<tr style="border-bottom:1px solid var(--legacy-f0f0f0);"><td style="${cell}font-weight:700;">${esc(a.agent)}</td><td style="${cell}">${a.resolved+a.credits}${a.credits?` <span style="color:var(--muted);font-size:12px;">(${a.credits} credited)</span>`:''}</td><td style="${cell}">${a.slaMet}</td><td style="${cell}${a.slaBreached?'color:var(--red-600);font-weight:700;':''}">${a.slaBreached}</td><td style="${cell}">${a.duplicates}</td></tr>`).join('')}</tbody></table>`
+      :'<div style="padding:20px 0;color:var(--muted);font-size:15px;">No tickets were resolved on this day.</div>';
+    const list=data.tickets.map(r=>`<div class="kpi-ticket-row" data-kpi-ticket="${esc(r.externalId||'')}">
+      <div style="min-width:0;">
+        <div style="font-weight:700;font-size:15px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${r.ticketNumber?esc(r.ticketNumber)+' ':''}${esc(r.subject||'(no subject)')}</div>
+        <div style="font-size:13px;color:var(--muted);margin-top:2px;">${esc(r.company||'')} · ${esc(r.agent)}${r.csAgent?' · CS '+esc(r.csAgent):''}${r.duplicate?' · Duplicate':''}</div>
+      </div>
+      <div style="font-size:13px;white-space:nowrap;text-align:right;"><div>${r.resolvedAt?esc(kpiZoneTime(r.resolvedAt)):''}</div><div style="${r.sla==='breached'?'color:var(--red-600);font-weight:700;':'color:var(--muted);'}">${r.sla==='met'?'Met SLA':r.sla==='breached'?'Missed SLA':''}</div></div>
+    </div>`).join('');
+    body.innerHTML=agentTable+list;
+  }catch(error){
+    if(seq!==kpiDayReportSeq)return;
+    body.innerHTML=`<div style="padding:20px 0;color:var(--red-600);font-size:15px;">Failed to load: ${esc(String(error?.message||error))}</div>`;
+  }
+}
+document.getElementById('kpi-day-report-btn').addEventListener('click',()=>{
+  document.getElementById('kpi-day-report-modal').classList.add('open');
+  void loadKpiDayReport(slaZoneDateKey(boardNow()));
+});
+document.getElementById('kpi-day-report-date').addEventListener('change',e=>{if(/^\d{4}-\d{2}-\d{2}$/.test(e.target.value))void loadKpiDayReport(e.target.value);});
+document.getElementById('kpi-day-report-prev').addEventListener('click',()=>{void loadKpiDayReport(shiftDateKey(document.getElementById('kpi-day-report-date').value||slaZoneDateKey(boardNow()),-1));});
+document.getElementById('kpi-day-report-next').addEventListener('click',()=>{void loadKpiDayReport(shiftDateKey(document.getElementById('kpi-day-report-date').value||slaZoneDateKey(boardNow()),1));});
+document.getElementById('kpi-day-report-body').addEventListener('click',e=>{
+  const row=e.target.closest('[data-kpi-ticket]');
+  if(!row||!row.dataset.kpiTicket)return;
+  const ticket=allTickets.find(t=>t.id===row.dataset.kpiTicket);
+  if(!ticket){showToast("Ticket isn't loaded on the board right now - it may be outside the board's current fetch window.");return;}
+  document.getElementById('kpi-day-report-modal').classList.remove('open');
+  openEmailModal(ticket);
+});
+document.getElementById('kpi-day-report-copy').addEventListener('click',()=>{
+  const d=kpiDayReport;
+  if(!d)return;
+  const lines=[`Resolved on ${d.date}: ${d.total}`,...d.agents.map(a=>`${a.agent}: ${a.resolved+a.credits} resolved (SLA met ${a.slaMet}, missed ${a.slaBreached})`)];
+  navigator.clipboard?.writeText(lines.join('\n')).then(()=>showToast('Summary copied'),()=>showToast('Could not copy'));
+});
 // Coming back to a dashboard left open on another monitor should not show
 // figures from whenever it was last looked at.
 document.addEventListener('visibilitychange',()=>{
@@ -18804,7 +18893,7 @@ function loadMyResolved(force){
   if(!currentUserHasMyResolved())return Promise.resolve();
   if(myResolvedLoading)return myResolvedLoading;
   if(!force&&Date.now()-myResolvedLoadedAt<MY_RESOLVED_REFRESH_MS)return Promise.resolve();
-  myResolvedLoading=fetch('/api/tickets/my-resolved?tzOffset='+new Date().getTimezoneOffset(),{credentials:'include'})
+  myResolvedLoading=fetch('/api/tickets/my-resolved?tzOffset='+slaZoneTzOffset(),{credentials:'include'})
     .then(r=>r.ok?r.json():null)
     .then(data=>{
       if(!data?.ok)return;
