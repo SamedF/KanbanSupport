@@ -3490,6 +3490,10 @@ textarea:focus {
   align-items: center;
 }
 
+.archive-search {
+  width: min(340px, 100%);
+}
+
 .btn-back,
 .btn-clear-spam {
   font-size: 14px;
@@ -5242,6 +5246,9 @@ th {
 .emc-suggest-load { display: block; font-size: 12px; color: var(--muted, #64748b); }
 .emc-suggest-btn { font-size: 12px; padding: 3px 10px; }
 .emc-suggest-current { font-size: 12px; color: var(--muted, #64748b); font-style: italic; }
+.emc-reassign { display: flex; align-items: center; gap: 10px; padding: 10px 0 4px; margin-top: 4px; border-top: 1px solid var(--border, #e2e8f0); flex-wrap: wrap; }
+.emc-reassign-label { font-size: 13.5px; font-weight: 700; color: var(--text-soft, #334155); }
+.emc-reassign-sel { flex: 1 1 120px; max-width: 200px; }
 
 
 /* ===== Projects ============================================================ */
@@ -8348,6 +8355,7 @@ th {
   <div class="spam-view-header">
     <div class="spam-view-title" style="color:var(--slate-600);">Archive Inbox <span id="archive-view-count" style="font-size:16px;font-weight:400;color:var(--slate-400);"></span></div>
     <div class="spam-view-actions">
+      <input class="filter-sel archive-search" id="archive-search" type="text" autocomplete="off" data-lpignore="true" data-1p-ignore data-form-type="other" placeholder="Search #0012, QS-8634, sender, subject or company"/>
       <button class="btn-back" id="btn-back-board-archive"> Back to Board</button>
     </div>
   </div>
@@ -10450,9 +10458,10 @@ function adoptServerTicketNumbers(map){
   ticketNumberCounter=Math.max(0,...Object.values(ticketNumbers));
   return true;
 }
-function ticketMatchesNumberQuery(ticket){
+// The Archive Inbox passes its own query; the board uses its search box.
+function ticketMatchesNumberQuery(ticket,query=activeTicketNumber){
   const id=String(ticket?.id||'').trim();
-  const q=String(activeTicketNumber||'').trim().toLowerCase();
+  const q=String(query||'').trim().toLowerCase();
   if(!q)return true;
   const raw=String(ensureTicketNumber(id));
   const pretty=ticketDisplayNumber(id).toLowerCase();
@@ -15655,7 +15664,9 @@ function renderHygieneDashboard(grid){
 function renderCompaniesView(){const groups=companyGroups();ensureHubspotOwnerNames(groups);ensureCompanyNetworks(groups);upsertCompanyProfiles(groups);refreshCompaniesFilterOptions(groups);const filtered=applyCompanyFilters(groups);document.getElementById('companies-type-filter').value=companyFilters.type;document.getElementById('companies-search').value=companyFilters.q||'';document.getElementById('companies-viewtype-btn').textContent=companiesViewLabel(companiesViewType)+' ';document.getElementById('companies-stats').textContent=`${filtered.length} companies · ${filtered.reduce((s,x)=>s+x.tickets.length,0)} tickets`;const grid=document.getElementById('companies-grid');if(companiesViewType==='report'){renderHygieneDashboard(grid);if(!dataHygieneReport&&!dataHygieneLoading)fetchDataHygieneReport(false);return;}if(companiesViewType==='calendar'){grid.style.display='block';grid.innerHTML='<div style="background:var(--white);border:1px solid var(--legacy-d7d7d7);border-radius:14px;padding:20px;box-shadow:0 6px 16px rgba(var(--shadow-rgb), .06);"><div style="font-family:Caladea,serif;font-size:24px;margin-bottom:8px;">Calendar view</div><div style="font-size:15px;color:var(--legacy-666);">Calendar view is still a placeholder and can be expanded next.</div></div>';return;}if(!filtered.length){grid.innerHTML='<div class="empty"><div class="empty-icon"></div>No companies match current filters.</div>';return;}grid.style.display='grid';grid.style.gridTemplateColumns=companiesViewType==='table'?'1fr':'repeat(auto-fill,minmax(min(320px,100%),1fr))';grid.innerHTML='';filtered.forEach(gr=>{const custom=companyCustomProps[gr.companyId]||{};const profile=companyProfiles[gr.companyId]||null;const labeled=(gr.associatedCompanies||[]).map(c=>{const l=(c.labels||[]).map(x=>String(x).toLowerCase());const label=l.find(x=>x.includes('specific hotel'))?'specific hotel':(l.find(x=>x.includes('group central'))?'group central':null);return label?{label,ref:c}:null;}).filter(Boolean);const parentChild=((gr.parentCompany?[{label:'group central',ref:gr.parentCompany}]:[]).concat((gr.childCompanies||[]).map(c=>({label:'specific hotel',ref:c}))));const unlabeledAssoc=(gr.associatedCompanies||[]).filter(c=>{const l=(c.labels||[]).map(x=>String(x).toLowerCase());return !(l.find(x=>x.includes('specific hotel'))||l.find(x=>x.includes('group central')));}).map(c=>({label:'group related',ref:c}));const related=[...labeled,...parentChild,...unlabeledAssoc];const relHtml=related.length?related.map(r=>`<span style="font-size:13px;border:1px solid var(--legacy-ddd);border-radius:999px;padding:2px 8px;display:inline-block;margin:2px 6px 2px 0;background:var(--slate-50);">${esc(r.label)}: ${esc(r.ref?.name||r.ref?.id||'')}</span>`).join(''):(gr.relationshipType==='group'?`<span style="font-size:13px;border:1px solid var(--legacy-ddd);border-radius:999px;padding:2px 8px;display:inline-block;margin:2px 6px 2px 0;background:var(--slate-50);">Group</span>`:`<span style="font-size:13px;border:1px solid var(--legacy-ddd);border-radius:999px;padding:2px 8px;display:inline-block;margin:2px 6px 2px 0;background:var(--slate-50);">Monhotel</span>`);const shownCS=displayCSOwner(gr.coOwner);const metaLine=[gr.country?` ${gr.country}`:null,shownCS?`CS: ${shownCS}`:null].filter(Boolean).join(' · ');const contactHtml=[...gr.contacts.values()].map(c=>`<a href="${c.contactUrl||'#'}" ${c.contactUrl?'target="_blank"':''} style="text-decoration:none;color:var(--legacy-333);border:1px solid var(--legacy-ddd);border-radius:999px;padding:2px 8px;font-size:13px;display:inline-flex;gap:4px;align-items:center;"> ${esc(c.contactName)}</a>`).join(' ');const ticketHtml=gr.tickets.slice(0,8).map(t=>{const p=ticketPriority[t.id]||t.priority||'Medium';const col=normalizeTicketStage(ticketState[t.id]||'new');const colLbl={new:'New',inp:'In Progress',wus:'Waiting On Us',dft:'Due for test',wct:'Waiting On Contact',res:'Resolved'}[col]||'New';return `<button data-open-company-ticket="${esc(t.id)}" style="width:100%;text-align:left;border:1px solid var(--legacy-ddd);border-radius:10px;padding:8px 10px;margin-top:6px;background:var(--white);cursor:pointer;"><div style="font-weight:700;font-size:14px;margin-bottom:3px;">${esc(t.email.subject||'(no subject)')}</div><div style="display:flex;justify-content:space-between;font-size:13px;color:var(--legacy-666);"><span>${esc(colLbl)} · ${esc(p)}</span><span>${fmtDate(t.email.receivedDateTime)}</span></div></button>`;}).join('');const customHtml=Object.entries(custom).map(([k,v])=>`<span style="font-size:13px;border:1px solid var(--legacy-ddd);border-radius:999px;padding:2px 8px;display:inline-block;margin:2px 4px 2px 0;">${esc(k)}: ${esc(v)}</span>`).join('')||'<span style="font-size:13px;color:var(--legacy-777);">No custom properties yet</span>';const card=document.createElement('div');card.style.cssText='background:var(--white);border:1px solid var(--legacy-d7d7d7);border-radius:14px;padding:12px;box-shadow:0 6px 16px rgba(var(--shadow-rgb), .06);';card.innerHTML=`<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;"><div><div style="font-family:Caladea,serif;font-size:22px;">${esc(gr.companyName)}</div><div style="font-size:13px;color:var(--legacy-666);">${gr.tickets.length} ticket(s)${profile?.createdAt?` · profile: ${fmtDate(profile.createdAt)}`:''}</div>${metaLine?`<div style="font-size:13px;color:var(--legacy-777);margin-top:2px;">${esc(metaLine)}</div>`:''}</div><div style="display:flex;gap:6px;">${gr.companyUrl?`<a class="btn-out" href="${esc(gr.companyUrl)}" target="_blank" style="font-size:13px;padding:4px 8px;">Open HubSpot</a>`:''}<button class="btn-primary" data-cprop="${esc(gr.companyId)}" style="font-size:13px;padding:4px 8px;">Custom Properties</button></div></div><div style="margin-top:8px;"><div style="font-size:13px;color:var(--legacy-666);margin-bottom:3px;">Hierarchy</div>${relHtml}</div><div style="margin-top:8px;"><div style="font-size:13px;color:var(--legacy-666);margin-bottom:5px;">Contacts</div><div style="display:flex;flex-wrap:wrap;gap:4px;">${contactHtml||'<span style="font-size:13px;color:var(--legacy-777);">No contacts</span>'}</div></div><div style="margin-top:8px;"><div style="font-size:13px;color:var(--legacy-666);margin-bottom:3px;">Properties</div>${customHtml}</div><div style="margin-top:8px;"><div style="font-size:13px;color:var(--legacy-666);margin-bottom:2px;">Tickets</div>${ticketHtml}</div>`;if(companiesViewType==='table'){card.style.borderRadius='10px';card.style.padding='10px';card.style.display='grid';card.style.gridTemplateColumns='minmax(220px,1fr) minmax(260px,1fr) minmax(260px,1fr)';card.style.columnGap='12px';card.innerHTML=`<div><div style="font-family:Caladea,serif;font-size:20px;">${esc(gr.companyName)}</div><div style="font-size:13px;color:var(--legacy-666);margin-bottom:6px;">${gr.tickets.length} ticket(s)</div>${metaLine?`<div style=\"font-size:13px;color:var(--legacy-777);margin-bottom:6px;\">${esc(metaLine)}</div>`:''}${relHtml}${gr.companyUrl?`<a class=\"btn-out\" href=\"${esc(gr.companyUrl)}\" target=\"_blank\" style=\"font-size:13px;padding:4px 8px;display:inline-block;\">Open HubSpot</a>`:''}<button class=\"btn-primary\" data-cprop=\"${esc(gr.companyId)}\" style=\"font-size:13px;padding:4px 8px;margin-left:6px;\">Custom Properties</button></div><div><div style=\"font-size:13px;color:var(--legacy-666);margin-bottom:5px;\">Contacts</div><div style=\"display:flex;flex-wrap:wrap;gap:4px;\">${contactHtml||'<span style=\"font-size:13px;color:var(--legacy-777);\">No contacts</span>'}</div><div style=\"margin-top:8px;font-size:13px;color:var(--legacy-666);\">Properties</div><div>${customHtml}</div></div><div><div style=\"font-size:13px;color:var(--legacy-666);margin-bottom:2px;\">Tickets</div>${ticketHtml}</div>`;}card.querySelector('[data-cprop]')?.addEventListener('click',()=>openCompanyPropModal(gr));card.querySelectorAll('[data-open-company-ticket]').forEach(btn=>btn.addEventListener('click',()=>{const t=allTickets.find(x=>x.id===btn.dataset.openCompanyTicket);if(t)openEmailModal(t);}));grid.appendChild(card);});}
 function showCompaniesView(){viewMode='companies';setBoardChromeVisible(true);hidePrimaryViews();document.getElementById('companies-view').style.display='block';setSideNavActive(companiesViewType==='report'?'dashboard':'companies');saveLastWorkspaceSession(companiesViewType==='report'?'dashboard':'companies');renderCompaniesView();}
 function renderSpamView(){const spamTickets=getSpamTickets();const listEl=document.getElementById('spam-list');document.getElementById('spam-view-count').textContent=`(${spamTickets.length} ticket${spamTickets.length!==1?'s':''})`;if(!spamTickets.length){listEl.innerHTML='<div class="spam-empty"><div style="font-size:48px;margin-bottom:12px;"></div><div style="font-size:16px;font-weight:700;color:var(--gray-700);margin-bottom:6px;">Inbox zero!</div><div style="font-size:15px;color:var(--slate-400);">No spam tickets.</div></div>';return;}listEl.innerHTML='';spamTickets.forEach(t=>{const{email,id}=t;const clientEmail=ticketClientEmail[id]||null;const hs=clientEmail?hsCache[clientEmail]:null;const senderDisplay=clientEmail||email.sender||'';const row=document.createElement('div');row.className='spam-row';row.innerHTML=`<div class="spam-row-info"><div class="spam-row-subject">${esc(email.subject||'(no subject)')}</div><div class="spam-row-meta"><span class="spam-sender-chip"> ${esc(senderName(senderDisplay))}</span>${hs?.companyName?`<span class="spam-company-chip"> ${esc(hs.companyName)}</span>`:''}<span class="spam-date">${fmtDate(email.receivedDateTime)}</span></div></div><div class="spam-row-actions"><button class="btn-restore" data-restore="${id}"> Restore</button></div>`;row.querySelector(`[data-restore="${id}"]`).addEventListener('click',()=>{ticketCategory[id]='Other';if(normalizeTicketStage(ticketState[id]||'new')==='res'){ticketState[id]='new';ticketStageTouchedAt[id]=Date.now();}const te=clientEmail||email.sender?.toLowerCase();const otherSpam=allTickets.some(x=>x.id!==id&&normalizeTicketStage(ticketState[x.id]||'new')!=='res'&&(ticketClientEmail[x.id]||x.email.sender?.toLowerCase())===te&&ticketCategory[x.id]==='Spam');if(!otherSpam&&te)spamSenders.delete(te);saveState('spam_ticket_restored');renderSpamView();renderBoard();updateSpamBadge();showToast('Ticket restored to board','ok');});listEl.appendChild(row);});}
-function renderArchiveView(){const archivedTickets=getArchivedTickets();const listEl=document.getElementById('archive-list');document.getElementById('archive-view-count').textContent=`(${archivedTickets.length} ticket${archivedTickets.length!==1?'s':''})`;if(!archivedTickets.length){listEl.innerHTML='<div class="spam-empty"><div style="font-size:48px;margin-bottom:12px;"></div><div style="font-size:16px;font-weight:700;color:var(--gray-700);margin-bottom:6px;">Nothing archived</div><div style="font-size:15px;color:var(--slate-400);">Archived tickets will show up here.</div></div>';return;}listEl.innerHTML='';archivedTickets.forEach(t=>{const{email,id}=t;const clientEmail=ticketClientEmail[id]||null;const hs=clientEmail?hsCache[clientEmail]:null;const senderDisplay=clientEmail||email.sender||'';const meta=ticketArchived[id]||{};const row=document.createElement('div');row.className='spam-row';row.innerHTML=`<div class="spam-row-info"><div class="spam-row-subject">${esc(email.subject||'(no subject)')}</div><div class="spam-row-meta"><span class="spam-sender-chip"> ${esc(senderName(senderDisplay))}</span>${hs?.companyName?`<span class="spam-company-chip"> ${esc(hs.companyName)}</span>`:''}<span class="spam-date">Archived ${fmtDate(meta.archivedAt?new Date(meta.archivedAt).toISOString():'')}</span></div></div><div class="spam-row-actions"><button class="btn-out" data-archive-open="${id}" style="font-size:13px;"> Open</button><button class="btn-restore" data-restore="${id}"> Restore</button></div>`;row.querySelector(`[data-archive-open="${id}"]`).addEventListener('click',()=>openEmailModal(t));row.querySelector(`[data-restore="${id}"]`).addEventListener('click',()=>{if(ticketResolutionMeta[id])delete ticketResolutionMeta[id].confirmedAt;
+let archiveQuery='';
+function archiveTicketMatchesQuery(t){const q=archiveQuery.trim().toLowerCase();if(!q)return true;if(ticketMatchesNumberQuery(t,q))return true;const ce=ticketClientEmail[t.id]||'';return String(hsCache[ce]?.companyName||'').toLowerCase().includes(q);}
+function renderArchiveView(){const allArchived=getArchivedTickets();const archivedTickets=allArchived.filter(archiveTicketMatchesQuery);const listEl=document.getElementById('archive-list');document.getElementById('archive-view-count').textContent=archiveQuery.trim()?`(${archivedTickets.length} of ${allArchived.length})`:`(${allArchived.length} ticket${allArchived.length!==1?'s':''})`;if(allArchived.length&&!archivedTickets.length){listEl.innerHTML='<div class="spam-empty"><div style="font-size:16px;font-weight:700;color:var(--gray-700);margin-bottom:6px;">No match</div><div style="font-size:15px;color:var(--slate-400);">No archived ticket matches that search.</div></div>';return;}if(!archivedTickets.length){listEl.innerHTML='<div class="spam-empty"><div style="font-size:48px;margin-bottom:12px;"></div><div style="font-size:16px;font-weight:700;color:var(--gray-700);margin-bottom:6px;">Nothing archived</div><div style="font-size:15px;color:var(--slate-400);">Archived tickets will show up here.</div></div>';return;}listEl.innerHTML='';archivedTickets.forEach(t=>{const{email,id}=t;const clientEmail=ticketClientEmail[id]||null;const hs=clientEmail?hsCache[clientEmail]:null;const senderDisplay=clientEmail||email.sender||'';const meta=ticketArchived[id]||{};const row=document.createElement('div');row.className='spam-row';row.innerHTML=`<div class="spam-row-info"><div class="spam-row-subject">${esc(email.subject||'(no subject)')}</div><div class="spam-row-meta"><span class="spam-sender-chip"> ${esc(senderName(senderDisplay))}</span>${hs?.companyName?`<span class="spam-company-chip"> ${esc(hs.companyName)}</span>`:''}<span class="spam-date">Archived ${fmtDate(meta.archivedAt?new Date(meta.archivedAt).toISOString():'')}</span></div></div><div class="spam-row-actions"><button class="btn-out" data-archive-open="${id}" style="font-size:13px;"> Open</button><button class="btn-restore" data-restore="${id}"> Restore</button></div>`;row.querySelector(`[data-archive-open="${id}"]`).addEventListener('click',()=>openEmailModal(t));row.querySelector(`[data-restore="${id}"]`).addEventListener('click',()=>{if(ticketResolutionMeta[id])delete ticketResolutionMeta[id].confirmedAt;
     // ticketArchived[id] must be set to a falsy value (never `delete`d) -
     // server-side merging spreads the current and incoming maps together
     // ({...current,...incoming}), which can add/override a key but can
@@ -15674,6 +15685,7 @@ document.getElementById('btn-clear-spam').addEventListener('click',()=>{const sp
 document.getElementById('btn-back-board').addEventListener('click',showBoardView);
 document.getElementById('spam-view-btn').addEventListener('click',()=>{if(viewMode==='spam')showBoardView();else showSpamView();});
 document.getElementById('btn-back-board-archive').addEventListener('click',showBoardView);
+document.getElementById('archive-search').addEventListener('input',e=>{archiveQuery=e.target.value||'';renderArchiveView();});
 document.getElementById('archive-view-btn').addEventListener('click',()=>{if(viewMode==='archive')showBoardView();else showArchiveView();});
 document.getElementById('break-btn').addEventListener('click',toggleShiftBreak);
 document.getElementById('assignlog-view-btn').addEventListener('click',()=>{if(viewMode==='assignlog')showBoardView();else showAssignLogView();});
@@ -19798,7 +19810,19 @@ async function emLoadAssignee(id){
   }
   renderEmContext();
 }
-function emAssigneeHtml(){
+function emAssigneeHtml(){return emAssigneeSuggestionsHtml()+emReassignHtml();}
+// Admins can hand the ticket to anyone on the support roster, not only the
+// people the ranking happened to name.
+function emReassignHtml(){
+  if(!currentUserIsAdmin())return '';
+  const current=normalizeSupportAgent(ticketAssignee[emContextTicketId]||'');
+  return `<div class="emc-reassign">
+      <label class="emc-reassign-label" for="emc-reassign-sel">Reassign to</label>
+      <select class="filter-sel emc-reassign-sel" id="emc-reassign-sel">${assignableSupportAgents().map(a=>`<option value="${esc(a)}"${a===current?' selected':''}>${esc(a)}${a===current?' (current)':''}</option>`).join('')}</select>
+      <button class="btn-out emc-suggest-btn" data-emc-reassign>Assign</button>
+    </div>`;
+}
+function emAssigneeSuggestionsHtml(){
   if(emAssignee.state==='loading')return '<div class="emc-loading"><span class="spinner-sm"></span> Reading who resolved similar tickets…</div>';
   if(emAssignee.state==='error')return `<div class="emc-note">Could not work this out: ${esc(emAssignee.message||'unknown error')}</div>`;
   if(!emAssignee.rows.length)return '<div class="emc-note">No resolved history for this client, company or category to go on.</div>';
@@ -19965,20 +19989,25 @@ function renderEmContext(){
     if(emContextOpen.similar&&emSimilar.state==='idle')emLoadSimilar(id);
     if(emContextOpen.assignee&&emAssignee.state==='idle')emLoadAssignee(id);
   }));
-  host.querySelectorAll('[data-emc-assign]').forEach(btn=>btn.addEventListener('click',async ()=>{
+  const assignFromPanel=async (agent,source,reason)=>{
     const ticket=allTickets.find(t=>t.id===id);
-    if(!ticket)return;
+    if(!ticket||!agent)return;
+    if(normalizeSupportAgent(ticketAssignee[id]||'')===agent)return showToast('Already assigned to '+agent);
     // Accepting a suggestion is still an assignment, so it answers to the same
     // rule - a support agent may accept one that names them, not one that
     // names a colleague.
-    if(!currentUserCanAssignTicketTo(ticket,btn.dataset.emcAssign))return showToast(assignRefusedMessage(),'warn');
+    if(!currentUserCanAssignTicketTo(ticket,agent))return showToast(assignRefusedMessage(),'warn');
     const before=captureTicketState([id],['assignee']);
-    setTicketAssignee(id,btn.dataset.emcAssign,Date.now(),'suggestion');
-    pushUndo(`Assigned ${ticketDisplayNumber(id)} to ${btn.dataset.emcAssign}`,()=>restoreTicketState(before,['assignee']));
+    setTicketAssignee(id,agent,Date.now(),source);
+    // Same as the card's agent menu: a person's pick, so auto-assign keeps off it.
+    if(source==='manual'){ticketAssignmentMode[id]='support';manualSupportOverride[id]=true;}
+    pushUndo(`Assigned ${ticketDisplayNumber(id)} to ${agent}`,()=>restoreTicketState(before,['assignee']));
     renderActiveView();renderEmContext();
-    await saveState('assign_from_suggestion');
-    showToast('Assigned to '+btn.dataset.emcAssign,'ok');
-  }));
+    await saveState(reason);
+    showToast('Assigned to '+agent,'ok');
+  };
+  host.querySelectorAll('[data-emc-assign]').forEach(btn=>btn.addEventListener('click',()=>assignFromPanel(btn.dataset.emcAssign,'suggestion','assign_from_suggestion')));
+  host.querySelector('[data-emc-reassign]')?.addEventListener('click',()=>assignFromPanel(host.querySelector('#emc-reassign-sel')?.value,'manual','admin_reassign_from_panel'));
   host.querySelectorAll('[data-emc-open]').forEach(btn=>btn.addEventListener('click',()=>{
     const ticket=allTickets.find(t=>t.id===btn.dataset.emcOpen);
     if(!ticket)return showToast('That ticket is not on the board right now');
@@ -21039,7 +21068,8 @@ async function fbSubmit() {
     // message, where an eye looking for confirmation already is.
     if (mine) mine.delivered = true;
 
-    if (out.notified || out.emailed) await fbSay('Feedback sent - the platform team has it.', 'ok', 260);
+    if (out.notified || out.emailed) await fbSay(out.ticketCreated ? 'Feedback sent - the platform team has it, and a ticket is open for it on the board.' : 'Feedback sent - the platform team has it.', 'ok', 260);
+    else if (out.ticketCreated) await fbSay('Feedback saved - a ticket is open for it on the board.', 'ok', 260);
     else if (out.stored) { await fbSay('Written down, but it could not be delivered yet. It is saved and someone will see it.', 'warn', 260); return; }
     else { await fbSay('That could not be sent or saved. Please tell someone directly.', 'bad', 260); return; }
 

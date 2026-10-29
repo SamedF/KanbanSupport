@@ -12880,6 +12880,47 @@ async function feedbackActorFor(req) {
   };
 }
 
+/* Every report also lands on the board as a ticket assigned to the support
+   agent who looks after the board, so it is worked and tracked like any
+   other ticket instead of living only in an inbox. Written straight into the
+   board state with no actor, so the reporter's own assignment rights do not
+   apply: the board assigns it, not them. The reporter is the sender, and an
+   internal sender never gets a client email, so HubSpot leaves it alone. */
+const FEEDBACK_TICKET_AGENT = 'SFA';
+async function createFeedbackTicket({ logId, category, message, context, actor }) {
+  const id = `feedback_${logId || Date.now()}`;
+  const now = new Date().toISOString();
+  const label = FEEDBACK_CATEGORIES[category]?.label || 'Feedback';
+  const firstLine = message.split(/\r?\n/).find(line => line.trim()) || message;
+  const subject = `${label} from ${String(actor.username || 'unknown').toUpperCase()}: ${firstLine.trim().slice(0, 120)}`;
+  const ticketLine = context.ticketLabel || context.ticketId;
+  const summary = [message, '', `Sent by ${actor.label}${actor.email ? ` <${actor.email}>` : ''} from the Feedback button.`, ticketLine ? `About ticket ${ticketLine}.` : null].filter(line => line !== null).join('\n');
+  const email = { id, subject, summary, sender: actor.email || 'feedback@board', recipients: null, receivedDateTime: now, sentDateTime: now, webLink: null, uri: null, importance: 'normal', isRead: true, isManual: true };
+
+  const state = safeReadState();
+  const map = key => (state[key] = (state[key] && typeof state[key] === 'object') ? state[key] : {});
+  state.allTickets = [{ id, email, priority: category === 'bug' ? 'High' : 'Medium', isManual: true }, ...(Array.isArray(state.allTickets) ? state.allTickets : [])];
+  map('ticketState')[id] = 'new';
+  map('ticketStageTouchedAt')[id] = Date.now();
+  map('ticketPriority')[id] = category === 'bug' ? 'High' : 'Medium';
+  map('ticketCategory')[id] = 'Other';
+  map('ticketCreatedAt')[id] = now;
+  map('ticketCreatedBy')[id] = String(actor.username || '').toUpperCase() || null;
+  map('ticketAssignee')[id] = FEEDBACK_TICKET_AGENT;
+  map('ticketAssigneeTouchedAt')[id] = Date.now();
+  map('ticketAssignmentMode')[id] = 'support';
+  map('manualSupportOverride')[id] = true;
+  map('ticketCSOwner')[id] = null;
+  map('manualCSOverride')[id] = true;
+  map('ticketCSTouchedAt')[id] = Date.now();
+
+  const result = await safeWriteState(state, null);
+  await upsertBoardTicketsToDatabase(result.state || state, { session: {} });
+  await reconcileTicketNumbersWithDatabase().catch(error => console.error('Ticket number reconcile failed:', error?.message || error));
+  sseBroadcast('board_reload', { reason: 'feedback_ticket', actor: String(actor.username || '').toUpperCase() || null });
+  return id;
+}
+
 /* Wrapped, because this endpoint's whole job is to be run when delivery is
    broken - and an async throw out of an Express handler is an unhandled
    rejection, which on current Node ends the process. A diagnostic that takes
@@ -12980,6 +13021,14 @@ app.post('/api/feedback', requireAuth, feedbackLimiter, async (req, res) => {
   const { emailed, notified, emailError, webhookError, emailVia } =
     await deliverFeedback({ req, category, message, context, actor, attachments });
 
+  // A ticket that cannot be made never costs the reporter their report.
+  let ticketId = null;
+  try {
+    ticketId = await createFeedbackTicket({ logId, category, message, context, actor });
+  } catch (error) {
+    console.error('Feedback ticket not created:', String(error?.message || error).slice(0, 200));
+  }
+
   if (logId) {
     // What actually happened to it, on the record itself - so a report nobody
     // ever saw is findable later rather than indistinguishable from one that
@@ -12989,7 +13038,7 @@ app.post('/api/feedback', requireAuth, feedbackLimiter, async (req, res) => {
         where: { id: logId },
         data: {
           status: emailed || notified ? 'delivered' : 'stored_only',
-          metadata: { actor, context, emailed, notified, emailVia: emailVia || undefined, emailError: emailError || undefined, webhookError: webhookError || undefined }
+          metadata: { actor, context, emailed, notified, ticketId: ticketId || undefined, emailVia: emailVia || undefined, emailError: emailError || undefined, webhookError: webhookError || undefined }
         }
       })
       .catch(() => null);
@@ -12998,6 +13047,7 @@ app.post('/api/feedback', requireAuth, feedbackLimiter, async (req, res) => {
   return res.json({
     ok: true,
     stored: !!logId,
+    ticketCreated: !!ticketId,
     emailed,
     notified,
     webhookConfigured: !!FEEDBACK_WEBHOOK_URL,

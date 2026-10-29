@@ -1,6 +1,15 @@
 {
   "patches": [
     {
+      "date": "2026-10-29",
+      "title": "Find & Follow",
+      "notes": [
+        { "type": "new", "text": "The Archive Inbox has a search box: find an archived ticket by number, Jira key, sender, subject or company." },
+        { "type": "new", "text": "Every piece of feedback you send now opens a ticket on the board for the support team, so it gets tracked and worked like any other ticket." },
+        { "type": "new", "text": "Admins can reassign a ticket to any support agent from \"Who should take this\" inside the ticket, not just to the people it suggests." }
+      ]
+    },
+    {
       "date": "2026-10-28",
       "title": "Clean Sweep",
       "notes": [
