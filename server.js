@@ -2119,6 +2119,20 @@ function shiftElapsedMs(fromMs, toMs, agentCode) {
   });
   return total;
 }
+// The inverse of shiftElapsedMs: the latest moment, no earlier than floor,
+// from which `amount` of the agent's shift time has run by `to`. Shift time
+// only grows as the start moves back, so a binary search finds it.
+function shiftPointBefore(to, amount, agentCode, floor) {
+  if (!(amount > 0)) return to;
+  let lo = floor;
+  let hi = to;
+  if (shiftElapsedMs(lo, to, agentCode) <= amount) return lo;
+  while (hi - lo > 1000) {
+    const mid = Math.floor((lo + hi) / 2);
+    if (shiftElapsedMs(mid, to, agentCode) >= amount) lo = mid; else hi = mid;
+  }
+  return lo;
+}
 
 // One ticket's SLA position. `state` is the honest answer, not a guess:
 //   met / breached  - resolved inside or outside its target
@@ -5563,10 +5577,18 @@ function slaResumePointAfterHold(state, externalId, since, now) {
   const created = new Date(state.ticketCreatedAt?.[externalId] || 0).getTime() || 0;
   const base = Math.max(created, Number(state.ticketSlaResetAt?.[externalId] || 0));
   if (!base || base >= since) return null;
-  // Carried over in working time, not wall time: the clock resumes with
-  // exactly the working hours it had when the hold began. Shifting by the
-  // wall-clock length of the hold moved the start across nights and weekends
-  // the hold had nothing to do with, and took real time off or put it back.
+  /* Carried over in the agent's shift time, which is what the clock counts:
+     it resumes with exactly the time worked on it when the hold began. This
+     used office hours, and an agent is on shift for fewer hours than that,
+     so the restart point landed inside the hold and every shift the agent
+     worked while it was held was counted - a frozen ticket came back
+     overdue. Office hours are left only for a ticket whose agent has no
+     shift record. */
+  const agent = String(state.ticketAssignee?.[externalId] || '').trim().toUpperCase();
+  if (agent && shiftStore.agents[agent]) {
+    const resumeAt = shiftPointBefore(now, shiftElapsedMs(base, since, agent), agent, base);
+    return resumeAt > base ? resumeAt : null;
+  }
   return businessPointBefore(now, businessMsInRange(base, since));
 }
 
@@ -5891,6 +5913,49 @@ async function resetSlaOfNamedTicketsOnce() {
       .catch((error) => console.error('SLA manual reset database update failed:', error?.message || error));
   }
   console.log(`SLA reset for ${ids.length} ticket(s) of #${SLA_MANUAL_RESET_NUMBERS.join(', #')}.`);
+}
+/* One-off: a fresh SLA for every ticket an admin has frozen. Until the fix in
+   slaResumePointAfterHold a released freeze counted the agent's shifts during
+   it, so tickets came back overdue. Still frozen: the clock is restarted and
+   stays frozen from now, so release gives the full SLA. Released and still
+   open: the clock restarts now. Once per database, like the resets above. */
+const SLA_FROZEN_RESET_SYNC_TYPE = 'sla_frozen_tickets_reset_v1';
+async function resetFrozenSlaClocksOnce() {
+  const done = await prisma.syncLog.findFirst({ where: { provider: 'kanban', syncType: SLA_FROZEN_RESET_SYNC_TYPE, status: 'success' } });
+  if (done) return;
+  const now = Date.now();
+  const state = safeReadState();
+  const holds = (state.ticketSlaHold && typeof state.ticketSlaHold === 'object') ? state.ticketSlaHold : {};
+  const isOpen = id => String(state.ticketState?.[id] || 'new') !== 'res';
+  const frozen = Object.keys(holds).filter(id => holds[id]?.at && isOpen(id));
+  const releasedRows = await prisma.ticket.findMany({
+    where: { NOT: [{ status: 'Resolved' }], slaHoldAt: null, events: { some: { eventType: 'ticket_sla_released' } } },
+    select: { externalId: true }
+  });
+  const released = releasedRows.map(row => row.externalId).filter(id => id && !holds[id] && isOpen(id));
+  const entries = [
+    ...frozen.map(id => ({ field: 'ticketSlaHold', id, value: { ...holds[id], at: now } })),
+    ...[...frozen, ...released].map(id => ({ field: 'ticketSlaResetAt', id, value: now }))
+  ];
+  if (entries.length) writeServerFieldsIntoState(entries);
+  if (frozen.length) {
+    await prisma.ticket.updateMany({ where: { externalId: { in: frozen } }, data: { slaResetAt: new Date(now), slaHoldAt: new Date(now) } })
+      .catch((error) => console.error('Frozen SLA reset database update failed:', error?.message || error));
+  }
+  if (released.length) {
+    await prisma.ticket.updateMany({ where: { externalId: { in: released } }, data: { slaResetAt: new Date(now) } })
+      .catch((error) => console.error('Released SLA reset database update failed:', error?.message || error));
+  }
+  await prisma.syncLog.create({
+    data: {
+      provider: 'kanban',
+      syncType: SLA_FROZEN_RESET_SYNC_TYPE,
+      status: 'success',
+      message: `SLA reset for ${frozen.length} frozen and ${released.length} released ticket(s).`,
+      metadata: { at: new Date(now).toISOString(), frozen, released }
+    }
+  }).catch((error) => console.error('Frozen SLA reset marker write failed:', error?.message || error));
+  console.log(`SLA reset for ${frozen.length} frozen and ${released.length} released ticket(s).`);
 }
 app.post('/api/admin/sla/restart-at-baseline', requireAdmin, async (req, res) => {
   try {
@@ -15432,6 +15497,8 @@ const server = app.listen(PORT, () => {
     .catch((error) => console.error('SLA baseline restart failed:', error?.message || error))
     .then(() => resetSlaOfNamedTicketsOnce())
     .catch((error) => console.error('SLA manual reset failed:', error?.message || error))
+    .then(() => resetFrozenSlaClocksOnce())
+    .catch((error) => console.error('Frozen SLA reset failed:', error?.message || error))
     .then(() => currentKpiSnapshot())
     .catch((error) => console.error('KPI snapshot failed:', error?.message || error))
     .finally(scheduleKpiSnapshots);

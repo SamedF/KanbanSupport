@@ -9604,6 +9604,15 @@ function resumeSlaAfterHold(id,since,now){
   const created=new Date(ticketCreatedAt[id]||0).getTime()||0;
   const base=Math.max(created,Number(ticketSlaResetAt[id]||0));
   if(!base||base>=since)return;
+  // In the agent's shift time, which is what the clock counts - office hours
+  // put the restart point inside the hold and counted the shifts worked during
+  // it. Office hours only for an agent with no shift record.
+  const agent=normalizeSupportAgent(ticketAssignee[id]||'');
+  if(agent&&shiftLoaded&&shiftAgents[agent]){
+    const resumeAt=shiftPointBefore(now,shiftElapsedMs(base,since,agent),agent,base);
+    if(resumeAt>base)ticketSlaResetAt[id]=resumeAt;
+    return;
+  }
   ticketSlaResetAt[id]=businessPointBefore(now,businessMsInRange(base,since));
 }
 function resumeSlaAfterContactWait(id,now){resumeSlaAfterHold(id,ticketStageTouchedAt[id],now);}
@@ -11240,6 +11249,17 @@ function shiftElapsedMs(fromMs,toMs,agentCode){
     total+=Math.max(0,worked);
   });
   return total;
+}
+// The inverse of shiftElapsedMs. Mirrors shiftPointBefore in server.js.
+function shiftPointBefore(to,amount,agentCode,floor){
+  if(!(amount>0))return to;
+  let lo=floor,hi=to;
+  if(shiftElapsedMs(lo,to,agentCode)<=amount)return lo;
+  while(hi-lo>1000){
+    const mid=Math.floor((lo+hi)/2);
+    if(shiftElapsedMs(mid,to,agentCode)>=amount)lo=mid;else hi=mid;
+  }
+  return lo;
 }
 async function refreshShiftState(){
   try{

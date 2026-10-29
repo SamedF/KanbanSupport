@@ -6,7 +6,9 @@
       "notes": [
         { "type": "new", "text": "The Archive Inbox has a search box: find an archived ticket by number, Jira key, sender, subject or company." },
         { "type": "new", "text": "Every piece of feedback you send now opens a ticket on the board for the support team, so it gets tracked and worked like any other ticket." },
-        { "type": "new", "text": "Admins can reassign a ticket to any support agent from \"Who should take this\" inside the ticket, not just to the people it suggests." }
+        { "type": "new", "text": "Admins can reassign a ticket to any support agent from \"Who should take this\" inside the ticket, not just to the people it suggests." },
+        { "type": "fixed", "text": "A frozen SLA now really stops: when the freeze is lifted, the timer picks up exactly where it was instead of coming back overdue. The same fix applies to snoozes, Waiting on Contact, Jira links and Velma bugs." },
+        { "type": "fixed", "text": "Every ticket that was frozen, or came out of a freeze, gets a fresh SLA. Tickets still frozen stay frozen and get their full time when released." }
       ]
     },
     {
