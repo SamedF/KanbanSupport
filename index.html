@@ -9806,6 +9806,7 @@ let appBuildVersion='unknown';
 let jiraConnection={connected:false,baseUrl:'',browseBaseUrl:'',projectKey:'',email:'',emailMasked:'',authMode:'auto',hasApiToken:false,hasAccessToken:false,configuredVia:'none',canConfigure:false};
 let jiraIssueCache={};
 let jiraIssuesLoading=false;
+let jiraIssuesRerun=false;
 const DEFAULT_COOWNER_ID_MAPPINGS={
   '27996261':'VGU',
   '227118544':'VGU',
@@ -11823,21 +11824,30 @@ async function refreshJiraStatus(){
   if(btn)btn.classList.toggle('hidden', !jiraConnection.canConfigure);
 }
 async function refreshLinkedJiraIssues(force=false){
-  if(jiraIssuesLoading)return;
+  // A refresh asked for while one is out (a link made mid-fetch) runs again
+  // once it lands, rather than being dropped - the new key was not in the
+  // first request, and its card would say "Loading..." until the next minute.
+  if(jiraIssuesLoading){jiraIssuesRerun=true;return;}
   const keys=[...new Set(Object.values(ticketJira).map(canonicalJiraKey).filter(Boolean))];
   if(!keys.length)return;
   jiraIssuesLoading=true;
   try{
-    const out=await apiGetJiraIssues(keys);
+    const out=await apiGetJiraIssues(keys).catch(error=>({ok:false,error:String(error?.message||error)}));
     if(out?.browseBaseUrl)JIRA_URL=out.browseBaseUrl;
-    if(Array.isArray(out?.issues)){
+    if(Array.isArray(out?.issues)&&out.issues.length){
       out.issues.forEach(issue=>{if(issue?.key)jiraIssueCache[String(issue.key).trim().toUpperCase()]=issue;});
       processJiraReporterAlerts(out.issues);
       await applyJiraDrivenBoardUpdates(out.issues);
-      if(force)renderActiveView();
+    }else{
+      // Nothing came back: say why on the cards that have nothing yet, instead
+      // of "Loading..." for good. Details already shown are kept.
+      const why=out?.connected===false?'Jira is not connected - an admin can connect it in Jira settings.':`Could not reach Jira (${out?.error||'no answer'}).`;
+      keys.forEach(key=>{if(!jiraIssueCache[key]||jiraIssueCache[key].error)jiraIssueCache[key]={key,error:why};});
     }
+    if(force)renderActiveView();
   }finally{
     jiraIssuesLoading=false;
+    if(jiraIssuesRerun){jiraIssuesRerun=false;void refreshLinkedJiraIssues(true);}
   }
 }
 function refreshJiraOnVisibility(){

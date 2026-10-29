@@ -252,6 +252,7 @@ const JIRA_EMAIL = process.env.JIRA_EMAIL || process.env.JIRA_USER_EMAIL || '';
 const JIRA_API_TOKEN = process.env.JIRA_API_TOKEN || '';
 const JIRA_PROJECT_KEY = process.env.JIRA_PROJECT_KEY || '';
 const JIRA_ISSUE_TYPE = process.env.JIRA_ISSUE_TYPE || 'Task';
+const JIRA_REQUEST_TIMEOUT_MS = 10000;
 const TEAMS_EMAIL_DOMAIN = String(process.env.TEAMS_EMAIL_DOMAIN || 'quinta.im').trim().toLowerCase();
 const TEAMS_FALLBACK_EMAIL_DOMAIN = String(process.env.TEAMS_FALLBACK_EMAIL_DOMAIN || 'quicktext.im').trim().toLowerCase();
 const POWER_AUTOMATE_RESOLVED_WEBHOOK_URL = String(
@@ -1225,19 +1226,22 @@ async function jiraApiRequest(config, pathname, options = {}) {
   const url = `${config.baseUrl}${pathname.startsWith('/') ? '' : '/'}${pathname}`;
   const modes = config.authMode === 'basic'
     ? ['basic']
-    : (config.authMode === 'bearer' ? ['bearer'] : ['basic', 'bearer']);
+    : (config.authMode === 'bearer' ? ['bearer'] : (config.accessToken ? ['bearer', 'basic'] : ['basic', 'bearer']));
   let lastStatus = 0;
   let lastText = '';
   for (const mode of modes) {
     if (mode === 'basic' && (!config.email || !config.apiToken)) continue;
     if (mode === 'bearer' && !(config.accessToken || config.apiToken)) continue;
+    // Bounded: a Jira that never answers used to hold the board's details
+    // request open indefinitely, and the panel sat on "Loading..." for good.
     const response = await fetch(url, {
       method: options.method || 'GET',
       headers: {
         ...jiraAuthHeaders(config, mode),
         ...(options.headers || {})
       },
-      body: options.body
+      body: options.body,
+      signal: AbortSignal.timeout(JIRA_REQUEST_TIMEOUT_MS)
     });
     if (response.ok) {
       if (response.status === 204) return null;
@@ -1292,9 +1296,12 @@ function jiraIssueSummary(issue) {
 async function jiraFetchIssue(config, issueKey) {
   const key = normalizeJiraKey(issueKey);
   if (!key) throw new Error('missing_jira_issue_key');
+  // v2 first: it answers on Jira Cloud and on a self-hosted Jira alike, while a
+  // self-hosted one answers v3 with a 200 login page - a wasted round trip per
+  // issue before falling through to v2 anyway.
   const paths = [
-    `/rest/api/3/issue/${encodeURIComponent(key)}?fields=summary,status,assignee,reporter,issuelinks,comment`,
     `/rest/api/2/issue/${encodeURIComponent(key)}?fields=summary,status,assignee,reporter,issuelinks,comment`,
+    `/rest/api/3/issue/${encodeURIComponent(key)}?fields=summary,status,assignee,reporter,issuelinks,comment`,
     `/rest/api/latest/issue/${encodeURIComponent(key)}?fields=summary,status,assignee,reporter,issuelinks,comment`
   ];
   let lastError = null;
@@ -6326,15 +6333,20 @@ app.get('/api/jira/issues', requireAuth, async (req, res) => {
       .map(normalizeJiraKey)
       .filter(Boolean)
       .slice(0, 50);
-    const issues = [];
-    for (const key of keys) {
-      try {
-        const issue = await jiraFetchIssue(jira, key);
-        issues.push(issue);
-      } catch (error) {
-        issues.push({ key, error: String(error.message || error) });
+    // A few at a time rather than one after another: each issue is several
+    // round trips, and the board waits for the whole list.
+    const issues = new Array(keys.length);
+    let next = 0;
+    await Promise.all(Array.from({ length: Math.min(5, keys.length) }, async () => {
+      while (next < keys.length) {
+        const i = next++;
+        try {
+          issues[i] = await jiraFetchIssue(jira, keys[i]);
+        } catch (error) {
+          issues[i] = { key: keys[i], error: String(error.message || error) };
+        }
       }
-    }
+    }));
     return res.json({
       connected: true,
       browseBaseUrl: jira.browseBaseUrl,
