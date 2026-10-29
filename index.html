@@ -10919,7 +10919,9 @@ async function loadState(){
   if(s.ticketClientEmail)Object.assign(ticketClientEmail,s.ticketClientEmail);
   if(s.ticketCreatedAt)Object.assign(ticketCreatedAt,s.ticketCreatedAt);
   if(s.ticketSlaResetAt&&typeof s.ticketSlaResetAt==='object'){
-    Object.entries(s.ticketSlaResetAt).forEach(([k,v])=>{const at=Number(v||0);if(k&&at>0)ticketSlaResetAt[k]=at;});
+    // The later one, as the server merges it: a restart made here (a reassignment,
+    // a reply) whose save has not landed yet must not be pulled back by a reload.
+    Object.entries(s.ticketSlaResetAt).forEach(([k,v])=>{const at=Number(v||0);if(k&&at>Number(ticketSlaResetAt[k]||0))ticketSlaResetAt[k]=at;});
   }
   if(s.ticketCreatedBy&&typeof s.ticketCreatedBy==='object')Object.assign(ticketCreatedBy,s.ticketCreatedBy);
   if(s.ticketNumbers&&typeof s.ticketNumbers==='object')adoptServerTicketNumbers(s.ticketNumbers);
@@ -20055,6 +20057,8 @@ function renderEmContext(){
     if(source==='manual'){ticketAssignmentMode[id]='support';manualSupportOverride[id]=true;}
     pushUndo(`Assigned ${ticketDisplayNumber(id)} to ${agent}`,()=>restoreTicketState(before,['assignee']));
     renderActiveView();renderEmContext();
+    // The header names the owner and their SLA, which has just restarted.
+    if(emCurrentTicket?.id===id)emRenderMeta(emCurrentTicket);
     await saveState(reason);
     showToast('Assigned to '+agent,'ok');
   };
@@ -21478,29 +21482,12 @@ document.getElementById('em-reply-body')?.addEventListener('keydown',ev=>{
   if((ev.ctrlKey||ev.metaKey)&&ev.key==='Enter'){ev.preventDefault();emSendReply();}
 });
 
-async function openEmailModal(ticket){
+// The ticket header line: who sent it, when, who holds it and its SLA. Its own
+// function so a reassignment made from inside the ticket can redraw it -
+// built once on open, it kept showing the old owner and the old clock.
+function emRenderMeta(ticket){
   const{email,id}=ticket;const clientEmail=ticketClientEmail[id];
-  emCurrentTicket=ticket;
-  emResetReply(ticket);
-  // "Seen before" is the panel worth paying for up front - it is the one that
-  // changes what the agent writes. History waits until it is opened.
-  emResetContext(ticket);
-  emResetThread();
-  emLoadSimilar(id);
-  // The rest of the conversation, which used to be invisible unless the sender
-  // happened to quote it.
-  emLoadThread(ticket);
-  // Any translation belongs to the message that was open before. Clear it
-  // first, so nothing from the previous ticket can be reverted into this one.
-  trResetEmailState(id);
-  trRenderEmailBar();
-  // Warm the picker's "cached" markers from whatever the team already has.
-  trLoadCachedFor(id).then(()=>{if(emTrState.ticketId===id)trRenderEmailBar();});const hs=clientEmail?hsCache[clientEmail]:null;const isReply=isQuintaSender(email.sender)&&!!clientEmail;
-  document.getElementById('em-title').textContent=email.subject||'(no subject)';
-  // Always offered, and never a dead button: with a webLink it opens the
-  // message, without one it offers to create the mail that does not exist yet.
-  // See emOpenInOutlook.
-  emSyncOutlookButton(ticket);
+  const hs=clientEmail?hsCache[clientEmail]:null;const isReply=isQuintaSender(email.sender)&&!!clientEmail;
   const csOwner=ticketCSOwner[id]||null;
   const csMeta=csOwner?` · CS: ${esc(csOwner)}`:'';
   let metaHtml=isReply?`<span><strong>Client:</strong> ${esc(clientEmail)}</span><span><strong>Replied by:</strong> ${esc(email.sender)}</span>`:`<span><strong>From:</strong> ${esc(email.sender||'')}</span>`;
@@ -21528,6 +21515,32 @@ async function openEmailModal(ticket){
   if(ticketHubspotId[id])metaHtml+=`<span><strong>HubSpot Ticket:</strong> <a href="https://app.hubspot.com/contacts/25445053/record/0-5/${esc(ticketHubspotId[id])}" target="_blank" style="color:var(--teal-700);font-weight:700;text-decoration:none;"> ${esc(ticketHubspotId[id])}</a></span>`;
   if(hs?.companyName)metaHtml+=`<span><strong>Company:</strong> ${esc(hs.companyName)}${hs.inferredVia?'<span style="font-size:12px;color:var(--slate-400);font-style:italic;"> ~inferred</span>':''}${hs.companyUrl?` <a href="${esc(hs.companyUrl)}" target="_blank" style="color:var(--amber-500);font-size:13px;"> HubSpot</a>`:''}</span>`;
   document.getElementById('em-meta').innerHTML=metaHtml;
+}
+
+async function openEmailModal(ticket){
+  const{email,id}=ticket;const clientEmail=ticketClientEmail[id];
+  emCurrentTicket=ticket;
+  emResetReply(ticket);
+  // "Seen before" is the panel worth paying for up front - it is the one that
+  // changes what the agent writes. History waits until it is opened.
+  emResetContext(ticket);
+  emResetThread();
+  emLoadSimilar(id);
+  // The rest of the conversation, which used to be invisible unless the sender
+  // happened to quote it.
+  emLoadThread(ticket);
+  // Any translation belongs to the message that was open before. Clear it
+  // first, so nothing from the previous ticket can be reverted into this one.
+  trResetEmailState(id);
+  trRenderEmailBar();
+  // Warm the picker's "cached" markers from whatever the team already has.
+  trLoadCachedFor(id).then(()=>{if(emTrState.ticketId===id)trRenderEmailBar();});const hs=clientEmail?hsCache[clientEmail]:null;const isReply=isQuintaSender(email.sender)&&!!clientEmail;
+  document.getElementById('em-title').textContent=email.subject||'(no subject)';
+  // Always offered, and never a dead button: with a webLink it opens the
+  // message, without one it offers to create the mail that does not exist yet.
+  // See emOpenInOutlook.
+  emSyncOutlookButton(ticket);
+  emRenderMeta(ticket);
   // Manual tickets show description instead of fetching from Outlook
   if(email.isManual){
     document.getElementById('em-body').innerHTML=email.summary?`<div class="email-body-content" style="overflow-wrap:break-word;white-space:pre-wrap;">${esc(email.summary)}</div>`:'<div class="email-body-content"><em style="color:#64748b">No description provided.</em></div>';
