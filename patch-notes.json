@@ -9,7 +9,8 @@
         { "type": "new", "text": "Admins can reassign a ticket to any support agent from \"Who should take this\" inside the ticket, not just to the people it suggests." },
         { "type": "fixed", "text": "A frozen SLA now really stops: when the freeze is lifted, the timer picks up exactly where it was instead of coming back overdue. The same fix applies to snoozes, Waiting on Contact, Jira links and Velma bugs." },
         { "type": "fixed", "text": "Every ticket that was frozen, or came out of a freeze, gets a fresh SLA. Tickets still frozen stay frozen and get their full time when released." },
-        { "type": "fixed", "text": "Jira details on a card (status, assignee, reporter, comments) load again and much faster. If Jira can't be reached, the card now says so instead of showing \"Loading...\" forever." }
+        { "type": "fixed", "text": "Jira details on a card (status, assignee, reporter, comments) load again and much faster. If Jira can't be reached, the card now says so instead of showing \"Loading...\" forever." },
+        { "type": "new", "text": "Admins have an \"Update now\" button on the KPI page that recalculates the figures right away for everyone, without waiting for the next scheduled update." }
       ]
     },
     {

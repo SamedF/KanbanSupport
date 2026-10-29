@@ -8521,6 +8521,7 @@ th {
     <div style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--legacy-666);">
       <span id="kpi-freshness">-</span>
       <button class="btn-out" id="kpi-refresh-now" type="button" style="font-size:13px;padding:3px 9px;" title="Pulls again - the figures themselves only change at 00:00, 09:00, 12:00 and 16:00 (Tunisia time)">Refresh</button>
+      <button class="btn-out" id="kpi-force-update" type="button" style="font-size:13px;padding:3px 9px;" title="Recalculates the figures now from the current tickets, for everyone, without waiting for the next update" hidden>Update now</button>
       <button class="btn-out" id="kpi-day-report-btn" type="button" style="font-size:13px;padding:3px 9px;" title="Every ticket resolved on a day, by agent (Tunisia time)" hidden>Day report</button>
     </div>
   </div>
@@ -15171,6 +15172,7 @@ async function renderKpiView(opts){
   }
   const canViewAllTickets=canViewAllKpis;
   document.getElementById('kpi-day-report-btn').hidden=!canViewAllKpis;
+  document.getElementById('kpi-force-update').hidden=!canViewAllKpis;
   const agentFilterEl=document.getElementById('kpi-agent-filter');
   const teamFilterEl=document.getElementById('kpi-team-filter');
   populateKpiRangeOptions();
@@ -15746,6 +15748,26 @@ document.getElementById('qt-detect-clear').addEventListener('click',()=>{
   qtDetectRows=[];qtDetectRender();qtDetectSetStatus('Paste URLs to begin.');
 });
 document.getElementById('kpi-refresh-now').addEventListener('click',()=>{if(viewMode==='kpi')void renderKpiView({force:true});});
+// Admins: has the server retake the snapshot now, between checkpoints, then pulls it.
+document.getElementById('kpi-force-update').addEventListener('click',async()=>{
+  const btn=document.getElementById('kpi-force-update');
+  if(btn.disabled)return;
+  btn.disabled=true;
+  const label=btn.textContent;
+  btn.textContent='Updating...';
+  try{
+    const res=await fetch('/api/tickets/kpis/snapshot',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:'{}'});
+    const data=await res.json().catch(()=>({}));
+    if(!res.ok)throw new Error(data?.error||'kpi_snapshot_failed');
+    if(viewMode==='kpi')await renderKpiView({force:true});
+    showToast('KPIs updated','ok');
+  }catch(error){
+    showToast('Could not update the KPIs: '+(error?.message||error),'warn');
+  }finally{
+    btn.disabled=false;
+    btn.textContent=label;
+  }
+});
 // ---------------------------------------------------------------------------
 // Day report (admins): the tickets resolved on one day, Tunisia time, by
 // agent. Read live from the server, not from the KPI checkpoint, so a day

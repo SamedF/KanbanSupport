@@ -7443,6 +7443,18 @@ app.get('/api/tickets/my-resolved', requireAuth, async (req, res) => {
     return res.status(500).json({ error: 'read_my_resolved_failed' });
   }
 });
+/* Admins: retake the KPI snapshot now instead of waiting for the next
+   checkpoint. It replaces the current checkpoint's snapshot, so everyone reads
+   the new figures on their next pull, and the next checkpoint still runs. */
+app.post('/api/tickets/kpis/snapshot', requireAdmin, async (req, res) => {
+  try {
+    const snapshot = await takeKpiSnapshot(kpiCheckpointAtOrBefore());
+    return res.json({ ok: true, snapshot: kpiSnapshotInfo(snapshot) });
+  } catch (error) {
+    console.error('Forced KPI snapshot failed:', error);
+    return res.status(500).json({ error: String(error.message || error) });
+  }
+});
 /* Admins' day report: every ticket resolved on one calendar day (the SLA's
    zone, Tunisia time), by agent. Read live from the database rather than the
    KPI snapshot, so a day that has just ended reads complete without waiting
